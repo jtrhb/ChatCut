@@ -1,3 +1,7 @@
+// StateSerializer
+export { StateSerializer } from "./state-serializer";
+export type { AgentTimelineView } from "./state-serializer";
+
 // EditorCore
 export { EditorCore } from "./editor-core";
 export type { SerializedEditorState } from "./editor-core";
