@@ -5,6 +5,8 @@ import { project } from "./routes/project.js";
 import { events } from "./routes/events.js";
 import { media } from "./routes/media.js";
 import { status } from "./routes/status.js";
+import { chat } from "./routes/chat.js";
+import { changeset } from "./routes/changeset.js";
 
 export function createApp() {
   const app = new Hono();
@@ -18,6 +20,8 @@ export function createApp() {
   app.route("/events", events);
   app.route("/media", media);
   app.route("/status", status);
+  app.route("/chat", chat);
+  app.route("/changeset", changeset);
 
   return app;
 }
