@@ -4,6 +4,7 @@ import { TimelineManager } from "./managers/timeline-manager";
 import { ScenesManager } from "./managers/scenes-manager";
 import { SelectionManager } from "./managers/selection-manager";
 import { ProjectManager } from "./managers/project-manager";
+import { ChangeLog } from "./change-log";
 import type { Command } from "./commands/base-command";
 import type { TProject } from "./types/project";
 
@@ -28,6 +29,7 @@ export class EditorCore extends EventEmitter {
 	public readonly scenes: ScenesManager;
 	public readonly selection: SelectionManager;
 	public readonly project: ProjectManager;
+	public readonly changeLog: ChangeLog;
 
 	constructor() {
 		super();
@@ -36,6 +38,7 @@ export class EditorCore extends EventEmitter {
 		this.scenes = new ScenesManager(this);
 		this.selection = new SelectionManager(this);
 		this.project = new ProjectManager(this);
+		this.changeLog = new ChangeLog();
 	}
 
 	static getInstance(): EditorCore {

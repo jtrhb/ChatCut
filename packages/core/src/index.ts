@@ -2,6 +2,10 @@
 export { EditorCore } from "./editor-core";
 export type { SerializedEditorState } from "./editor-core";
 
+// ChangeLog
+export { ChangeLog } from "./change-log";
+export * from "./types/change-log";
+
 // Managers
 export { CommandManager } from "./managers/commands";
 export type { ExecuteOptions } from "./managers/commands";
