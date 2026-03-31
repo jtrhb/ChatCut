@@ -1,0 +1,21 @@
+{
+  "name": "@opencut/core",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.1"
+  },
+  "dependencies": {
+    "eventemitter3": "^5.0.1",
+    "nanoid": "^5.1.5"
+  }
+}
