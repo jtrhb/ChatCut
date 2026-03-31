@@ -1,0 +1,91 @@
+import { EditorCore } from "@opencut/core";
+import type { SerializedEditorState } from "@opencut/core";
+import type { Command } from "@opencut/core";
+
+/**
+ * ServerEditorCore wraps @opencut/core's EditorCore for server-side use.
+ *
+ * Provides:
+ * - Version gating via snapshotVersion / validateVersion()
+ * - Clone-for-atomicity support via clone()
+ * - Agent and human command dispatch with automatic version increment
+ */
+export class ServerEditorCore {
+  private readonly _core: EditorCore;
+  private _version: number;
+
+  // Private constructor — use static factory methods
+  private constructor(core: EditorCore, version: number) {
+    this._core = core;
+    this._version = version;
+  }
+
+  /**
+   * Create a ServerEditorCore from a serialized snapshot.
+   * @param data  Serialized editor state
+   * @param version  Snapshot version to start at (default 0)
+   */
+  static fromSnapshot(
+    data: SerializedEditorState,
+    version: number = 0
+  ): ServerEditorCore {
+    const core = EditorCore.deserialize(data);
+    return new ServerEditorCore(core, version);
+  }
+
+  /** Current snapshot version number. Increments on every command execution. */
+  get snapshotVersion(): number {
+    return this._version;
+  }
+
+  /** Access the underlying EditorCore instance. */
+  get editorCore(): EditorCore {
+    return this._core;
+  }
+
+  /**
+   * Validate that the current version matches the expected version.
+   * Throws "Stale snapshot version" if they don't match.
+   */
+  validateVersion(expectedVersion: number): void {
+    if (this._version !== expectedVersion) {
+      throw new Error(
+        `Stale snapshot version: expected ${expectedVersion}, got ${this._version}`
+      );
+    }
+  }
+
+  /**
+   * Execute an agent-originated command.
+   * Delegates to core.executeAgentCommand() then increments snapshotVersion.
+   */
+  executeAgentCommand(command: Command, agentId: string): void {
+    this._core.executeAgentCommand(command, agentId);
+    this._version++;
+  }
+
+  /**
+   * Execute a human-originated command.
+   * Delegates to core.executeCommand() then increments snapshotVersion.
+   */
+  executeHumanCommand(command: Command): void {
+    this._core.executeCommand(command);
+    this._version++;
+  }
+
+  /**
+   * Serialize the current editor state.
+   */
+  serialize(): SerializedEditorState {
+    return this._core.serialize();
+  }
+
+  /**
+   * Create a fully independent copy at the same version.
+   * Serializes then deserializes to ensure no shared references.
+   */
+  clone(): ServerEditorCore {
+    const state = this._core.serialize();
+    return ServerEditorCore.fromSnapshot(state, this._version);
+  }
+}
