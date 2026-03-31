@@ -1,0 +1,139 @@
+import { z } from "zod";
+import type { ToolDefinition } from "./types.js";
+
+// ── Shared sub-schemas ────────────────────────────────────────────────────────
+
+const ConstraintsSchema = z.object({
+  maxIterations: z.number().optional(),
+  timeoutMs: z.number().optional(),
+});
+
+const ContextSchema = z.record(z.string(), z.unknown());
+
+// ── Zod Schemas ──────────────────────────────────────────────────────────────
+
+export const DispatchVisionSchema = z.object({
+  task: z.string(),
+  context: ContextSchema.optional(),
+  constraints: ConstraintsSchema.optional(),
+});
+
+export const DispatchEditorSchema = z.object({
+  task: z.string(),
+  accessMode: z.enum(["read", "write", "read_write"]).default("read_write"),
+  context: ContextSchema.optional(),
+  constraints: ConstraintsSchema.optional(),
+});
+
+export const DispatchCreatorSchema = z.object({
+  task: z.string(),
+  context: ContextSchema.optional(),
+  constraints: ConstraintsSchema.optional(),
+});
+
+export const DispatchAudioSchema = z.object({
+  task: z.string(),
+  context: ContextSchema.optional(),
+});
+
+export const DispatchAssetSchema = z.object({
+  task: z.string(),
+  context: ContextSchema.optional(),
+});
+
+const CandidateSchema = z.object({
+  label: z.string(),
+  summary: z.string(),
+  candidateType: z.string(),
+  commands: z.array(z.unknown()),
+  expectedMetrics: z.object({
+    durationChange: z.string(),
+    affectedElements: z.number(),
+  }),
+});
+
+export const ExploreOptionsSchema = z.object({
+  intent: z.string(),
+  baseSnapshotVersion: z.number(),
+  timelineSnapshot: z.string(),
+  candidates: z.array(CandidateSchema).min(3).max(4),
+});
+
+export const ProposeChangesSchema = z.object({
+  summary: z.string(),
+  affectedElements: z.array(z.string()),
+});
+
+export const ExportVideoSchema = z.object({
+  format: z.string().default("mp4"),
+  quality: z.enum(["preview", "standard", "high"]).default("standard"),
+});
+
+// ── Tool Definitions ─────────────────────────────────────────────────────────
+
+export const masterToolDefinitions: ToolDefinition[] = [
+  {
+    name: "dispatch_vision",
+    description:
+      "Dispatch a task to the Vision sub-agent for visual analysis of the timeline or frames",
+    inputSchema: DispatchVisionSchema,
+    agentTypes: ["master"],
+    accessMode: "read",
+  },
+  {
+    name: "dispatch_editor",
+    description:
+      "Dispatch a task to the Editor sub-agent to read or mutate the timeline",
+    inputSchema: DispatchEditorSchema,
+    agentTypes: ["master"],
+    accessMode: "read_write",
+  },
+  {
+    name: "dispatch_creator",
+    description:
+      "Dispatch a task to the Creator sub-agent to generate AI video or image assets",
+    inputSchema: DispatchCreatorSchema,
+    agentTypes: ["master"],
+    accessMode: "read_write",
+  },
+  {
+    name: "dispatch_audio",
+    description:
+      "Dispatch a task to the Audio sub-agent to mix, analyse, or generate audio",
+    inputSchema: DispatchAudioSchema,
+    agentTypes: ["master"],
+    accessMode: "read_write",
+  },
+  {
+    name: "dispatch_asset",
+    description:
+      "Dispatch a task to the Asset sub-agent to search or retrieve media assets",
+    inputSchema: DispatchAssetSchema,
+    agentTypes: ["master"],
+    accessMode: "read",
+  },
+  {
+    name: "explore_options",
+    description:
+      "Present 3–4 candidate edit strategies to the user and capture their intent for a fan-out exploration",
+    inputSchema: ExploreOptionsSchema,
+    agentTypes: ["master"],
+    accessMode: "read",
+  },
+  {
+    name: "propose_changes",
+    description:
+      "Propose a set of timeline changes to the user for approval before they are applied",
+    inputSchema: ProposeChangesSchema,
+    agentTypes: ["master"],
+    accessMode: "write",
+  },
+  {
+    name: "export_video",
+    description:
+      "Trigger a video export job with the specified format and quality settings",
+    inputSchema: ExportVideoSchema,
+    agentTypes: ["master"],
+    accessMode: "read",
+  },
+];
