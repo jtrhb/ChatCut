@@ -91,6 +91,13 @@ export class SkillLoader {
       if (skill.agent_type) {
         frontmatter.agent_type = skill.agent_type as any;
       }
+      if (skill.allowed_tools) frontmatter.allowed_tools = skill.allowed_tools;
+      if (skill.denied_tools) frontmatter.denied_tools = skill.denied_tools;
+      if (skill.skill_model) frontmatter.model = skill.skill_model;
+      if (skill.effort) frontmatter.effort = skill.effort;
+      if (skill.when_to_use) frontmatter.when_to_use = skill.when_to_use;
+      if (skill.execution_context) frontmatter.execution_context = skill.execution_context;
+      if (skill.skill_hooks) frontmatter.hooks = skill.skill_hooks;
       return runtime.resolve(skill, frontmatter);
     });
   }
@@ -202,6 +209,22 @@ export class SkillLoader {
       mem.agent_type = String(fields.agent_type);
     if (fields.applies_to !== undefined)
       mem.applies_to = fields.applies_to as string[];
+
+    // Skill runtime frontmatter
+    if (fields.allowed_tools !== undefined)
+      mem.allowed_tools = fields.allowed_tools as string[];
+    if (fields.denied_tools !== undefined)
+      mem.denied_tools = fields.denied_tools as string[];
+    if (fields.model !== undefined)
+      mem.skill_model = String(fields.model);
+    if (fields.effort !== undefined)
+      mem.effort = fields.effort as ParsedMemory["effort"];
+    if (fields.when_to_use !== undefined)
+      mem.when_to_use = fields.when_to_use as string[];
+    if (fields.execution_context !== undefined)
+      mem.execution_context = fields.execution_context as ParsedMemory["execution_context"];
+    if (fields.hooks !== undefined)
+      mem.skill_hooks = fields.hooks as string[];
 
     return mem;
   }

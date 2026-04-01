@@ -376,4 +376,107 @@ describe("loadSkillsWithContracts()", () => {
     // No allowed_tools in frontmatter → gets all available tools
     expect(contracts[0].resolvedTools).toEqual(["trim_element", "split_element"]);
   });
+
+  it("allowed_tools frontmatter restricts resolvedTools", async () => {
+    const skill = makeSkill({
+      skill_id: "s-restricted",
+      agent_type: "editor",
+      allowed_tools: ["trim_element"],
+    });
+    const store = makeMockStore([skill]);
+
+    const loader = new SkillLoader(store as any);
+    const contracts = await loader.loadSkillsWithContracts(
+      "editor",
+      { brand: "testbrand" },
+      {
+        availableTools: ["trim_element", "split_element", "delete_element"],
+        defaultModel: "claude-sonnet-4-6",
+      }
+    );
+
+    expect(contracts).toHaveLength(1);
+    expect(contracts[0].resolvedTools).toEqual(["trim_element"]);
+  });
+
+  it("denied_tools frontmatter removes tools from resolvedTools", async () => {
+    const skill = makeSkill({
+      skill_id: "s-denied",
+      agent_type: "editor",
+      denied_tools: ["delete_element"],
+    });
+    const store = makeMockStore([skill]);
+
+    const loader = new SkillLoader(store as any);
+    const contracts = await loader.loadSkillsWithContracts(
+      "editor",
+      { brand: "testbrand" },
+      {
+        availableTools: ["trim_element", "split_element", "delete_element"],
+        defaultModel: "claude-sonnet-4-6",
+      }
+    );
+
+    expect(contracts).toHaveLength(1);
+    expect(contracts[0].resolvedTools).not.toContain("delete_element");
+    expect(contracts[0].resolvedTools).toContain("trim_element");
+  });
+
+  it("skill_model frontmatter overrides resolvedModel", async () => {
+    const skill = makeSkill({
+      skill_id: "s-model-override",
+      agent_type: "editor",
+      skill_model: "claude-haiku-4-5",
+    });
+    const store = makeMockStore([skill]);
+
+    const loader = new SkillLoader(store as any);
+    const contracts = await loader.loadSkillsWithContracts(
+      "editor",
+      { brand: "testbrand" },
+      {
+        availableTools: ["trim_element"],
+        defaultModel: "claude-sonnet-4-6",
+      }
+    );
+
+    expect(contracts).toHaveLength(1);
+    expect(contracts[0].resolvedModel).toBe("claude-haiku-4-5");
+  });
+
+  it("effort frontmatter affects resolvedTokenBudget", async () => {
+    const lowSkill = makeSkill({
+      skill_id: "s-low",
+      agent_type: "editor",
+      effort: "low",
+    });
+    const highSkill = makeSkill({
+      skill_id: "s-high",
+      agent_type: "editor",
+      effort: "high",
+      semantic_key: "high-skill",
+    });
+
+    // Test low effort
+    const storeLow = makeMockStore([lowSkill]);
+    const loaderLow = new SkillLoader(storeLow as any);
+    const contractsLow = await loaderLow.loadSkillsWithContracts(
+      "editor",
+      { brand: "testbrand" },
+      { availableTools: [], defaultModel: "claude-sonnet-4-6" }
+    );
+
+    // Test high effort
+    const storeHigh = makeMockStore([highSkill]);
+    const loaderHigh = new SkillLoader(storeHigh as any);
+    const contractsHigh = await loaderHigh.loadSkillsWithContracts(
+      "editor",
+      { brand: "testbrand" },
+      { availableTools: [], defaultModel: "claude-sonnet-4-6" }
+    );
+
+    expect(contractsLow[0].resolvedTokenBudget.output).toBeLessThan(
+      contractsHigh[0].resolvedTokenBudget.output
+    );
+  });
 });
