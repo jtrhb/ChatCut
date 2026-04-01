@@ -297,3 +297,83 @@ describe("SkillLoader.loadSystemPresets", () => {
     expect(result).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tests: loadSkillsWithContracts
+// ---------------------------------------------------------------------------
+
+describe("loadSkillsWithContracts()", () => {
+  it("returns SkillContracts with resolved tools and model", async () => {
+    const editorSkill = makeSkill({ skill_id: "s1", agent_type: "editor" });
+
+    const store = makeMockStore([editorSkill]);
+
+    const loader = new SkillLoader(store as any);
+    const contracts = await loader.loadSkillsWithContracts(
+      "editor",
+      { brand: "testbrand" },
+      {
+        availableTools: ["trim_element", "split_element"],
+        defaultModel: "claude-sonnet-4-6",
+      }
+    );
+
+    // If there are skills matching "editor", they should be SkillContracts
+    for (const contract of contracts) {
+      expect(contract).toHaveProperty("resolvedTools");
+      expect(contract).toHaveProperty("resolvedModel");
+      expect(contract).toHaveProperty("skillId");
+      expect(contract).toHaveProperty("content");
+    }
+  });
+
+  it("returns empty array when store is null (no store skills to resolve)", async () => {
+    const loader = new SkillLoader(null);
+    const contracts = await loader.loadSkillsWithContracts(
+      "editor",
+      { brand: "testbrand" },
+      {
+        availableTools: ["trim_element"],
+        defaultModel: "claude-sonnet-4-6",
+      }
+    );
+    expect(contracts).toEqual([]);
+  });
+
+  it("resolvedModel defaults to the provided defaultModel when skill has no model override", async () => {
+    const editorSkill = makeSkill({ skill_id: "s-model", agent_type: "editor" });
+    const store = makeMockStore([editorSkill]);
+
+    const loader = new SkillLoader(store as any);
+    const contracts = await loader.loadSkillsWithContracts(
+      "editor",
+      { brand: "testbrand" },
+      {
+        availableTools: ["trim_element"],
+        defaultModel: "claude-sonnet-4-6",
+      }
+    );
+
+    expect(contracts).toHaveLength(1);
+    expect(contracts[0].resolvedModel).toBe("claude-sonnet-4-6");
+  });
+
+  it("resolvedTools is filtered to availableTools list", async () => {
+    const editorSkill = makeSkill({ skill_id: "s-tools", agent_type: "editor" });
+    const store = makeMockStore([editorSkill]);
+
+    const loader = new SkillLoader(store as any);
+    const contracts = await loader.loadSkillsWithContracts(
+      "editor",
+      { brand: "testbrand" },
+      {
+        availableTools: ["trim_element", "split_element"],
+        defaultModel: "claude-sonnet-4-6",
+      }
+    );
+
+    expect(contracts).toHaveLength(1);
+    // No allowed_tools in frontmatter → gets all available tools
+    expect(contracts[0].resolvedTools).toEqual(["trim_element", "split_element"]);
+  });
+});

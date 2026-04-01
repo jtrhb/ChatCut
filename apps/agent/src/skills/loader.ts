@@ -3,6 +3,8 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import type { ParsedMemory } from "../memory/types.js";
 import type { MemoryStore } from "../memory/memory-store.js";
+import { SkillRuntime } from "./skill-runtime.js";
+import type { SkillContract, SkillFrontmatter } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PRESETS_DIR = join(__dirname, "presets");
@@ -70,6 +72,27 @@ export class SkillLoader {
       mainSkills: skills.filter((s) => s.skill_status === "validated"),
       trialSkills: skills.filter((s) => s.skill_status === "draft"),
     };
+  }
+
+  /**
+   * Load skills and resolve their frontmatter into SkillContract objects
+   * using SkillRuntime.
+   */
+  async loadSkillsWithContracts(
+    agentType: string,
+    params: { brand?: string; series?: string },
+    runtimeOpts: { availableTools: string[]; defaultModel: string },
+  ): Promise<SkillContract[]> {
+    const skills = await this.loadSkills(agentType, params);
+    const runtime = new SkillRuntime(runtimeOpts);
+
+    return skills.map((skill) => {
+      const frontmatter: SkillFrontmatter = {};
+      if (skill.agent_type) {
+        frontmatter.agent_type = skill.agent_type as any;
+      }
+      return runtime.resolve(skill, frontmatter);
+    });
   }
 
   /**
