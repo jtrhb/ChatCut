@@ -3,11 +3,14 @@ import type { AgentConfig, AgentResult } from "./types.js";
 
 export interface AgentRuntime {
   run(config: AgentConfig, input: string): Promise<AgentResult>;
+  setToolExecutor(fn: (name: string, input: unknown) => Promise<unknown>): void;
+  setOnTurnComplete?(fn: (tokens: { input: number; output: number }) => void): void;
 }
 
 export class NativeAPIRuntime implements AgentRuntime {
   private client: Anthropic;
   private toolExecutor: (name: string, input: unknown) => Promise<unknown>;
+  private onTurnComplete?: (tokens: { input: number; output: number }) => void;
 
   constructor(apiKey: string) {
     this.client = new Anthropic({ apiKey });
@@ -18,6 +21,10 @@ export class NativeAPIRuntime implements AgentRuntime {
 
   setToolExecutor(fn: (name: string, input: unknown) => Promise<unknown>): void {
     this.toolExecutor = fn;
+  }
+
+  setOnTurnComplete(fn: (tokens: { input: number; output: number }) => void): void {
+    this.onTurnComplete = fn;
   }
 
   async run(config: AgentConfig, input: string): Promise<AgentResult> {
@@ -51,6 +58,7 @@ export class NativeAPIRuntime implements AgentRuntime {
         );
         const text = textBlocks.map((b) => b.text).join("\n");
 
+        this.onTurnComplete?.({ input: totalInputTokens, output: totalOutputTokens });
         return {
           text,
           toolCalls,
@@ -70,6 +78,7 @@ export class NativeAPIRuntime implements AgentRuntime {
         );
         const text = textBlocks.map((b) => b.text).join("\n");
 
+        this.onTurnComplete?.({ input: totalInputTokens, output: totalOutputTokens });
         return {
           text,
           toolCalls,
@@ -97,6 +106,7 @@ export class NativeAPIRuntime implements AgentRuntime {
     }
 
     // Max iterations reached
+    this.onTurnComplete?.({ input: totalInputTokens, output: totalOutputTokens });
     return {
       text: "Max iterations reached",
       toolCalls,

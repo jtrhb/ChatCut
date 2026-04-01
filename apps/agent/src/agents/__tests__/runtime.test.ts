@@ -195,4 +195,26 @@ describe("NativeAPIRuntime", () => {
     expect(result.tokensUsed.input).toBe(35);   // 15 + 20
     expect(result.tokensUsed.output).toBe(55);  // 25 + 30
   });
+
+  describe("session-aware run", () => {
+    it("calls onTurnComplete callback with token usage after each turn", async () => {
+      mockCreate.mockResolvedValueOnce(makeEndTurnResponse("Done"));
+
+      const onTurnComplete = vi.fn();
+      runtime.setOnTurnComplete(onTurnComplete);
+
+      await runtime.run(baseConfig, "Hello");
+
+      expect(onTurnComplete).toHaveBeenCalledWith({
+        input: expect.any(Number),
+        output: expect.any(Number),
+      });
+    });
+
+    it("does not fail when onTurnComplete is not set", async () => {
+      mockCreate.mockResolvedValueOnce(makeEndTurnResponse("Done"));
+      const result = await runtime.run(baseConfig, "Hello");
+      expect(result.text).toBe("Done");
+    });
+  });
 });
