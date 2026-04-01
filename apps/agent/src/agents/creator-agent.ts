@@ -3,6 +3,9 @@ import type { AgentConfig, DispatchInput, DispatchOutput } from "./types.js";
 import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
 import { creatorToolDefinitions } from "../tools/creator-tools.js";
 import type { ToolDefinition } from "../tools/types.js";
+import { PromptBuilder } from "../prompt/prompt-builder.js";
+import { identitySection, taskSection } from "../prompt/sections.js";
+import type { PromptContext } from "../prompt/types.js";
 
 export class CreatorAgent {
   private toolExecutor: (name: string, input: unknown) => Promise<unknown>;
@@ -36,24 +39,23 @@ export class CreatorAgent {
   }
 
   buildSystemPrompt(input: DispatchInput): string {
-    const lines: string[] = [
-      "You are the Creator Agent. Your job is to generate video/image content.",
-      "",
-      "## Rules",
-      "- Use generate_video or generate_image to create new AI-generated media.",
-      "- Poll check_generation_status until the generation is complete.",
-      "- Use replace_segment to place generated content into the timeline.",
-      "- Use compare_before_after to verify the result looks correct.",
-      "",
-      "## Task",
-      input.task,
-    ];
-
-    if (input.context && Object.keys(input.context).length > 0) {
-      lines.push("", "## Context", JSON.stringify(input.context, null, 2));
-    }
-
-    return lines.join("\n");
+    const builder = new PromptBuilder({ builtins: false });
+    builder.register(identitySection);
+    builder.register(taskSection);
+    const promptCtx: PromptContext = {
+      agentIdentity: {
+        role: "Creator Agent",
+        description: "You generate video and image content using AI generation tools.",
+        rules: [
+          "Use generate_video or generate_image to create new AI-generated media.",
+          "Poll check_generation_status until the generation is complete.",
+          "Use replace_segment to place generated content into the timeline.",
+          "Use compare_before_after to verify the result looks correct.",
+        ],
+      },
+      task: input,
+    };
+    return builder.build(promptCtx);
   }
 
   private formatTools(): unknown[] {

@@ -19,6 +19,7 @@ export const timelineSection: PromptSection = {
   priority: 10,
   isStatic: false,
   render: (ctx: PromptContext): string => {
+    if (!ctx.projectContext) return "";
     const { timelineState, snapshotVersion } = ctx.projectContext;
     const lines = [
       "## Current Timeline State",
@@ -35,6 +36,7 @@ export const memorySection: PromptSection = {
   priority: 20,
   isStatic: false,
   render: (ctx: PromptContext): string => {
+    if (!ctx.projectContext) return "";
     const { promptText, injectedMemoryIds } = ctx.projectContext.memoryContext;
     if (!promptText) return "";
     const lines = ["## Memory Context", promptText];

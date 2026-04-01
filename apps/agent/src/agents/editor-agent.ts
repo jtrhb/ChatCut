@@ -4,6 +4,7 @@ import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
 import { EDITOR_TOOL_DEFINITIONS } from "../tools/editor-tools.js";
 import type { ToolDefinition } from "../tools/types.js";
 import { PromptBuilder } from "../prompt/prompt-builder.js";
+import { identitySection, taskSection } from "../prompt/sections.js";
 import type { PromptContext } from "../prompt/types.js";
 
 export class EditorAgent {
@@ -38,17 +39,10 @@ export class EditorAgent {
   }
 
   buildSystemPrompt(input: DispatchInput): string {
-    const builder = new PromptBuilder();
+    const builder = new PromptBuilder({ builtins: false });
+    builder.register(identitySection);
+    builder.register(taskSection);
     const promptCtx: PromptContext = {
-      projectContext: {
-        timelineState: "",
-        snapshotVersion: 0,
-        videoAnalysis: null,
-        currentIntent: { raw: "", parsed: "", explorationMode: false },
-        memoryContext: { promptText: "", injectedMemoryIds: [], injectedSkillIds: [] },
-        artifacts: {},
-        recentChanges: [],
-      },
       agentIdentity: {
         role: "Editor Agent",
         description: "You modify the video timeline using editing tools.",

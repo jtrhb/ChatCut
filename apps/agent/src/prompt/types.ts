@@ -15,7 +15,8 @@ export interface PromptSection {
 
 /** Everything a prompt section might need to render. */
 export interface PromptContext {
-  projectContext: Readonly<ProjectContext>;
+  /** Project runtime context. Required when using built-in timeline/memory/recentChanges sections. */
+  projectContext?: Readonly<ProjectContext>;
   agentIdentity: AgentIdentity;
   task?: DispatchInput;
   extras?: Record<string, unknown>;

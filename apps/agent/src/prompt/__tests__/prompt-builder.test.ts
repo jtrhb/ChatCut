@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { PromptBuilder } from "../prompt-builder.js";
+import { identitySection, taskSection } from "../sections.js";
 import type { PromptContext, PromptSection } from "../types.js";
 
 function makeContext(overrides: Partial<PromptContext> = {}): PromptContext {
@@ -114,6 +115,38 @@ describe("PromptBuilder", () => {
       const result = builder.build(makeContext());
       // Should not have excessive blank lines from empty section
       expect(result).not.toMatch(/\n{4,}/);
+    });
+  });
+
+  describe("constructor options", () => {
+    it("starts with no sections when builtins is false", () => {
+      const builder = new PromptBuilder({ builtins: false });
+      const result = builder.build(makeContext());
+      // Only trailing newline from empty render
+      expect(result.trim()).toBe("");
+    });
+
+    it("allows registering individual sections when builtins is false", () => {
+      const builder = new PromptBuilder({ builtins: false });
+      builder.register(identitySection);
+      builder.register(taskSection);
+      const ctx = makeContext({
+        task: { task: "Do something", accessMode: "read" },
+      });
+      const result = builder.build(ctx);
+      expect(result).toContain("# Test Agent");
+      expect(result).toContain("## Task");
+      expect(result).toContain("Do something");
+      // Should NOT contain timeline or memory (not registered)
+      expect(result).not.toContain("## Current Timeline State");
+      expect(result).not.toContain("## Memory Context");
+    });
+
+    it("includes all built-in sections by default", () => {
+      const builder = new PromptBuilder();
+      const result = builder.build(makeContext());
+      expect(result).toContain("# Test Agent");
+      expect(result).toContain("## Current Timeline State");
     });
   });
 });

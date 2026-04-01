@@ -1,13 +1,21 @@
 import type { PromptSection, PromptContext } from "./types.js";
 import { BUILTIN_SECTIONS } from "./sections.js";
 
+export interface PromptBuilderOptions {
+  /** When false, no built-in sections are registered. Defaults to true. */
+  builtins?: boolean;
+}
+
 export class PromptBuilder {
   private sections: PromptSection[] = [];
 
-  constructor() {
-    // Register built-in sections
-    for (const section of BUILTIN_SECTIONS) {
-      this.sections.push(section);
+  constructor(options: PromptBuilderOptions = {}) {
+    const { builtins = true } = options;
+    if (builtins) {
+      // Register built-in sections
+      for (const section of BUILTIN_SECTIONS) {
+        this.sections.push(section);
+      }
     }
   }
 

@@ -3,6 +3,9 @@ import type { AgentConfig, DispatchInput, DispatchOutput } from "./types.js";
 import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
 import { assetToolDefinitions } from "../tools/asset-tools.js";
 import type { ToolDefinition } from "../tools/types.js";
+import { PromptBuilder } from "../prompt/prompt-builder.js";
+import { identitySection, taskSection } from "../prompt/sections.js";
+import type { PromptContext } from "../prompt/types.js";
 
 export class AssetAgent {
   private toolExecutor: (name: string, input: unknown) => Promise<unknown>;
@@ -36,26 +39,25 @@ export class AssetAgent {
   }
 
   buildSystemPrompt(input: DispatchInput): string {
-    const lines: string[] = [
-      "You are the Asset Agent. Your job is to manage media assets.",
-      "",
-      "## Rules",
-      "- Use search_assets to find existing assets before saving new ones.",
-      "- Use get_asset_info to retrieve full metadata for a specific asset.",
-      "- Use save_asset to persist newly generated or uploaded media.",
-      "- Use tag_asset to categorize assets for future retrieval.",
-      "- Use find_similar to locate visually or semantically related assets.",
-      "- Use get_character and get_brand_assets for identity-consistent content.",
-      "",
-      "## Task",
-      input.task,
-    ];
-
-    if (input.context && Object.keys(input.context).length > 0) {
-      lines.push("", "## Context", JSON.stringify(input.context, null, 2));
-    }
-
-    return lines.join("\n");
+    const builder = new PromptBuilder({ builtins: false });
+    builder.register(identitySection);
+    builder.register(taskSection);
+    const promptCtx: PromptContext = {
+      agentIdentity: {
+        role: "Asset Agent",
+        description: "You manage media assets — search, save, tag, and retrieve.",
+        rules: [
+          "Use search_assets to find existing assets before saving new ones.",
+          "Use get_asset_info to retrieve full metadata for a specific asset.",
+          "Use save_asset to persist newly generated or uploaded media.",
+          "Use tag_asset to categorize assets for future retrieval.",
+          "Use find_similar to locate visually or semantically related assets.",
+          "Use get_character and get_brand_assets for identity-consistent content.",
+        ],
+      },
+      task: input,
+    };
+    return builder.build(promptCtx);
   }
 
   private formatTools(): unknown[] {
