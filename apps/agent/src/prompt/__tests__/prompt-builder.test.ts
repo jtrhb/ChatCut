@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { PromptBuilder } from "../prompt-builder.js";
 import { identitySection, taskSection } from "../sections.js";
+import { delegationContractSection } from "../delegation-contract.js";
 import type { PromptContext, PromptSection } from "../types.js";
 
 function makeContext(overrides: Partial<PromptContext> = {}): PromptContext {
@@ -147,6 +148,66 @@ describe("PromptBuilder", () => {
       const result = builder.build(makeContext());
       expect(result).toContain("# Test Agent");
       expect(result).toContain("## Current Timeline State");
+    });
+  });
+
+  describe("delegationContractSection", () => {
+    it("renders non-empty content", () => {
+      const content = delegationContractSection.render(makeContext());
+      expect(content.length).toBeGreaterThan(0);
+    });
+
+    it("renders the contract heading", () => {
+      const content = delegationContractSection.render(makeContext());
+      expect(content).toContain("## Sub-Agent Delegation Contract");
+    });
+
+    it("covers When to Dispatch", () => {
+      const content = delegationContractSection.render(makeContext());
+      expect(content).toContain("When to Dispatch");
+    });
+
+    it("covers Writing the Task Description", () => {
+      const content = delegationContractSection.render(makeContext());
+      expect(content).toContain("Writing the Task Description");
+    });
+
+    it("covers Dispatch Rules", () => {
+      const content = delegationContractSection.render(makeContext());
+      expect(content).toContain("Dispatch Rules");
+    });
+
+    it("covers Handling Sub-Agent Results", () => {
+      const content = delegationContractSection.render(makeContext());
+      expect(content).toContain("Handling Sub-Agent Results");
+    });
+
+    it("covers Destructive Operations", () => {
+      const content = delegationContractSection.render(makeContext());
+      expect(content).toContain("Destructive Operations");
+    });
+
+    it("has priority 15 and isStatic true", () => {
+      expect(delegationContractSection.priority).toBe(15);
+      expect(delegationContractSection.isStatic).toBe(true);
+    });
+
+    it("MasterAgent buildSystemPrompt includes delegation contract text", async () => {
+      const { MasterAgent } = await import("../../agents/master-agent.js");
+      // Minimal stubs
+      const fakeRuntime = { setToolExecutor: () => {} } as any;
+      const fakeCtx = makeContext().projectContext!;
+      const fakeContextManager = { get: () => fakeCtx } as any;
+      const fakeLock = { acquire: async () => {}, release: () => {} } as any;
+      const agent = new MasterAgent({
+        runtime: fakeRuntime,
+        contextManager: fakeContextManager,
+        writeLock: fakeLock,
+        subAgentDispatchers: new Map(),
+      });
+      const prompt = agent.buildSystemPrompt(fakeCtx as any);
+      expect(prompt).toContain("## Sub-Agent Delegation Contract");
+      expect(prompt).toContain("When to Dispatch");
     });
   });
 });

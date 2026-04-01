@@ -13,6 +13,7 @@ import { masterToolDefinitions } from "../tools/master-tools.js";
 import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
 import { PromptBuilder } from "../prompt/prompt-builder.js";
 import type { PromptContext } from "../prompt/types.js";
+import { delegationContractSection } from "../prompt/delegation-contract.js";
 
 // ---------------------------------------------------------------------------
 // Tool-name → sub-agent mapping
@@ -75,6 +76,7 @@ export class MasterAgent {
 
   buildSystemPrompt(ctx: Readonly<ProjectContext>): string {
     const builder = new PromptBuilder();
+    builder.register(delegationContractSection);
     const promptCtx: PromptContext = {
       projectContext: ctx,
       agentIdentity: {
@@ -84,8 +86,7 @@ export class MasterAgent {
           "You coordinate sub-agents (editor, vision, creator, audio, asset) to fulfill user requests.",
         rules: [
           "Analyze the user's intent before dispatching to sub-agents.",
-          "Use dispatch tools to delegate tasks to specialist agents.",
-          "Never guess sub-agent results — wait for their response.",
+          "Follow the Sub-Agent Delegation Contract exactly.",
           "For destructive edits, use propose_changes to get user approval first.",
         ],
       },
