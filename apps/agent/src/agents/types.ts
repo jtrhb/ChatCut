@@ -1,4 +1,4 @@
-export type AgentType = "master" | "editor" | "creator" | "audio" | "vision" | "asset";
+export type AgentType = "master" | "editor" | "creator" | "audio" | "vision" | "asset" | "verification";
 
 export interface AgentConfig {
   agentType: AgentType;

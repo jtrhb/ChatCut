@@ -1,12 +1,6 @@
 import { z } from "zod";
 
-export type AgentType =
-  | "master"
-  | "editor"
-  | "creator"
-  | "audio"
-  | "vision"
-  | "asset";
+export type { AgentType } from "../agents/types.js";
 
 export interface ToolDefinition {
   name: string;

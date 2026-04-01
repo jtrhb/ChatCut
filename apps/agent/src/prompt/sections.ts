@@ -53,6 +53,7 @@ export const recentChangesSection: PromptSection = {
   priority: 30,
   isStatic: false,
   render: (ctx: PromptContext): string => {
+    if (!ctx.projectContext) return "";
     const { recentChanges } = ctx.projectContext;
     if (recentChanges.length === 0) return "";
     const lines = ["## Recent Changes"];

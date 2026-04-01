@@ -25,7 +25,7 @@ export class VerificationAgent {
     runtime.setToolExecutor(this.toolExecutor);
 
     const config: AgentConfig = {
-      agentType: "master",
+      agentType: "verification",
       model: "claude-haiku-4-5",
       system: this.buildSystemPrompt(input),
       tools: [],
