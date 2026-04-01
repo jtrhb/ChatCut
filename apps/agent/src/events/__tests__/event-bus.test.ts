@@ -87,6 +87,19 @@ describe("EventBus", () => {
     expect(handler).toHaveBeenCalledTimes(2); // no new calls after unsubscribe
   });
 
+  // NEW: handler safety — one throwing handler must not block others
+  it("continues delivering to other handlers when one throws", () => {
+    const badHandler = vi.fn(() => { throw new Error("boom"); });
+    const goodHandler = vi.fn();
+    bus.on("tool.called", badHandler);
+    bus.on("tool.called", goodHandler);
+
+    bus.emit({ type: "tool.called", timestamp: Date.now(), data: {} });
+
+    expect(badHandler).toHaveBeenCalled();
+    expect(goodHandler).toHaveBeenCalled();
+  });
+
   // 6. history stores last N events (ring buffer, test with historySize: 3)
   it("history acts as a ring buffer respecting historySize", () => {
     const smallBus = new EventBus({ historySize: 3 });

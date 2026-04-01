@@ -40,7 +40,7 @@ export class EventBus {
     const typeHandlers = this.handlers.get(event.type);
     if (typeHandlers) {
       for (const handler of typeHandlers) {
-        handler(event);
+        try { handler(event); } catch { /* handler error must not break pipeline */ }
       }
     }
 
@@ -48,7 +48,7 @@ export class EventBus {
     const wildcardHandlers = this.handlers.get("*");
     if (wildcardHandlers) {
       for (const handler of wildcardHandlers) {
-        handler(event);
+        try { handler(event); } catch { /* handler error must not break pipeline */ }
       }
     }
   }
