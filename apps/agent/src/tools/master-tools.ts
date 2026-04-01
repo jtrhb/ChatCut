@@ -69,6 +69,11 @@ export const ExportVideoSchema = z.object({
   quality: z.enum(["preview", "standard", "high"]).default("standard"),
 });
 
+const DispatchVerificationSchema = z.object({
+  task: z.string().describe("What to verify — include user intent, agent result, and affected elements"),
+  context: z.record(z.unknown()).optional().describe("Verification context"),
+});
+
 // ── Tool Definitions ─────────────────────────────────────────────────────────
 
 export const masterToolDefinitions: ToolDefinition[] = [
@@ -135,5 +140,13 @@ export const masterToolDefinitions: ToolDefinition[] = [
     inputSchema: ExportVideoSchema,
     agentTypes: ["master"],
     accessMode: "read",
+  },
+  {
+    name: "dispatch_verification",
+    description:
+      "Dispatch the Verification Agent to check if an edit/generation result matches the user's intent. Use after high-cost operations before committing.",
+    inputSchema: DispatchVerificationSchema,
+    agentTypes: ["master"],
+    accessMode: "read" as const,
   },
 ];

@@ -309,8 +309,8 @@ describe("Master Tool Schemas", () => {
 // ── Tool Definition Tests ────────────────────────────────────────────────────
 
 describe("masterToolDefinitions", () => {
-  it("defines exactly 8 tools", () => {
-    expect(masterToolDefinitions).toHaveLength(8);
+  it("defines exactly 9 tools", () => {
+    expect(masterToolDefinitions).toHaveLength(9);
   });
 
   it("all tools are restricted to master agent only", () => {
@@ -368,7 +368,7 @@ describe("masterToolDefinitions", () => {
     const dispatchTools = masterToolDefinitions.filter((t) =>
       t.name.startsWith("dispatch_")
     );
-    expect(dispatchTools).toHaveLength(5);
+    expect(dispatchTools).toHaveLength(6);
     for (const tool of dispatchTools) {
       const result = tool.inputSchema.safeParse({ task: "Do something" });
       expect(result.success).toBe(true);
