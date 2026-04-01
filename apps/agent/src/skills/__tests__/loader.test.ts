@@ -480,3 +480,108 @@ describe("loadSkillsWithContracts()", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tests: loadAllSkillContracts
+// ---------------------------------------------------------------------------
+
+const EDITOR_PRESET_WITH_TOOLS_RAW = `---
+skill_id: skill_preset_beat_sync_tools
+skill_status: validated
+agent_type: editor
+semantic_key: beat-sync-tools
+allowed_tools: ["trim_element","split_element"]
+effort: medium
+---
+
+# Beat-Sync Editing
+
+Cut on the beat.`;
+
+describe("loadAllSkillContracts()", () => {
+  it("combines store and preset skills through same contract resolve", async () => {
+    const storeSkill = makeSkill({
+      skill_id: "store-skill-1",
+      agent_type: "editor",
+      semantic_key: "store-skill",
+    });
+    const store = makeMockStore([storeSkill]);
+
+    const loader = new TestableSkillLoader(store as any, [
+      { file: "editor-beat-sync.md", content: EDITOR_PRESET_RAW },
+    ]);
+
+    const contracts = await loader.loadAllSkillContracts(
+      "editor",
+      { brand: "testbrand" },
+      { availableTools: ["trim_element", "split_element"], defaultModel: "claude-sonnet-4-6" },
+    );
+
+    // Should contain both the store skill and the preset skill
+    expect(contracts.length).toBe(2);
+    const ids = contracts.map((c) => c.skillId);
+    expect(ids).toContain("store-skill-1");
+    expect(ids).toContain("skill_preset_beat_sync");
+  });
+
+  it("store and preset skills produce consistent contract shape", async () => {
+    const storeSkill = makeSkill({
+      skill_id: "shape-store",
+      agent_type: "editor",
+      allowed_tools: ["trim_element"],
+    });
+    const store = makeMockStore([storeSkill]);
+
+    const loader = new TestableSkillLoader(store as any, [
+      { file: "editor-beat-sync-tools.md", content: EDITOR_PRESET_WITH_TOOLS_RAW },
+    ]);
+
+    const contracts = await loader.loadAllSkillContracts(
+      "editor",
+      { brand: "testbrand" },
+      { availableTools: ["trim_element", "split_element"], defaultModel: "claude-sonnet-4-6" },
+    );
+
+    expect(contracts.length).toBe(2);
+    for (const contract of contracts) {
+      expect(contract).toHaveProperty("skillId");
+      expect(contract).toHaveProperty("name");
+      expect(contract).toHaveProperty("content");
+      expect(contract).toHaveProperty("resolvedTools");
+      expect(contract).toHaveProperty("resolvedModel");
+      expect(contract).toHaveProperty("resolvedTokenBudget");
+      expect(contract).toHaveProperty("frontmatter");
+      expect(Array.isArray(contract.resolvedTools)).toBe(true);
+    }
+  });
+
+  it("returns only preset contracts when store is null", async () => {
+    const loader = new TestableSkillLoader(null, [
+      { file: "editor-beat-sync.md", content: EDITOR_PRESET_RAW },
+      { file: "audio-ducking.md", content: AUDIO_PRESET_RAW },
+    ]);
+
+    const contracts = await loader.loadAllSkillContracts(
+      "editor",
+      {},
+      { availableTools: ["trim_element"], defaultModel: "claude-sonnet-4-6" },
+    );
+
+    expect(contracts.length).toBe(1);
+    expect(contracts[0].skillId).toBe("skill_preset_beat_sync");
+  });
+
+  it("returns empty array when no skills and no presets match", async () => {
+    const loader = new TestableSkillLoader(null, [
+      { file: "audio-ducking.md", content: AUDIO_PRESET_RAW },
+    ]);
+
+    const contracts = await loader.loadAllSkillContracts(
+      "editor",
+      {},
+      { availableTools: ["trim_element"], defaultModel: "claude-sonnet-4-6" },
+    );
+
+    expect(contracts).toEqual([]);
+  });
+});

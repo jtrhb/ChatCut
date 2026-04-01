@@ -86,20 +86,28 @@ export class SkillLoader {
     const skills = await this.loadSkills(agentType, params);
     const runtime = new SkillRuntime(runtimeOpts);
 
-    return skills.map((skill) => {
-      const frontmatter: SkillFrontmatter = {};
-      if (skill.agent_type) {
-        frontmatter.agent_type = skill.agent_type as SkillFrontmatter["agent_type"];
-      }
-      if (skill.allowed_tools) frontmatter.allowed_tools = skill.allowed_tools;
-      if (skill.denied_tools) frontmatter.denied_tools = skill.denied_tools;
-      if (skill.skill_model) frontmatter.model = skill.skill_model;
-      if (skill.effort) frontmatter.effort = skill.effort;
-      if (skill.when_to_use) frontmatter.when_to_use = skill.when_to_use;
-      if (skill.execution_context) frontmatter.execution_context = skill.execution_context;
-      if (skill.skill_hooks) frontmatter.hooks = skill.skill_hooks;
-      return runtime.resolve(skill, frontmatter);
-    });
+    return skills.map((skill) => runtime.resolve(skill, this.buildFrontmatter(skill)));
+  }
+
+  /**
+   * Load both store skills and system presets, resolve all through SkillRuntime,
+   * and return a unified array of SkillContract objects.
+   */
+  async loadAllSkillContracts(
+    agentType: string,
+    params: { brand?: string; series?: string },
+    runtimeOpts: { availableTools: string[]; defaultModel: string },
+  ): Promise<SkillContract[]> {
+    const runtime = new SkillRuntime(runtimeOpts);
+
+    const [storeSkills, presetSkills] = await Promise.all([
+      this.loadSkills(agentType, params),
+      this.loadSystemPresets(agentType),
+    ]);
+
+    const allSkills = [...storeSkills, ...presetSkills];
+
+    return allSkills.map((skill) => runtime.resolve(skill, this.buildFrontmatter(skill)));
   }
 
   /**
@@ -129,6 +137,20 @@ export class SkillLoader {
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  /** Map a ParsedMemory's skill fields to a SkillFrontmatter object. */
+  private buildFrontmatter(skill: ParsedMemory): SkillFrontmatter {
+    const frontmatter: SkillFrontmatter = {};
+    if (skill.agent_type) frontmatter.agent_type = skill.agent_type as SkillFrontmatter["agent_type"];
+    if (skill.allowed_tools) frontmatter.allowed_tools = skill.allowed_tools;
+    if (skill.denied_tools) frontmatter.denied_tools = skill.denied_tools;
+    if (skill.skill_model) frontmatter.model = skill.skill_model;
+    if (skill.effort) frontmatter.effort = skill.effort;
+    if (skill.when_to_use) frontmatter.when_to_use = skill.when_to_use;
+    if (skill.execution_context) frontmatter.execution_context = skill.execution_context;
+    if (skill.skill_hooks) frontmatter.hooks = skill.skill_hooks;
+    return frontmatter;
+  }
 
   private buildSkillPaths(params: { brand?: string; series?: string }): string[] {
     const paths: string[] = [];

@@ -279,6 +279,38 @@ describe("MasterAgent", () => {
     expect(config.system).toContain('{"tracks":[]}'); // timeline state included
   });
 
+  // ── 14. active skills in system prompt ───────────────────────────────────
+  it("includes active skills in system prompt when skillContracts provided", () => {
+    const agentWithSkills = new MasterAgent({
+      runtime: runtime as any,
+      contextManager,
+      writeLock,
+      subAgentDispatchers: dispatchers,
+      skillContracts: [
+        {
+          skillId: "beat-sync",
+          name: "beat-sync-skill",
+          frontmatter: { effort: "medium" },
+          content: "Cut on beat drops.",
+          resolvedTools: ["trim_element", "split_element"],
+          resolvedTokenBudget: { input: 30000, output: 4000 },
+          resolvedModel: "claude-sonnet-4-6",
+        },
+      ],
+    });
+
+    const prompt = agentWithSkills.buildSystemPrompt(contextManager.get());
+    expect(prompt).toContain("## Active Skills");
+    expect(prompt).toContain("beat-sync-skill");
+    expect(prompt).toContain("Cut on beat drops.");
+    expect(prompt).toContain("trim_element");
+  });
+
+  it("does not include Active Skills section when no skillContracts provided", () => {
+    const prompt = agent.buildSystemPrompt(contextManager.get());
+    expect(prompt).not.toContain("## Active Skills");
+  });
+
   // ── Pipeline integration ────────────────────────────────────────────────
 
   describe("ToolPipeline integration", () => {

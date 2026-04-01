@@ -16,6 +16,8 @@ import type { PromptContext } from "../prompt/types.js";
 import { delegationContractSection } from "../prompt/delegation-contract.js";
 import { ToolPipeline } from "../tools/tool-pipeline.js";
 import type { ToolHook } from "../tools/hooks.js";
+import { SkillRuntime } from "../skills/skill-runtime.js";
+import type { SkillContract } from "../skills/types.js";
 
 // ---------------------------------------------------------------------------
 // Tool-name → sub-agent mapping
@@ -41,6 +43,7 @@ export class MasterAgent {
   private writeLock: ProjectWriteLock;
   private subAgentDispatchers: Map<string, (input: DispatchInput) => Promise<DispatchOutput>>;
   private pipeline: ToolPipeline;
+  private skillContracts: SkillContract[];
 
   constructor(deps: {
     runtime: AgentRuntime;
@@ -48,11 +51,13 @@ export class MasterAgent {
     writeLock: ProjectWriteLock;
     subAgentDispatchers: Map<string, (input: DispatchInput) => Promise<DispatchOutput>>;
     hooks?: ToolHook[];
+    skillContracts?: SkillContract[];
   }) {
     this.runtime = deps.runtime;
     this.contextManager = deps.contextManager;
     this.writeLock = deps.writeLock;
     this.subAgentDispatchers = deps.subAgentDispatchers;
+    this.skillContracts = deps.skillContracts ?? [];
 
     // Create ToolPipeline wrapping the raw tool handler
     this.pipeline = new ToolPipeline(
@@ -116,6 +121,29 @@ export class MasterAgent {
   buildSystemPrompt(ctx: Readonly<ProjectContext>): string {
     const builder = new PromptBuilder();
     builder.register(delegationContractSection);
+
+    if (this.skillContracts.length > 0) {
+      const contracts = this.skillContracts;
+      builder.register({
+        key: "activeSkills",
+        priority: 40,
+        isStatic: false,
+        render: () => {
+          const lines = ["## Active Skills"];
+          for (const contract of contracts) {
+            lines.push(`### ${contract.name}`);
+            lines.push(contract.content);
+            if (contract.resolvedTools.length > 0) {
+              lines.push(`Allowed tools: ${contract.resolvedTools.join(", ")}`);
+            }
+            lines.push(`Effort: ${contract.frontmatter.effort ?? "medium"}`);
+            lines.push("");
+          }
+          return lines.join("\n");
+        },
+      });
+    }
+
     const promptCtx: PromptContext = {
       projectContext: ctx,
       agentIdentity: {
@@ -131,6 +159,16 @@ export class MasterAgent {
       },
     };
     return builder.build(promptCtx);
+  }
+
+  /**
+   * Return all skill contracts whose `when_to_use` patterns match the given intent.
+   */
+  matchSkillsForIntent(intent: string): SkillContract[] {
+    const runtime = new SkillRuntime({ availableTools: [], defaultModel: "" });
+    return this.skillContracts.filter((contract) =>
+      runtime.matchesIntent(intent, contract.frontmatter),
+    );
   }
 
   // ── Tool Call Handler ─────────────────────────────────────────────────────
