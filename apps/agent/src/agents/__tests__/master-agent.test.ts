@@ -240,7 +240,26 @@ describe("MasterAgent", () => {
     expect(result.task_id.length).toBeGreaterThan(0);
   });
 
-  // ── 12. handleUserMessage calls runtime.run ───────────────────────────────
+  // ── 12. routes dispatch_verification through DISPATCH_ROUTES ─────────────
+  it("routes dispatch_verification through DISPATCH_ROUTES", async () => {
+    const verifyDispatcher = vi.fn(async () => ({
+      result: "[PASS] Looks good",
+      toolCallCount: 0,
+      tokensUsed: 150,
+    }));
+    dispatchers.set("verification", verifyDispatcher);
+
+    // Simulate the model calling dispatch_verification
+    const result = await (agent as any).handleToolCall("dispatch_verification", {
+      task: "Verify the trim",
+      context: { userIntent: "Trim to 3s" },
+    });
+
+    expect(verifyDispatcher).toHaveBeenCalled();
+    expect(result).toHaveProperty("result");
+  });
+
+  // ── 13. handleUserMessage calls runtime.run ───────────────────────────────
   it("handleUserMessage calls runtime.run and returns result text", async () => {
     runtime.run.mockResolvedValueOnce({
       text: "I trimmed the clip for you.",

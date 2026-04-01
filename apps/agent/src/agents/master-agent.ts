@@ -21,11 +21,12 @@ import { delegationContractSection } from "../prompt/delegation-contract.js";
 
 /** Maps a dispatch_* tool name to its sub-agent key and default access mode. */
 const DISPATCH_ROUTES: Record<string, { agentKey: string; defaultAccessMode: DispatchInput["accessMode"] }> = {
-  dispatch_editor:  { agentKey: "editor",  defaultAccessMode: "read_write" },
-  dispatch_vision:  { agentKey: "vision",  defaultAccessMode: "read" },
-  dispatch_creator: { agentKey: "creator", defaultAccessMode: "read_write" },
-  dispatch_audio:   { agentKey: "audio",   defaultAccessMode: "read_write" },
-  dispatch_asset:   { agentKey: "asset",   defaultAccessMode: "read" },
+  dispatch_editor:       { agentKey: "editor",       defaultAccessMode: "read_write" },
+  dispatch_vision:       { agentKey: "vision",       defaultAccessMode: "read" },
+  dispatch_creator:      { agentKey: "creator",      defaultAccessMode: "read_write" },
+  dispatch_audio:        { agentKey: "audio",        defaultAccessMode: "read_write" },
+  dispatch_asset:        { agentKey: "asset",        defaultAccessMode: "read" },
+  dispatch_verification: { agentKey: "verification", defaultAccessMode: "read" },
 };
 
 // ---------------------------------------------------------------------------
