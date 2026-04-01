@@ -91,7 +91,9 @@ describe("HTTP Routes", () => {
       const body = await res.json();
       expect(body).toMatchObject({
         agentStatus: expect.any(String),
-        activeChangesets: expect.any(Number),
+        activeSessions: expect.any(Number),
+        queuedTasks: expect.any(Number),
+        runningTasks: expect.any(Number),
       });
     });
 
@@ -99,7 +101,9 @@ describe("HTTP Routes", () => {
       const res = await app.request("/status");
       const body = await res.json();
       expect(body.agentStatus).toBe("idle");
-      expect(body.activeChangesets).toBe(0);
+      expect(body.activeSessions).toBe(0);
+      expect(body.queuedTasks).toBe(0);
+      expect(body.runningTasks).toBe(0);
     });
   });
 
@@ -134,5 +138,35 @@ describe("HTTP Routes", () => {
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toContain("text/event-stream");
     });
+  });
+});
+
+describe("DI-wired routes", () => {
+  const app = createApp();
+
+  it("GET /status returns real session and task counts", async () => {
+    const res = await app.request("/status");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toHaveProperty("activeSessions");
+    expect(body).toHaveProperty("queuedTasks");
+    expect(body).toHaveProperty("runningTasks");
+  });
+
+  it("POST /chat creates a real session", async () => {
+    const res = await app.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: "00000000-0000-0000-0000-000000000001",
+        message: "Hello",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.sessionId).not.toBe("placeholder");
+    expect(body.sessionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    );
   });
 });
