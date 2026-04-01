@@ -3,6 +3,7 @@ import { z } from "zod";
 import { ToolPipeline } from "../tool-pipeline.js";
 import type { ToolDefinition, ToolCallResult } from "../types.js";
 import type { ToolHook } from "../hooks.js";
+import type { AgentType } from "../types.js";
 
 // ── Shared tool definitions ────────────────────────────────────────────────
 
@@ -23,6 +24,19 @@ const writeTool: ToolDefinition = {
 };
 
 const ctx = { agentType: "editor" as const, taskId: "task-1" };
+
+// ── Helper factories ───────────────────────────────────────────────────────
+
+function makeTool(overrides: Partial<ToolDefinition> = {}): ToolDefinition {
+  return {
+    name: "test_tool",
+    description: "Test tool",
+    inputSchema: z.object({ value: z.string() }),
+    agentTypes: ["editor"],
+    accessMode: "read",
+    ...overrides,
+  };
+}
 
 describe("ToolPipeline", () => {
   let executorFn: ReturnType<typeof vi.fn>;
@@ -188,5 +202,35 @@ describe("ToolPipeline", () => {
     expect(traces[1].toolName).toBe("ghost_tool");
     expect(typeof traces[0].durationMs).toBe("number");
     expect(typeof traces[0].timestamp).toBe("number");
+  });
+
+  describe("resource limits", () => {
+    it("evicts oldest traces when maxTraces exceeded", async () => {
+      pipeline = new ToolPipeline(executorFn, { maxTraces: 3 });
+      pipeline.registerTool(makeTool());
+      const ctx = { agentType: "editor" as AgentType, taskId: "t1" };
+
+      for (let i = 0; i < 5; i++) {
+        await pipeline.execute("test_tool", { value: `v${i}` }, ctx);
+      }
+
+      const traces = pipeline.getTraces();
+      expect(traces).toHaveLength(3);
+    });
+
+    it("evicts oldest idempotency keys when maxIdempotencyKeys exceeded", async () => {
+      pipeline = new ToolPipeline(executorFn, { maxIdempotencyKeys: 3 });
+      pipeline.registerTool(makeTool({ accessMode: "write" }));
+      const ctx = { agentType: "editor" as AgentType, taskId: "t1" };
+
+      await pipeline.execute("test_tool", { value: "a" }, ctx, "key-1");
+      await pipeline.execute("test_tool", { value: "b" }, ctx, "key-2");
+      await pipeline.execute("test_tool", { value: "c" }, ctx, "key-3");
+      // key-4 evicts key-1
+      await pipeline.execute("test_tool", { value: "d" }, ctx, "key-4");
+      // key-1 should be allowed again (evicted)
+      const result = await pipeline.execute("test_tool", { value: "e" }, ctx, "key-1");
+      expect(result.success).toBe(true);
+    });
   });
 });

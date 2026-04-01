@@ -6,6 +6,11 @@ export interface PipelineResult extends ToolCallResult {
   classified?: ClassifiedFailure;
 }
 
+export interface ToolPipelineOptions {
+  maxTraces?: number;
+  maxIdempotencyKeys?: number;
+}
+
 export interface TraceEntry {
   toolName: string;
   agentType: AgentType;
@@ -25,12 +30,17 @@ type ExecutorFn = (
 export class ToolPipeline {
   private tools = new Map<string, ToolDefinition>();
   private hooks: ToolHook[] = [];
-  private seenIdempotencyKeys = new Set<string>();
+  private idempotencyKeys: string[] = [];
+  private idempotencyKeySet = new Set<string>();
   private traces: TraceEntry[] = [];
   private executor: ExecutorFn;
+  private maxTraces: number;
+  private maxIdempotencyKeys: number;
 
-  constructor(executor: ExecutorFn) {
+  constructor(executor: ExecutorFn, opts?: ToolPipelineOptions) {
     this.executor = executor;
+    this.maxTraces = opts?.maxTraces ?? 1000;
+    this.maxIdempotencyKeys = opts?.maxIdempotencyKeys ?? 10000;
   }
 
   registerTool(tool: ToolDefinition): void {
@@ -45,6 +55,13 @@ export class ToolPipeline {
     return this.traces;
   }
 
+  private pushTrace(entry: TraceEntry): void {
+    this.traces.push(entry);
+    while (this.traces.length > this.maxTraces) {
+      this.traces.shift();
+    }
+  }
+
   async execute(
     toolName: string,
     input: unknown,
@@ -55,7 +72,7 @@ export class ToolPipeline {
 
     const fail = (error: string): PipelineResult => {
       const classified = classifyFailure(error);
-      this.traces.push({
+      this.pushTrace({
         toolName,
         agentType: ctx.agentType,
         taskId: ctx.taskId,
@@ -88,10 +105,15 @@ export class ToolPipeline {
     // Idempotency guard — only enforced for write/read_write tools
     const isWrite = tool.accessMode === "write" || tool.accessMode === "read_write";
     if (idempotencyKey && isWrite) {
-      if (this.seenIdempotencyKeys.has(idempotencyKey)) {
+      if (this.idempotencyKeySet.has(idempotencyKey)) {
         return fail(`idempotency conflict: key "${idempotencyKey}" already used`);
       }
-      this.seenIdempotencyKeys.add(idempotencyKey);
+      this.idempotencyKeys.push(idempotencyKey);
+      this.idempotencyKeySet.add(idempotencyKey);
+      while (this.idempotencyKeys.length > this.maxIdempotencyKeys) {
+        const evicted = this.idempotencyKeys.shift()!;
+        this.idempotencyKeySet.delete(evicted);
+      }
     }
 
     let effectiveInput: unknown = parsed.data;
@@ -150,7 +172,7 @@ export class ToolPipeline {
           await h.onFailure({ ...hookCtx, input: effectiveInput }, result);
         }
       }
-      this.traces.push({
+      this.pushTrace({
         toolName,
         agentType: ctx.agentType,
         taskId: ctx.taskId,
@@ -178,7 +200,7 @@ export class ToolPipeline {
 
     // ── Stage 5: Trace ─────────────────────────────────────────────────────
 
-    this.traces.push({
+    this.pushTrace({
       toolName,
       agentType: ctx.agentType,
       taskId: ctx.taskId,
