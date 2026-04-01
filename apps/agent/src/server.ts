@@ -11,8 +11,10 @@ import { EventBus } from "./events/event-bus.js";
 import { createChatRouter } from "./routes/chat.js";
 import { createEventsRouter } from "./routes/events.js";
 import { createStatusRouter } from "./routes/status.js";
+import { SkillLoader } from "./skills/loader.js";
+import type { SkillContract } from "./skills/types.js";
 
-export function createApp() {
+export function createApp(opts?: { skillContracts?: SkillContract[] }) {
   const app = new Hono();
 
   // Instantiate shared services
@@ -20,6 +22,11 @@ export function createApp() {
   const sessionManager = new SessionManager(sessionStore);
   const taskRegistry = new TaskRegistry();
   const eventBus = new EventBus();
+
+  // Skill contracts can be injected or will be empty by default
+  // Production usage: call SkillLoader.loadAllSkillContracts() before createApp()
+  // and pass the result. The loader requires async I/O so it runs before app creation.
+  const skillContracts = opts?.skillContracts ?? [];
 
   app.use("*", cors());
   app.get("/health", (c) => c.json({ status: "ok" }));

@@ -18,6 +18,8 @@ import { ToolPipeline } from "../tools/tool-pipeline.js";
 import type { ToolHook } from "../tools/hooks.js";
 import { SkillRuntime } from "../skills/skill-runtime.js";
 import type { SkillContract } from "../skills/types.js";
+import type { ToolDefinition } from "../tools/types.js";
+import { formatToolsForApi } from "../tools/format-for-api.js";
 
 // ---------------------------------------------------------------------------
 // Tool-name → sub-agent mapping
@@ -120,7 +122,7 @@ export class MasterAgent {
       agentType: "master",
       model: resolvedModel,
       system: systemPrompt,
-      tools: resolvedTools,
+      tools: formatToolsForApi(resolvedTools),
       tokenBudget: TOKEN_BUDGETS.master,
       maxIterations: MAX_ITERATIONS.master,
     };
@@ -143,27 +145,39 @@ export class MasterAgent {
   }
 
   /**
-   * Resolve tools from active skills. If any skill has allowed_tools,
-   * intersect with master tools. Otherwise return all master tools.
+   * Resolve tools from active skills. Applies both allowed_tools (whitelist)
+   * and denied_tools (blacklist) from skill contracts.
    */
-  private resolveTools(activeSkills: SkillContract[]): unknown[] {
-    // Collect tool restrictions from active skills
+  private resolveTools(activeSkills: SkillContract[]): ToolDefinition[] {
+    let tools = [...masterToolDefinitions];
+
+    // Collect allowed_tools from active skills (union = any skill can enable a tool)
     const allowedSets = activeSkills
       .filter((s) => s.frontmatter.allowed_tools && s.frontmatter.allowed_tools.length > 0)
       .map((s) => new Set(s.resolvedTools));
 
-    if (allowedSets.length === 0) {
-      return masterToolDefinitions;
+    if (allowedSets.length > 0) {
+      const allowed = new Set<string>();
+      for (const set of allowedSets) {
+        for (const tool of set) allowed.add(tool);
+      }
+      tools = tools.filter((t) => allowed.has(t.name));
     }
 
-    // Union all allowed tools from all matching skills
-    const allowed = new Set<string>();
-    for (const set of allowedSets) {
-      for (const tool of set) allowed.add(tool);
+    // Collect denied_tools from active skills (union = any skill can deny a tool)
+    const deniedTools = new Set<string>();
+    for (const skill of activeSkills) {
+      if (skill.frontmatter.denied_tools) {
+        for (const tool of skill.frontmatter.denied_tools) {
+          deniedTools.add(tool);
+        }
+      }
+    }
+    if (deniedTools.size > 0) {
+      tools = tools.filter((t) => !deniedTools.has(t.name));
     }
 
-    // Filter master tools to only those allowed
-    return masterToolDefinitions.filter((t) => allowed.has(t.name));
+    return tools;
   }
 
   // ── System Prompt Builder ─────────────────────────────────────────────────

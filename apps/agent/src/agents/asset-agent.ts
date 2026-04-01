@@ -2,8 +2,8 @@ import { NativeAPIRuntime } from "./runtime.js";
 import type { AgentConfig, DispatchInput, DispatchOutput } from "./types.js";
 import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
 import { assetToolDefinitions } from "../tools/asset-tools.js";
-import type { ToolDefinition } from "../tools/types.js";
 import { PromptBuilder } from "../prompt/prompt-builder.js";
+import { formatToolsForApi } from "../tools/format-for-api.js";
 import { identitySection, taskSection } from "../prompt/sections.js";
 import type { PromptContext } from "../prompt/types.js";
 import { createAgentPipeline } from "./create-agent-pipeline.js";
@@ -25,7 +25,7 @@ export class AssetAgent {
       agentType: "asset",
       model: "claude-haiku-4-5",
       system: this.buildSystemPrompt(input),
-      tools: this.formatTools(),
+      tools: formatToolsForApi(assetToolDefinitions),
       tokenBudget: TOKEN_BUDGETS.asset,
       maxIterations: MAX_ITERATIONS.asset,
     };
@@ -62,11 +62,4 @@ export class AssetAgent {
     return builder.build(promptCtx);
   }
 
-  private formatTools(): unknown[] {
-    return assetToolDefinitions.map((def: ToolDefinition) => ({
-      name: def.name,
-      description: def.description,
-      input_schema: def.inputSchema,
-    }));
-  }
 }

@@ -2,8 +2,8 @@ import { NativeAPIRuntime } from "./runtime.js";
 import type { AgentConfig, DispatchInput, DispatchOutput } from "./types.js";
 import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
 import { creatorToolDefinitions } from "../tools/creator-tools.js";
-import type { ToolDefinition } from "../tools/types.js";
 import { PromptBuilder } from "../prompt/prompt-builder.js";
+import { formatToolsForApi } from "../tools/format-for-api.js";
 import { identitySection, taskSection } from "../prompt/sections.js";
 import type { PromptContext } from "../prompt/types.js";
 import { createAgentPipeline } from "./create-agent-pipeline.js";
@@ -25,7 +25,7 @@ export class CreatorAgent {
       agentType: "creator",
       model: "claude-sonnet-4-6",
       system: this.buildSystemPrompt(input),
-      tools: this.formatTools(),
+      tools: formatToolsForApi(creatorToolDefinitions),
       tokenBudget: TOKEN_BUDGETS.creator,
       maxIterations: MAX_ITERATIONS.creator,
     };
@@ -60,11 +60,4 @@ export class CreatorAgent {
     return builder.build(promptCtx);
   }
 
-  private formatTools(): unknown[] {
-    return creatorToolDefinitions.map((def: ToolDefinition) => ({
-      name: def.name,
-      description: def.description,
-      input_schema: def.inputSchema,
-    }));
-  }
 }
