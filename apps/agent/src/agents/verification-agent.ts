@@ -1,5 +1,9 @@
 import { NativeAPIRuntime } from "./runtime.js";
 import type { AgentConfig, DispatchInput, DispatchOutput } from "./types.js";
+import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
+import { PromptBuilder } from "../prompt/prompt-builder.js";
+import { identitySection, taskSection } from "../prompt/sections.js";
+import type { PromptContext } from "../prompt/types.js";
 
 interface VerificationResult {
   verdict: "PASS" | "FAIL" | "PARTIAL";
@@ -25,8 +29,8 @@ export class VerificationAgent {
       model: "claude-haiku-4-5",
       system: this.buildSystemPrompt(input),
       tools: [],
-      tokenBudget: { input: 10_000, output: 2_000 },
-      maxIterations: 1,
+      tokenBudget: TOKEN_BUDGETS.verification,
+      maxIterations: MAX_ITERATIONS.verification,
     };
 
     const result = await runtime.run(config, input.task);
@@ -60,20 +64,23 @@ export class VerificationAgent {
     return output;
   }
 
-  private buildSystemPrompt(input: DispatchInput): string {
-    return [
-      "# Verification Agent",
-      "",
-      "You are an adversarial verifier. Your job is to check whether an edit or generation result matches the user's original intent.",
-      "",
-      "## Rules",
-      "- Compare the reported result against the user's intent.",
-      "- Check for: wrong elements affected, incorrect values, missing changes, unintended side effects.",
-      "- Be skeptical — assume the edit might be wrong until proven correct.",
-      '- Output ONLY a JSON object with this schema:',
-      '  { "verdict": "PASS" | "FAIL" | "PARTIAL", "confidence": "high" | "medium" | "low", "issues": string[], "summary": string }',
-      "",
-      input.context ? `## Context\n${JSON.stringify(input.context, null, 2)}` : "",
-    ].join("\n");
+  buildSystemPrompt(input: DispatchInput): string {
+    const builder = new PromptBuilder({ builtins: false });
+    builder.register(identitySection);
+    builder.register(taskSection);
+    const promptCtx: PromptContext = {
+      agentIdentity: {
+        role: "Verification Agent",
+        description: "You are an adversarial verifier. Your job is to check whether an edit or generation result matches the user's original intent.",
+        rules: [
+          "Compare the reported result against the user's intent.",
+          "Check for: wrong elements affected, incorrect values, missing changes, unintended side effects.",
+          "Be skeptical — assume the edit might be wrong until proven correct.",
+          'Output ONLY a JSON object with this schema: { "verdict": "PASS" | "FAIL" | "PARTIAL", "confidence": "high" | "medium" | "low", "issues": string[], "summary": string }',
+        ],
+      },
+      task: input,
+    };
+    return builder.build(promptCtx);
   }
 }

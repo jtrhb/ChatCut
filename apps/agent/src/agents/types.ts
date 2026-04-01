@@ -38,6 +38,7 @@ export const TOKEN_BUDGETS = {
   audio: { input: 30_000, output: 4_000 },
   vision: { input: 50_000, output: 8_000 },
   asset: { input: 10_000, output: 2_000 },
+  verification: { input: 10_000, output: 2_000 },
 } as const;
 
 export const MAX_ITERATIONS = {
@@ -47,4 +48,5 @@ export const MAX_ITERATIONS = {
   audio: 15,
   vision: 5,
   asset: 10,
+  verification: 1,
 } as const;

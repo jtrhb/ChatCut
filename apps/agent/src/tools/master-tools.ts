@@ -71,7 +71,7 @@ export const ExportVideoSchema = z.object({
 
 const DispatchVerificationSchema = z.object({
   task: z.string().describe("What to verify — include user intent, agent result, and affected elements"),
-  context: z.record(z.unknown()).optional().describe("Verification context"),
+  context: ContextSchema.optional().describe("Verification context"),
 });
 
 // ── Tool Definitions ─────────────────────────────────────────────────────────
