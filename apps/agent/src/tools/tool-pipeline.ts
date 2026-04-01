@@ -146,14 +146,16 @@ export class ToolPipeline {
         if (preResult.block) {
           const reason = preResult.reason ?? `blocked by hook "${hook.name}"`;
           const result = fail(`blocked by hook: ${reason}`);
-          this.runFailureHooks(hookCtx, effectiveInput, result);
+          await this.runFailureHooks(hookCtx, effectiveInput, result);
           return result;
         }
         if (preResult.rewrittenInput !== undefined) {
           effectiveInput = preResult.rewrittenInput;
         }
       } catch {
-        return fail(`pre-hook "${hook.name}" threw an error`);
+        const result = fail(`pre-hook "${hook.name}" threw an error`);
+        await this.runFailureHooks(hookCtx, effectiveInput, result);
+        return result;
       }
     }
 
@@ -165,14 +167,14 @@ export class ToolPipeline {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const result = fail(msg);
-      this.runFailureHooks(hookCtx, effectiveInput, result);
+      await this.runFailureHooks(hookCtx, effectiveInput, result);
       return result;
     }
 
     if (!execResult.success) {
       const classified = classifyFailure(execResult.error ?? "execution_error");
       const result: PipelineResult = { ...execResult, classified };
-      this.runFailureHooks(hookCtx, effectiveInput, result);
+      await this.runFailureHooks(hookCtx, effectiveInput, result);
       this.pushTrace({
         toolName,
         agentType: ctx.agentType,
@@ -199,8 +201,10 @@ export class ToolPipeline {
           finalResult = postResult.transformedResult;
         }
       } catch {
-        // Post-hook error: do NOT commit idempotency key, return failure
-        return fail(`post-hook "${hook.name}" threw an error`);
+        // Post-hook error: do NOT commit idempotency key, trigger onFailure, return failure
+        const result = fail(`post-hook "${hook.name}" threw an error`);
+        await this.runFailureHooks(hookCtx, effectiveInput, result);
+        return result;
       }
     }
 

@@ -278,4 +278,45 @@ describe("MasterAgent", () => {
     expect(config.model).toBe("claude-opus-4-6");
     expect(config.system).toContain('{"tracks":[]}'); // timeline state included
   });
+
+  // ── Pipeline integration ────────────────────────────────────────────────
+
+  describe("ToolPipeline integration", () => {
+    it("tool calls go through the pipeline and produce traces", async () => {
+      const editorDispatcher = makeDispatcher("editor result");
+      dispatchers.set("editor", editorDispatcher);
+
+      await runtime.callTool("dispatch_editor", {
+        task: "trim clip",
+        accessMode: "read_write",
+      });
+
+      const traces = agent.getPipeline().getTraces();
+      expect(traces.length).toBeGreaterThan(0);
+      expect(traces[0].toolName).toBe("dispatch_editor");
+      expect(traces[0].success).toBe(true);
+    });
+
+    it("pipeline hooks are invoked during real tool calls", async () => {
+      const hookSpy = vi.fn(async () => ({}));
+
+      // Create agent with a hook
+      agent = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        hooks: [{ name: "spy-hook", pre: hookSpy }],
+      });
+
+      dispatchers.set("editor", makeDispatcher());
+
+      await runtime.callTool("dispatch_editor", {
+        task: "test hook",
+        accessMode: "read",
+      });
+
+      expect(hookSpy).toHaveBeenCalled();
+    });
+  });
 });

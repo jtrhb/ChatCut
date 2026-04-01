@@ -14,6 +14,8 @@ import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
 import { PromptBuilder } from "../prompt/prompt-builder.js";
 import type { PromptContext } from "../prompt/types.js";
 import { delegationContractSection } from "../prompt/delegation-contract.js";
+import { ToolPipeline } from "../tools/tool-pipeline.js";
+import type { ToolHook } from "../tools/hooks.js";
 
 // ---------------------------------------------------------------------------
 // Tool-name → sub-agent mapping
@@ -38,20 +40,56 @@ export class MasterAgent {
   private contextManager: ProjectContextManager;
   private writeLock: ProjectWriteLock;
   private subAgentDispatchers: Map<string, (input: DispatchInput) => Promise<DispatchOutput>>;
+  private pipeline: ToolPipeline;
 
   constructor(deps: {
     runtime: AgentRuntime;
     contextManager: ProjectContextManager;
     writeLock: ProjectWriteLock;
     subAgentDispatchers: Map<string, (input: DispatchInput) => Promise<DispatchOutput>>;
+    hooks?: ToolHook[];
   }) {
     this.runtime = deps.runtime;
     this.contextManager = deps.contextManager;
     this.writeLock = deps.writeLock;
     this.subAgentDispatchers = deps.subAgentDispatchers;
 
-    // Wire up tool executor
-    this.runtime.setToolExecutor(this.handleToolCall.bind(this));
+    // Create ToolPipeline wrapping the raw tool handler
+    this.pipeline = new ToolPipeline(
+      async (name, input) => {
+        const result = await this.handleToolCall(name, input);
+        return { success: true, data: result };
+      },
+    );
+
+    // Register all master tools with the pipeline
+    for (const tool of masterToolDefinitions) {
+      this.pipeline.registerTool(tool);
+    }
+
+    // Register any provided hooks
+    if (deps.hooks) {
+      for (const hook of deps.hooks) {
+        this.pipeline.registerHook(hook);
+      }
+    }
+
+    // Wire pipeline into runtime — all tool calls now go through the pipeline
+    this.runtime.setToolExecutor(async (name: string, input: unknown) => {
+      const result = await this.pipeline.execute(name, input, {
+        agentType: "master",
+        taskId: "master-session",
+      });
+      if (!result.success) {
+        return { error: result.error };
+      }
+      return result.data;
+    });
+  }
+
+  /** Access the pipeline for trace inspection or hook registration. */
+  getPipeline(): ToolPipeline {
+    return this.pipeline;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
