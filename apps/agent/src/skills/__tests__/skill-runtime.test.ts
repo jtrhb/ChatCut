@@ -93,6 +93,15 @@ describe("SkillRuntime", () => {
       expect(result).toBe(false);
     });
 
+    it("matches when all pattern words appear in intent (word-level match)", () => {
+      // "beat sync" as a substring is NOT in "sync cuts to the beat",
+      // but both words "beat" and "sync" are present — word-level match
+      const result = runtime.matchesIntent("sync cuts to the beat", {
+        when_to_use: ["beat sync"],
+      });
+      expect(result).toBe(true);
+    });
+
     it("returns false when when_to_use is empty or absent", () => {
       expect(runtime.matchesIntent("anything", {})).toBe(false);
       expect(runtime.matchesIntent("anything", { when_to_use: [] })).toBe(false);
