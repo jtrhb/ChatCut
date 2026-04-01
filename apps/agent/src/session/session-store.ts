@@ -13,6 +13,7 @@ export class SessionStore {
   set(session: AgentSession): void {
     this.sessions.set(session.sessionId, {
       ...session,
+      messages: [...session.messages],
       updatedAt: Date.now(),
     });
   }

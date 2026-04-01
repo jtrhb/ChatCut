@@ -5,7 +5,7 @@ import type { SessionManager } from "../session/session-manager.js";
 const chatSchema = z.object({
   projectId: z.string().uuid(),
   message: z.string().min(1),
-  sessionId: z.string().optional(),
+  sessionId: z.string().uuid().optional(),
 });
 
 const chat = new Hono();
