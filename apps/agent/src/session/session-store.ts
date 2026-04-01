@@ -22,6 +22,14 @@ export class SessionStore {
     return this.sessions.delete(sessionId);
   }
 
+  countByStatus(status: AgentSession["status"]): number {
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      if (session.status === status) count++;
+    }
+    return count;
+  }
+
   listByProject(projectId: string): AgentSession[] {
     const result: AgentSession[] = [];
     for (const session of this.sessions.values()) {

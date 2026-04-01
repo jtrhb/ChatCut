@@ -108,12 +108,7 @@ export class ToolPipeline {
       if (this.idempotencyKeySet.has(idempotencyKey)) {
         return fail(`idempotency conflict: key "${idempotencyKey}" already used`);
       }
-      this.idempotencyKeys.push(idempotencyKey);
-      this.idempotencyKeySet.add(idempotencyKey);
-      while (this.idempotencyKeys.length > this.maxIdempotencyKeys) {
-        const evicted = this.idempotencyKeys.shift()!;
-        this.idempotencyKeySet.delete(evicted);
-      }
+      // Key is committed AFTER successful execution (see Stage 3 below)
     }
 
     let effectiveInput: unknown = parsed.data;
@@ -182,6 +177,16 @@ export class ToolPipeline {
         timestamp: start,
       });
       return result;
+    }
+
+    // Commit idempotency key only after successful execution
+    if (idempotencyKey && isWrite) {
+      this.idempotencyKeys.push(idempotencyKey);
+      this.idempotencyKeySet.add(idempotencyKey);
+      while (this.idempotencyKeys.length > this.maxIdempotencyKeys) {
+        const evicted = this.idempotencyKeys.shift()!;
+        this.idempotencyKeySet.delete(evicted);
+      }
     }
 
     // ── Stage 4: Post-hooks ────────────────────────────────────────────────

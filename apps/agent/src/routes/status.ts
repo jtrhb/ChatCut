@@ -15,7 +15,7 @@ export function createStatusRouter(deps: {
 
     return c.json({
       agentStatus: runningTasks > 0 ? "busy" : "idle",
-      activeSessions: 0,
+      activeSessions: deps.sessionManager.countActiveSessions(),
       queuedTasks,
       runningTasks,
       completedTasks: tasks.filter((t) => t.status === "completed").length,

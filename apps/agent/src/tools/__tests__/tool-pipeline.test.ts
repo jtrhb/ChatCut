@@ -204,6 +204,19 @@ describe("ToolPipeline", () => {
     expect(typeof traces[0].timestamp).toBe("number");
   });
 
+  // 13. failed execution does not permanently occupy idempotency key
+  it("allows retry with same idempotency key after execution failure", async () => {
+    // First call fails
+    executorFn.mockResolvedValueOnce({ success: false, error: "temporary error" });
+    const r1 = await pipeline.execute("write_value", { value: "x" }, ctx, "retry-key");
+    expect(r1.success).toBe(false);
+
+    // Retry with same key should be allowed (key was not committed)
+    executorFn.mockResolvedValueOnce({ success: true, data: "ok" });
+    const r2 = await pipeline.execute("write_value", { value: "x" }, ctx, "retry-key");
+    expect(r2.success).toBe(true);
+  });
+
   describe("resource limits", () => {
     it("evicts oldest traces when maxTraces exceeded", async () => {
       pipeline = new ToolPipeline(executorFn, { maxTraces: 3 });

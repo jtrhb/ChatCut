@@ -87,6 +87,10 @@ export class SessionManager {
     return { ...forked, messages: [...forked.messages] };
   }
 
+  countActiveSessions(): number {
+    return this.store.countByStatus("active");
+  }
+
   listSessions(projectId: string): AgentSession[] {
     return this.store.listByProject(projectId);
   }

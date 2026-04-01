@@ -1,9 +1,16 @@
 import { describe, it, expect } from "vitest";
 import { Hono } from "hono";
-import { chat } from "../chat.js";
+import { chat, createChatRouter } from "../chat.js";
+import { SessionStore } from "../../session/session-store.js";
+import { SessionManager } from "../../session/session-manager.js";
 
 const app = new Hono();
 app.route("/chat", chat);
+
+// DI-wired app for session tests
+const sessionManager = new SessionManager(new SessionStore());
+const diApp = new Hono();
+diApp.route("/chat", createChatRouter({ sessionManager }));
 
 describe("POST /chat", () => {
   it("rejects request with missing projectId (400)", async () => {
@@ -57,5 +64,53 @@ describe("POST /chat", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({ status: "processing", sessionId: expect.any(String) });
+  });
+});
+
+describe("POST /chat (DI-wired)", () => {
+  it("rejects session belonging to a different project (403)", async () => {
+    // Create session for project A
+    const createRes = await diApp.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: "00000000-0000-0000-0000-000000000001",
+        message: "Hello from project A",
+      }),
+    });
+    const { sessionId } = await createRes.json();
+
+    // Try to use that session with project B
+    const crossRes = await diApp.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: "00000000-0000-0000-0000-000000000002",
+        message: "Hello from project B",
+        sessionId,
+      }),
+    });
+    expect(crossRes.status).toBe(403);
+    const body = await crossRes.json();
+    expect(body.error).toContain("does not belong");
+  });
+
+  it("allows resuming session with the correct project (200)", async () => {
+    const projectId = "00000000-0000-0000-0000-000000000003";
+    const createRes = await diApp.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId, message: "First message" }),
+    });
+    const { sessionId } = await createRes.json();
+
+    const resumeRes = await diApp.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId, message: "Second message", sessionId }),
+    });
+    expect(resumeRes.status).toBe(200);
+    const body = await resumeRes.json();
+    expect(body.sessionId).toBe(sessionId);
   });
 });

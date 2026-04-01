@@ -51,6 +51,9 @@ function createChatRouter(deps: { sessionManager: SessionManager }): Hono {
       if (!session) {
         return c.json({ error: "Session not found" }, 404);
       }
+      if (session.projectId !== projectId) {
+        return c.json({ error: "Session does not belong to this project" }, 403);
+      }
     } else {
       session = sessionManager.createSession({ projectId });
     }

@@ -103,7 +103,60 @@ describe("MemorySelector", () => {
     expect(result.map((m) => m.memory_id)).toContain("dns1");
   });
 
-  // 5. respects token budget
+  // 5. filters draft when project_id does not match
+  it("excludes draft when activation_scope.project_id does not match", () => {
+    const draft = makeMemory({
+      memory_id: "dp1",
+      semantic_key: "sk-dp",
+      status: "draft",
+      activation_scope: { project_id: "proj-OTHER" },
+      content: "Wrong project.",
+    });
+    const task = { ...BASE_TASK, projectId: "proj-1" };
+    const result = selector.selectRelevant([draft], task);
+    expect(result.map((m) => m.memory_id)).not.toContain("dp1");
+  });
+
+  // 6. filters draft when batch_id does not match
+  it("excludes draft when activation_scope.batch_id does not match", () => {
+    const draft = makeMemory({
+      memory_id: "db1",
+      semantic_key: "sk-db",
+      status: "draft",
+      activation_scope: { batch_id: "batch-OTHER" },
+      content: "Wrong batch.",
+    });
+    const task = { ...BASE_TASK, batchId: "batch-1" };
+    const result = selector.selectRelevant([draft], task);
+    expect(result.map((m) => m.memory_id)).not.toContain("db1");
+  });
+
+  // 7. same scope_level conflict uses confidence → source → updated tiebreaker
+  it("breaks same-scope ties by confidence, then source, then updated", () => {
+    const weaker = makeMemory({
+      memory_id: "w1",
+      scope_level: "brand",
+      semantic_key: "same-key",
+      confidence: "low",
+      source: "implicit",
+      updated: "2025-01-01",
+      content: "Weaker.",
+    });
+    const stronger = makeMemory({
+      memory_id: "s1",
+      scope_level: "brand",
+      semantic_key: "same-key",
+      confidence: "high",
+      source: "explicit",
+      updated: "2025-02-01",
+      content: "Stronger.",
+    });
+    const result = selector.selectRelevant([weaker, stronger], BASE_TASK);
+    expect(result).toHaveLength(1);
+    expect(result[0].memory_id).toBe("s1");
+  });
+
+  // 8. respects token budget
   it("respects token budget and returns fewer memories when budget is tight", () => {
     // 20 memories with ~500 char content each, budget 2000 chars = 500 tokens
     // 2000 chars / 4 chars per token = 500 tokens budget → 2000 char total
