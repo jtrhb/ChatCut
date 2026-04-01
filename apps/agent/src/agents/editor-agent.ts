@@ -6,6 +6,7 @@ import type { ToolDefinition } from "../tools/types.js";
 import { PromptBuilder } from "../prompt/prompt-builder.js";
 import { identitySection, taskSection } from "../prompt/sections.js";
 import type { PromptContext } from "../prompt/types.js";
+import { createAgentPipeline } from "./create-agent-pipeline.js";
 
 export class EditorAgent {
   private toolExecutor: (name: string, input: unknown) => Promise<unknown>;
@@ -17,7 +18,8 @@ export class EditorAgent {
   async dispatch(input: DispatchInput): Promise<DispatchOutput> {
     const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
     const runtime = new NativeAPIRuntime(apiKey);
-    runtime.setToolExecutor(this.toolExecutor);
+    const { executor } = createAgentPipeline(this.toolExecutor, EDITOR_TOOL_DEFINITIONS, "editor");
+    runtime.setToolExecutor(executor);
 
     const config: AgentConfig = {
       agentType: "editor",
