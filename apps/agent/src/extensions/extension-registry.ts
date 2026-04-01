@@ -21,12 +21,14 @@ export class ExtensionRegistry {
 
   enable(id: string): void {
     const ext = this.extensions.get(id);
-    if (ext) ext.enabled = true;
+    if (!ext) throw new Error(`Extension not found: ${id}`);
+    ext.enabled = true;
   }
 
   disable(id: string): void {
     const ext = this.extensions.get(id);
-    if (ext) ext.enabled = false;
+    if (!ext) throw new Error(`Extension not found: ${id}`);
+    ext.enabled = false;
   }
 
   listByType(type: ExtensionType, opts?: { includeDisabled?: boolean }): ExtensionManifest[] {

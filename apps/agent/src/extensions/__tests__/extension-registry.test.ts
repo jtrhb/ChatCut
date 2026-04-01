@@ -77,6 +77,14 @@ describe("ExtensionRegistry", () => {
       registry.enable("e1");
       expect(registry.get("e1")!.enabled).toBe(true);
     });
+
+    it("throws when enabling unknown ID", () => {
+      expect(() => registry.enable("nonexistent")).toThrow(/not found/i);
+    });
+
+    it("throws when disabling unknown ID", () => {
+      expect(() => registry.disable("nonexistent")).toThrow(/not found/i);
+    });
   });
 
   describe("listAll()", () => {
