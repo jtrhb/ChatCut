@@ -3,6 +3,8 @@ import type { AgentConfig, DispatchInput, DispatchOutput } from "./types.js";
 import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
 import { EDITOR_TOOL_DEFINITIONS } from "../tools/editor-tools.js";
 import type { ToolDefinition } from "../tools/types.js";
+import { PromptBuilder } from "../prompt/prompt-builder.js";
+import type { PromptContext } from "../prompt/types.js";
 
 export class EditorAgent {
   private toolExecutor: (name: string, input: unknown) => Promise<unknown>;
@@ -36,23 +38,29 @@ export class EditorAgent {
   }
 
   buildSystemPrompt(input: DispatchInput): string {
-    const lines: string[] = [
-      "You are the Editor Agent. Your job is to modify the video timeline.",
-      "",
-      "## Rules",
-      "- Use read tools to inspect the timeline before making changes.",
-      "- Use write tools to apply mutations; prefer atomic batch operations when possible.",
-      "- Never exceed the token budget; be concise in tool calls.",
-      "",
-      `## Task`,
-      input.task,
-    ];
-
-    if (input.context && Object.keys(input.context).length > 0) {
-      lines.push("", "## Context", JSON.stringify(input.context, null, 2));
-    }
-
-    return lines.join("\n");
+    const builder = new PromptBuilder();
+    const promptCtx: PromptContext = {
+      projectContext: {
+        timelineState: "",
+        snapshotVersion: 0,
+        videoAnalysis: null,
+        currentIntent: { raw: "", parsed: "", explorationMode: false },
+        memoryContext: { promptText: "", injectedMemoryIds: [], injectedSkillIds: [] },
+        artifacts: {},
+        recentChanges: [],
+      },
+      agentIdentity: {
+        role: "Editor Agent",
+        description: "You modify the video timeline using editing tools.",
+        rules: [
+          "Use read tools to inspect the timeline before making changes.",
+          "Use write tools to apply mutations; prefer atomic batch operations when possible.",
+          "Never exceed the token budget; be concise in tool calls.",
+        ],
+      },
+      task: input,
+    };
+    return builder.build(promptCtx);
   }
 
   private formatTools(): unknown[] {

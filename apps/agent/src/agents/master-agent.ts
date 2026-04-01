@@ -11,6 +11,8 @@ import type {
 import type { ProjectWriteLock } from "../context/write-lock.js";
 import { masterToolDefinitions } from "../tools/master-tools.js";
 import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
+import { PromptBuilder } from "../prompt/prompt-builder.js";
+import type { PromptContext } from "../prompt/types.js";
 
 // ---------------------------------------------------------------------------
 // Tool-name → sub-agent mapping
@@ -72,40 +74,23 @@ export class MasterAgent {
   // ── System Prompt Builder ─────────────────────────────────────────────────
 
   buildSystemPrompt(ctx: Readonly<ProjectContext>): string {
-    const sections: string[] = [];
-
-    sections.push(
-      "You are the Master Agent for OpenCut, an AI-powered video editor.",
-      "You coordinate sub-agents (editor, vision, creator, audio, asset) to fulfill user requests.",
-      "",
-    );
-
-    // Timeline state
-    sections.push("## Current Timeline State");
-    sections.push(ctx.timelineState || "(empty timeline)");
-    sections.push(`Snapshot version: ${ctx.snapshotVersion}`);
-    sections.push("");
-
-    // Memory context
-    if (ctx.memoryContext.promptText) {
-      sections.push("## Memory Context");
-      sections.push(ctx.memoryContext.promptText);
-      if (ctx.memoryContext.injectedMemoryIds.length > 0) {
-        sections.push(`Active memory IDs: ${ctx.memoryContext.injectedMemoryIds.join(", ")}`);
-      }
-      sections.push("");
-    }
-
-    // Recent changes
-    if (ctx.recentChanges.length > 0) {
-      sections.push("## Recent Changes");
-      for (const change of ctx.recentChanges) {
-        sections.push(`- [${change.source}] ${change.summary}`);
-      }
-      sections.push("");
-    }
-
-    return sections.join("\n");
+    const builder = new PromptBuilder();
+    const promptCtx: PromptContext = {
+      projectContext: ctx,
+      agentIdentity: {
+        role: "Master Agent",
+        description:
+          "You are the Master Agent for OpenCut, an AI-powered video editor. " +
+          "You coordinate sub-agents (editor, vision, creator, audio, asset) to fulfill user requests.",
+        rules: [
+          "Analyze the user's intent before dispatching to sub-agents.",
+          "Use dispatch tools to delegate tasks to specialist agents.",
+          "Never guess sub-agent results — wait for their response.",
+          "For destructive edits, use propose_changes to get user approval first.",
+        ],
+      },
+    };
+    return builder.build(promptCtx);
   }
 
   // ── Tool Call Handler ─────────────────────────────────────────────────────
