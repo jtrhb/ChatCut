@@ -27,6 +27,8 @@ export interface ParsedMemory {
   content: string;
 }
 
+import type { AgentType } from "../agents/types.js";
+
 export interface TaskContext {
   brand: string;
   series?: string;
@@ -34,7 +36,7 @@ export interface TaskContext {
   projectId?: string;
   batchId?: string;
   sessionId: string;
-  agentType: "master" | "editor" | "creator" | "audio" | "vision" | "asset";
+  agentType: AgentType;
   tokenBudget?: number; // default 4000
 }
 
