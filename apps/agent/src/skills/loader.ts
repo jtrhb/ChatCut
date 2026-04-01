@@ -89,7 +89,7 @@ export class SkillLoader {
     return skills.map((skill) => {
       const frontmatter: SkillFrontmatter = {};
       if (skill.agent_type) {
-        frontmatter.agent_type = skill.agent_type as any;
+        frontmatter.agent_type = skill.agent_type as SkillFrontmatter["agent_type"];
       }
       if (skill.allowed_tools) frontmatter.allowed_tools = skill.allowed_tools;
       if (skill.denied_tools) frontmatter.denied_tools = skill.denied_tools;
@@ -156,6 +156,11 @@ export class SkillLoader {
    * Parse `---\nyaml\n---\ncontent` format into a ParsedMemory.
    * Mirrors the parser in MemoryStore but operates on a raw string
    * so we don't need a store instance for preset files.
+   *
+   * **Format contract:** This is a JSON-compatible frontmatter subset, NOT
+   * full YAML. Each line is `key: value`. Arrays and objects must use inline
+   * JSON syntax: `allowed_tools: ["trim_element", "split_element"]`.
+   * Multi-line YAML list syntax (`- item` on separate lines) is NOT supported.
    */
   private parseFrontmatter(raw: string): ParsedMemory {
     if (!raw.startsWith("---")) {

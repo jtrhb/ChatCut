@@ -1,7 +1,8 @@
 import type { AgentType } from "../tools/types.js";
 
 export interface SkillFrontmatter {
-  agent_type?: AgentType | AgentType[];
+  /** Single agent type this skill applies to. */
+  agent_type?: AgentType;
   allowed_tools?: string[];
   denied_tools?: string[];
   model?: string;

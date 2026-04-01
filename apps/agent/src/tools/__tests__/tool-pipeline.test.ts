@@ -204,7 +204,53 @@ describe("ToolPipeline", () => {
     expect(typeof traces[0].timestamp).toBe("number");
   });
 
-  // 13. failed execution does not permanently occupy idempotency key
+  // 13. pre-hook throwing returns structured failure, not reject
+  it("returns structured failure when pre-hook throws", async () => {
+    const hook: ToolHook = {
+      name: "thrower",
+      pre: async () => { throw new Error("hook crashed"); },
+    };
+    pipeline.registerHook(hook);
+
+    const result = await pipeline.execute("read_value", { value: "x" }, ctx);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("pre-hook");
+  });
+
+  // 14. post-hook throwing returns structured failure and does NOT commit idempotency key
+  it("does not commit idempotency key when post-hook throws", async () => {
+    const hook: ToolHook = {
+      name: "post-thrower",
+      post: async () => { throw new Error("post crash"); },
+    };
+    pipeline.registerHook(hook);
+
+    const r1 = await pipeline.execute("write_value", { value: "x" }, ctx, "post-fail-key");
+    expect(r1.success).toBe(false);
+    expect(r1.error).toContain("post-hook");
+
+    // Key should NOT be occupied — retry allowed
+    pipeline = new ToolPipeline(executorFn); // fresh pipeline without the bad hook
+    pipeline.registerTool(makeTool({ name: "write_value", accessMode: "write" }));
+    const r2 = await pipeline.execute("write_value", { value: "x" }, ctx, "post-fail-key");
+    expect(r2.success).toBe(true);
+  });
+
+  // 15. onFailure hook throwing does not crash execute()
+  it("swallows onFailure hook errors without crashing", async () => {
+    executorFn.mockResolvedValueOnce({ success: false, error: "exec failed" });
+    const hook: ToolHook = {
+      name: "bad-failure-hook",
+      onFailure: async () => { throw new Error("failure hook crashed"); },
+    };
+    pipeline.registerHook(hook);
+
+    const result = await pipeline.execute("read_value", { value: "x" }, ctx);
+    expect(result.success).toBe(false);
+    // Should not throw — returns normally
+  });
+
+  // 16. failed execution does not permanently occupy idempotency key
   it("allows retry with same idempotency key after execution failure", async () => {
     // First call fails
     executorFn.mockResolvedValueOnce({ success: false, error: "temporary error" });

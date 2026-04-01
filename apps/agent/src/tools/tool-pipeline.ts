@@ -55,6 +55,22 @@ export class ToolPipeline {
     return this.traces;
   }
 
+  /** Run onFailure hooks with error isolation — no hook can crash the pipeline. */
+  private async runFailureHooks(
+    hookCtx: ToolHookContext,
+    effectiveInput: unknown,
+    result: PipelineResult,
+  ): Promise<void> {
+    for (const h of this.hooks) {
+      if (!h.onFailure) continue;
+      try {
+        await h.onFailure({ ...hookCtx, input: effectiveInput }, result);
+      } catch {
+        // onFailure hook errors are silently swallowed
+      }
+    }
+  }
+
   private pushTrace(entry: TraceEntry): void {
     this.traces.push(entry);
     while (this.traces.length > this.maxTraces) {
@@ -125,20 +141,19 @@ export class ToolPipeline {
 
     for (const hook of this.hooks) {
       if (!hook.pre) continue;
-      const preResult = await hook.pre({ ...hookCtx, input: effectiveInput });
-      if (preResult.block) {
-        const reason = preResult.reason ?? `blocked by hook "${hook.name}"`;
-        const result: PipelineResult = await (async () => fail(`blocked by hook: ${reason}`))();
-        // Run onFailure hooks
-        for (const h of this.hooks) {
-          if (h.onFailure) {
-            await h.onFailure({ ...hookCtx, input: effectiveInput }, result);
-          }
+      try {
+        const preResult = await hook.pre({ ...hookCtx, input: effectiveInput });
+        if (preResult.block) {
+          const reason = preResult.reason ?? `blocked by hook "${hook.name}"`;
+          const result = fail(`blocked by hook: ${reason}`);
+          this.runFailureHooks(hookCtx, effectiveInput, result);
+          return result;
         }
-        return result;
-      }
-      if (preResult.rewrittenInput !== undefined) {
-        effectiveInput = preResult.rewrittenInput;
+        if (preResult.rewrittenInput !== undefined) {
+          effectiveInput = preResult.rewrittenInput;
+        }
+      } catch {
+        return fail(`pre-hook "${hook.name}" threw an error`);
       }
     }
 
@@ -150,23 +165,14 @@ export class ToolPipeline {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const result = fail(msg);
-      for (const h of this.hooks) {
-        if (h.onFailure) {
-          await h.onFailure({ ...hookCtx, input: effectiveInput }, result);
-        }
-      }
+      this.runFailureHooks(hookCtx, effectiveInput, result);
       return result;
     }
 
     if (!execResult.success) {
       const classified = classifyFailure(execResult.error ?? "execution_error");
       const result: PipelineResult = { ...execResult, classified };
-      // Run onFailure hooks
-      for (const h of this.hooks) {
-        if (h.onFailure) {
-          await h.onFailure({ ...hookCtx, input: effectiveInput }, result);
-        }
-      }
+      this.runFailureHooks(hookCtx, effectiveInput, result);
       this.pushTrace({
         toolName,
         agentType: ctx.agentType,
@@ -179,7 +185,27 @@ export class ToolPipeline {
       return result;
     }
 
-    // Commit idempotency key only after successful execution
+    // ── Stage 4: Post-hooks ────────────────────────────────────────────────
+
+    let finalResult: ToolCallResult = execResult;
+    for (const hook of this.hooks) {
+      if (!hook.post) continue;
+      try {
+        const postResult = await hook.post(
+          { ...hookCtx, input: effectiveInput },
+          finalResult,
+        );
+        if (postResult.transformedResult !== undefined) {
+          finalResult = postResult.transformedResult;
+        }
+      } catch {
+        // Post-hook error: do NOT commit idempotency key, return failure
+        return fail(`post-hook "${hook.name}" threw an error`);
+      }
+    }
+
+    // ── Stage 5: Commit idempotency key (only after ALL post-hooks succeed) ──
+
     if (idempotencyKey && isWrite) {
       this.idempotencyKeys.push(idempotencyKey);
       this.idempotencyKeySet.add(idempotencyKey);
@@ -189,21 +215,7 @@ export class ToolPipeline {
       }
     }
 
-    // ── Stage 4: Post-hooks ────────────────────────────────────────────────
-
-    let finalResult: ToolCallResult = execResult;
-    for (const hook of this.hooks) {
-      if (!hook.post) continue;
-      const postResult = await hook.post(
-        { ...hookCtx, input: effectiveInput },
-        finalResult,
-      );
-      if (postResult.transformedResult !== undefined) {
-        finalResult = postResult.transformedResult;
-      }
-    }
-
-    // ── Stage 5: Trace ─────────────────────────────────────────────────────
+    // ── Stage 6: Trace ─────────────────────────────────────────────────────
 
     this.pushTrace({
       toolName,
