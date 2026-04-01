@@ -1,5 +1,7 @@
 import type { ParsedMemory, TaskContext, MemoryContext } from "./types.js";
 import type { MemoryStore } from "./memory-store.js";
+import { MemorySelector } from "./memory-selector.js";
+import { MemoryIndex } from "./memory-index.js";
 
 // ---------------------------------------------------------------------------
 // Query Templates
@@ -29,30 +31,6 @@ const QUERY_TEMPLATES: Record<string, (params: TaskContext) => string[]> = {
   ],
 };
 
-// ---------------------------------------------------------------------------
-// Scope precedence map (higher number = higher precedence)
-// ---------------------------------------------------------------------------
-
-const SCOPE_RANK: Record<ParsedMemory["scope_level"], number> = {
-  global: 0,
-  brand: 1,
-  platform: 2,
-  series: 3,
-  project: 4,
-};
-
-const CONFIDENCE_RANK: Record<ParsedMemory["confidence"], number> = {
-  low: 0,
-  medium: 1,
-  high: 2,
-};
-
-const SOURCE_RANK: Record<ParsedMemory["source"], number> = {
-  implicit: 0,
-  observed: 1,
-  explicit: 2,
-};
-
 // Default token budget (tokens × ~4 chars/token)
 const DEFAULT_TOKEN_BUDGET = 4000;
 const CHARS_PER_TOKEN = 4;
@@ -72,9 +50,13 @@ interface MemoryStoreLike {
 
 export class MemoryLoader {
   private readonly store: MemoryStoreLike;
+  private readonly selector: MemorySelector;
+  private readonly index: MemoryIndex;
 
   constructor(store: MemoryStoreLike) {
     this.store = store;
+    this.selector = new MemorySelector();
+    this.index = new MemoryIndex();
   }
 
   // -------------------------------------------------------------------------
@@ -112,96 +94,21 @@ export class MemoryLoader {
       }
     }
 
-    return this.postLoadPipeline(candidates, task);
-  }
+    // Populate index
+    for (const mem of candidates) {
+      this.index.add(mem);
+    }
 
-  // -------------------------------------------------------------------------
-  // Private pipeline
-  // -------------------------------------------------------------------------
-
-  private postLoadPipeline(candidates: ParsedMemory[], task: TaskContext): MemoryContext {
-    // Step 1: Filter out stale and deprecated memories
-    const statusFiltered = candidates.filter(
-      (m) => m.status !== "stale" && m.status !== "deprecated"
-    );
-
-    // Step 2: Filter drafts by activation_scope
-    const scopeFiltered = statusFiltered.filter((m) => {
-      if (m.status !== "draft") return true;
-      return this.matchesActivationScope(m, task);
-    });
-
-    // Step 3: Merge by scope precedence (dedup same semantic_key)
-    const merged = this.mergeByScope(scopeFiltered);
-
-    // Step 4 & 5: Token budget truncation + serialization
-    const budget = (task.tokenBudget ?? DEFAULT_TOKEN_BUDGET) * CHARS_PER_TOKEN;
-    return this.serializeForPrompt(merged, budget);
+    // Use MemorySelector for the filter/merge/truncate pipeline
+    const selected = this.selector.selectRelevant(candidates, task);
+    return this.serializeForPrompt(selected, (task.tokenBudget ?? DEFAULT_TOKEN_BUDGET) * CHARS_PER_TOKEN);
   }
 
   /**
-   * Returns true if a draft memory's activation_scope matches the current task.
-   * At least one defined scope field must match; all defined fields must match.
+   * Expose the populated MemoryIndex for downstream consumers.
    */
-  private matchesActivationScope(memory: ParsedMemory, task: TaskContext): boolean {
-    const scope = memory.activation_scope;
-    if (!scope) return false;
-
-    const checks: boolean[] = [];
-
-    if (scope.project_id !== undefined) {
-      checks.push(scope.project_id === task.projectId);
-    }
-    if (scope.batch_id !== undefined) {
-      checks.push(scope.batch_id === task.batchId);
-    }
-    if (scope.session_id !== undefined) {
-      checks.push(scope.session_id === task.sessionId);
-    }
-
-    // Must have at least one check and all must pass
-    return checks.length > 0 && checks.every(Boolean);
-  }
-
-  /**
-   * Deduplicate memories by semantic_key, keeping the one with the highest
-   * scope precedence. Ties broken by: confidence → source → recency (updated).
-   */
-  mergeByScope(memories: ParsedMemory[]): ParsedMemory[] {
-    const byKey = new Map<string, ParsedMemory>();
-
-    for (const mem of memories) {
-      const existing = byKey.get(mem.semantic_key);
-
-      if (!existing) {
-        byKey.set(mem.semantic_key, mem);
-        continue;
-      }
-
-      if (this.beats(mem, existing)) {
-        byKey.set(mem.semantic_key, mem);
-      }
-    }
-
-    return [...byKey.values()];
-  }
-
-  /**
-   * Returns true if `challenger` should replace `incumbent`.
-   * Precedence: scope_level > confidence > source > updated (newer)
-   */
-  private beats(challenger: ParsedMemory, incumbent: ParsedMemory): boolean {
-    const scopeDiff = SCOPE_RANK[challenger.scope_level] - SCOPE_RANK[incumbent.scope_level];
-    if (scopeDiff !== 0) return scopeDiff > 0;
-
-    const confDiff = CONFIDENCE_RANK[challenger.confidence] - CONFIDENCE_RANK[incumbent.confidence];
-    if (confDiff !== 0) return confDiff > 0;
-
-    const srcDiff = SOURCE_RANK[challenger.source] - SOURCE_RANK[incumbent.source];
-    if (srcDiff !== 0) return srcDiff > 0;
-
-    // Newer updated timestamp wins
-    return challenger.updated > incumbent.updated;
+  getIndex(): MemoryIndex {
+    return this.index;
   }
 
   /**

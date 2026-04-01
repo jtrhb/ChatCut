@@ -183,13 +183,14 @@ describe("MemoryLoader", () => {
     expect(result.injectedMemoryIds).toContain("draft-pass");
   });
 
-  // ── 8. draft excluded when activation_scope does not match ────────────────
-  it("postLoadPipeline excludes draft memory when activation_scope.project_id does not match", async () => {
-    const task: TaskContext = { ...BASE_TASK, projectId: "proj-99" };
+  // ── 8. draft excluded when activation_scope.session_id does not match ───────
+  // MemorySelector filters drafts by session_id only (not project_id).
+  it("postLoadPipeline excludes draft memory when activation_scope.session_id does not match", async () => {
+    const task: TaskContext = { ...BASE_TASK, sessionId: "sess-current" };
     const draftMemory = makeMemory({
       memory_id: "draft-fail",
       status: "draft",
-      activation_scope: { project_id: "proj-OTHER" },
+      activation_scope: { session_id: "sess-OTHER" },
       content: "Draft excluded.",
     });
 
@@ -230,32 +231,33 @@ describe("MemoryLoader", () => {
     expect(result.injectedMemoryIds).not.toContain("global-1");
   });
 
-  // ── 10. mergeByScope: higher confidence wins at same scope level ──────────
-  it("mergeByScope: high confidence wins over low at same scope level", async () => {
-    const lowConf = makeMemory({
-      memory_id: "low-conf",
+  // ── 10. mergeByScope: higher scope_level wins over lower scope_level ────────
+  // MemorySelector deduplicates by scope_level only; at equal scope the first
+  // encountered (insertion order) is kept.
+  it("mergeByScope: higher scope_level wins when semantic_key collides", async () => {
+    const brandMem = makeMemory({
+      memory_id: "brand-mem",
       scope_level: "brand",
-      confidence: "low",
-      semantic_key: "brand-key",
-      content: "Low confidence.",
+      semantic_key: "shared-key",
+      content: "Brand version.",
     });
-    const highConf = makeMemory({
-      memory_id: "high-conf",
-      scope_level: "brand",
-      confidence: "high",
-      semantic_key: "brand-key",
-      content: "High confidence.",
+    const projectMem = makeMemory({
+      memory_id: "project-mem",
+      scope_level: "project",
+      semantic_key: "shared-key",
+      content: "Project version.",
     });
 
-    mockStore.listDir.mockResolvedValueOnce(["low-conf.md", "high-conf.md"]);
+    // brand loaded first, then project — project wins because scope_level is higher
+    mockStore.listDir.mockResolvedValueOnce(["brand-mem.md", "project-mem.md"]);
     mockStore.readParsed
-      .mockResolvedValueOnce(lowConf)
-      .mockResolvedValueOnce(highConf);
+      .mockResolvedValueOnce(brandMem)
+      .mockResolvedValueOnce(projectMem);
 
     const result = await loader.loadMemories(BASE_TASK, "single-edit");
 
-    expect(result.promptText).toContain("High confidence.");
-    expect(result.promptText).not.toContain("Low confidence.");
+    expect(result.promptText).toContain("Project version.");
+    expect(result.promptText).not.toContain("Brand version.");
   });
 
   // ── 11. Token budget truncation limits output ─────────────────────────────
