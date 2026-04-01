@@ -90,7 +90,20 @@ describe("MemorySelector", () => {
     expect(ids).not.toContain("dm2");
   });
 
-  // 4. respects token budget
+  // 4. includes draft memories with no activation_scope
+  it("includes draft memories that have no activation_scope", () => {
+    const draftNoScope = makeMemory({
+      memory_id: "dns1",
+      semantic_key: "sk-dns",
+      status: "draft",
+      content: "Draft without scope.",
+    });
+
+    const result = selector.selectRelevant([draftNoScope], BASE_TASK);
+    expect(result.map((m) => m.memory_id)).toContain("dns1");
+  });
+
+  // 5. respects token budget
   it("respects token budget and returns fewer memories when budget is tight", () => {
     // 20 memories with ~500 char content each, budget 2000 chars = 500 tokens
     // 2000 chars / 4 chars per token = 500 tokens budget → 2000 char total

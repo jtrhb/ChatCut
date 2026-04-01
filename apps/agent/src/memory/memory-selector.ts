@@ -23,7 +23,7 @@ export class MemorySelector {
     const scopeFiltered = statusFiltered.filter((m) => {
       if (m.status !== "draft") return true;
       const scope = m.activation_scope;
-      if (!scope) return false;
+      if (!scope) return true;
       if (scope.session_id !== undefined) {
         return scope.session_id === task.sessionId;
       }
@@ -53,7 +53,7 @@ export class MemorySelector {
     let usedChars = 0;
 
     for (const mem of merged) {
-      const len = mem.content.length;
+      const len = mem.content.length + mem.semantic_key.length + 20;
       if (usedChars + len > budget) break;
       result.push(mem);
       usedChars += len;
