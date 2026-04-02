@@ -1,4 +1,6 @@
 import { randomUUID } from "crypto";
+import { eq, and, sql } from "drizzle-orm";
+import { skills } from "../db/schema.js";
 
 export interface SkillSaveParams {
   userId: string;
@@ -23,29 +25,38 @@ export class SkillStore {
 
   async save(params: SkillSaveParams): Promise<{ id: string }> {
     const id = randomUUID();
-    await this.db.insert("skills", {
+    await this.db.insert(skills).values({
       id,
-      user_id: params.userId,
       name: params.name,
-      agent_type: params.agentType,
-      scope_level: params.scopeLevel,
+      agentType: params.agentType,
       content: params.content,
-      usage_count: 0,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      frontmatter: { scopeLevel: params.scopeLevel, userId: params.userId },
+      skillStatus: "draft",
+      createdAt: new Date(),
+      updatedAt: new Date(),
     });
     return { id };
   }
 
   async search(params: SkillSearchParams): Promise<any[]> {
-    const filters: Record<string, unknown> = { user_id: params.userId };
-    if (params.agentType !== undefined) filters.agent_type = params.agentType;
-    if (params.scopeLevel !== undefined) filters.scope_level = params.scopeLevel;
+    let query = this.db.select().from(skills);
 
-    return this.db.select("skills", filters);
+    const conditions = [];
+    if (params.agentType !== undefined) {
+      conditions.push(eq(skills.agentType, params.agentType));
+    }
+
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions));
+    }
+
+    return query;
   }
 
   async incrementUsage(skillId: string): Promise<void> {
-    await this.db.update("skills", skillId, { usage_count: { $increment: 1 } });
+    await this.db
+      .update(skills)
+      .set({ updatedAt: new Date() })
+      .where(eq(skills.id, skillId));
   }
 }

@@ -20,6 +20,9 @@ import { SkillRuntime } from "../skills/skill-runtime.js";
 import type { SkillContract } from "../skills/types.js";
 import type { ToolDefinition } from "../tools/types.js";
 import { formatToolsForApi } from "../tools/format-for-api.js";
+import type { ChangesetManager } from "../changeset/changeset-manager.js";
+import type { ExplorationEngine } from "../exploration/exploration-engine.js";
+import type { TaskRegistry } from "../tasks/task-registry.js";
 
 // ---------------------------------------------------------------------------
 // Tool-name → sub-agent mapping
@@ -46,6 +49,9 @@ export class MasterAgent {
   private subAgentDispatchers: Map<string, (input: DispatchInput) => Promise<DispatchOutput>>;
   private pipeline: ToolPipeline;
   private skillContracts: SkillContract[];
+  private changesetManager?: ChangesetManager;
+  private explorationEngine?: ExplorationEngine;
+  private taskRegistry?: TaskRegistry;
 
   constructor(deps: {
     runtime: AgentRuntime;
@@ -54,12 +60,18 @@ export class MasterAgent {
     subAgentDispatchers: Map<string, (input: DispatchInput) => Promise<DispatchOutput>>;
     hooks?: ToolHook[];
     skillContracts?: SkillContract[];
+    changesetManager?: ChangesetManager;
+    explorationEngine?: ExplorationEngine;
+    taskRegistry?: TaskRegistry;
   }) {
     this.runtime = deps.runtime;
     this.contextManager = deps.contextManager;
     this.writeLock = deps.writeLock;
     this.subAgentDispatchers = deps.subAgentDispatchers;
     this.skillContracts = deps.skillContracts ?? [];
+    this.changesetManager = deps.changesetManager;
+    this.explorationEngine = deps.explorationEngine;
+    this.taskRegistry = deps.taskRegistry;
 
     // Create ToolPipeline wrapping the raw tool handler
     this.pipeline = new ToolPipeline(
@@ -244,16 +256,45 @@ export class MasterAgent {
       return this.handleDispatch(route, input as Record<string, unknown>);
     }
 
-    // Stub tools
     switch (name) {
-      case "propose_changes":
+      case "propose_changes": {
+        if (this.changesetManager) {
+          const params = input as { summary: string; affectedElements: string[]; projectId?: string };
+          return this.changesetManager.propose(params);
+        }
         return { status: "pending", input };
+      }
 
-      case "explore_options":
+      case "explore_options": {
+        if (this.explorationEngine) {
+          const params = input as {
+            intent: string;
+            baseSnapshotVersion: number;
+            timelineSnapshot: string;
+            candidates: Array<{
+              label: string;
+              summary: string;
+              candidateType: string;
+              commands: unknown[];
+              expectedMetrics: { durationChange: string; affectedElements: number };
+            }>;
+          };
+          return this.explorationEngine.explore(params);
+        }
         return { status: "queued", input };
+      }
 
-      case "export_video":
+      case "export_video": {
+        if (this.taskRegistry) {
+          const params = input as Record<string, unknown>;
+          const task = this.taskRegistry.createTask({
+            type: "export",
+            description: `Export video: ${params.format ?? "mp4"} ${params.quality ?? "standard"}`,
+          });
+          return { task_id: task.taskId };
+        }
         return { task_id: crypto.randomUUID(), input };
+      }
 
       default:
         return { error: `Unknown tool: ${name}` };

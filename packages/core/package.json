@@ -16,7 +16,6 @@
     "vitest": "^3.2.1"
   },
   "dependencies": {
-    "eventemitter3": "^5.0.1",
-    "nanoid": "^5.1.5"
+    "eventemitter3": "^5.0.1"
   }
 }

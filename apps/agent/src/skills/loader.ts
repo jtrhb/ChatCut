@@ -3,6 +3,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import type { ParsedMemory } from "../memory/types.js";
 import type { MemoryStore } from "../memory/memory-store.js";
+import { parseFrontmatter } from "../utils/frontmatter.js";
 import { SkillRuntime } from "./skill-runtime.js";
 import type { SkillContract, SkillFrontmatter } from "./types.js";
 
@@ -133,7 +134,7 @@ export class SkillLoader {
       if (!file.endsWith(".md")) continue;
       try {
         const raw = readFileSync(join(PRESETS_DIR, file), "utf-8");
-        const mem = this.parseFrontmatter(raw);
+        const mem = parseFrontmatter(raw);
         if (agentTypeMatches(mem.agent_type, agentType)) {
           results.push(mem);
         }
@@ -185,110 +186,4 @@ export class SkillLoader {
     }
   }
 
-  /**
-   * Parse `---\nyaml\n---\ncontent` format into a ParsedMemory.
-   * Mirrors the parser in MemoryStore but operates on a raw string
-   * so we don't need a store instance for preset files.
-   *
-   * **Format contract:** This is a JSON-compatible frontmatter subset, NOT
-   * full YAML. Each line is `key: value`. Arrays and objects must use inline
-   * JSON syntax: `allowed_tools: ["trim_element", "split_element"]`.
-   * Multi-line YAML list syntax (`- item` on separate lines) is NOT supported.
-   */
-  private parseFrontmatter(raw: string): ParsedMemory {
-    if (!raw.startsWith("---")) {
-      throw new Error("Invalid preset file: missing frontmatter opening ---");
-    }
-
-    const afterOpen = raw.slice(3);
-    const closeIdx = afterOpen.indexOf("\n---");
-    if (closeIdx === -1) {
-      throw new Error("Invalid preset file: missing frontmatter closing ---");
-    }
-
-    const yamlBlock = afterOpen.slice(0, closeIdx).trim();
-    const content = afterOpen.slice(closeIdx + 4).trim();
-
-    const fields: Record<string, unknown> = {};
-
-    for (const line of yamlBlock.split("\n")) {
-      const colonIdx = line.indexOf(":");
-      if (colonIdx === -1) continue;
-
-      const key = line.slice(0, colonIdx).trim();
-      const rawValue = line.slice(colonIdx + 1).trim();
-      fields[key] = this.parseYamlValue(rawValue);
-    }
-
-    const mem: ParsedMemory = {
-      memory_id: String(fields.memory_id ?? ""),
-      type: (fields.type as ParsedMemory["type"]) ?? "knowledge",
-      status: (fields.status as ParsedMemory["status"]) ?? "active",
-      confidence: (fields.confidence as ParsedMemory["confidence"]) ?? "high",
-      source: (fields.source as ParsedMemory["source"]) ?? "implicit",
-      created: String(fields.created ?? ""),
-      updated: String(fields.updated ?? ""),
-      reinforced_count: Number(fields.reinforced_count ?? 0),
-      last_reinforced_at: String(fields.last_reinforced_at ?? ""),
-      source_change_ids: (fields.source_change_ids as string[]) ?? [],
-      used_in_changeset_ids: (fields.used_in_changeset_ids as string[]) ?? [],
-      created_session_id: String(fields.created_session_id ?? ""),
-      scope: String(fields.scope ?? "global"),
-      scope_level: (fields.scope_level as ParsedMemory["scope_level"]) ?? "global",
-      semantic_key: String(fields.semantic_key ?? ""),
-      tags: (fields.tags as string[]) ?? [],
-      content,
-    };
-
-    if (fields.skill_id !== undefined) mem.skill_id = String(fields.skill_id);
-    if (fields.skill_status !== undefined)
-      mem.skill_status = fields.skill_status as ParsedMemory["skill_status"];
-    if (fields.agent_type !== undefined)
-      mem.agent_type = Array.isArray(fields.agent_type)
-        ? (fields.agent_type as string[])
-        : String(fields.agent_type);
-    if (fields.applies_to !== undefined)
-      mem.applies_to = fields.applies_to as string[];
-
-    // Skill runtime frontmatter
-    if (fields.allowed_tools !== undefined)
-      mem.allowed_tools = fields.allowed_tools as string[];
-    if (fields.denied_tools !== undefined)
-      mem.denied_tools = fields.denied_tools as string[];
-    if (fields.model !== undefined)
-      mem.skill_model = String(fields.model);
-    if (fields.effort !== undefined)
-      mem.effort = fields.effort as ParsedMemory["effort"];
-    if (fields.when_to_use !== undefined)
-      mem.when_to_use = fields.when_to_use as string[];
-    if (fields.execution_context !== undefined)
-      mem.execution_context = fields.execution_context as ParsedMemory["execution_context"];
-    if (fields.hooks !== undefined)
-      mem.skill_hooks = fields.hooks as string[];
-
-    return mem;
-  }
-
-  private parseYamlValue(raw: string): unknown {
-    if (raw === "") return "";
-    if (raw.startsWith("[")) {
-      try {
-        return JSON.parse(raw);
-      } catch {
-        return raw;
-      }
-    }
-    if (raw.startsWith("{")) {
-      try {
-        return JSON.parse(raw);
-      } catch {
-        return raw;
-      }
-    }
-    if (raw === "true") return true;
-    if (raw === "false") return false;
-    const num = Number(raw);
-    if (!isNaN(num) && raw !== "") return num;
-    return raw;
-  }
 }

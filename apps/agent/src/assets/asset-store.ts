@@ -1,4 +1,6 @@
 import { randomUUID } from "crypto";
+import { eq, and } from "drizzle-orm";
+import { assets } from "../db/schema.js";
 
 export interface AssetSaveParams {
   userId: string;
@@ -24,35 +26,42 @@ export class AssetStore {
 
   async save(params: AssetSaveParams): Promise<{ id: string }> {
     const id = randomUUID();
-    await this.db.insert("assets", {
+    await this.db.insert(assets).values({
       id,
-      user_id: params.userId,
-      type: params.type,
       name: params.name,
-      storage_key: params.storageKey,
-      metadata: params.metadata ?? {},
+      type: params.type,
+      storageKey: params.storageKey,
       tags: params.tags ?? [],
-      generation_context: {
+      generationContext: {
         created_at: new Date().toISOString(),
         source: "agent",
+        metadata: params.metadata ?? {},
       },
-      created_at: new Date().toISOString(),
+      createdAt: new Date(),
     });
     return { id };
   }
 
   async search(params: AssetSearchParams): Promise<any[]> {
-    const filters: Record<string, unknown> = { user_id: params.userId };
-    if (params.type !== undefined) filters.type = params.type;
+    let query = this.db.select().from(assets);
 
-    const results: any[] = await this.db.select("assets", filters);
+    const conditions = [];
+    if (params.type !== undefined) {
+      conditions.push(eq(assets.type, params.type));
+    }
+
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions));
+    }
+
+    const results: any[] = await query;
 
     if (params.query) {
       const q = params.query.toLowerCase();
       return results.filter(
         (a: any) =>
           (a.name as string).toLowerCase().includes(q) ||
-          (a.tags as string[]).some((t: string) => t.toLowerCase().includes(q))
+          ((a.tags ?? []) as string[]).some((t: string) => t.toLowerCase().includes(q))
       );
     }
 

@@ -1,16 +1,27 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { AgentConfig, AgentResult } from "./types.js";
 
+export interface SessionMessage {
+  role: string;
+  content: unknown;
+}
+
+export interface SessionCallbacks {
+  onMessage: (message: SessionMessage) => void;
+}
+
 export interface AgentRuntime {
   run(config: AgentConfig, input: string): Promise<AgentResult>;
   setToolExecutor(fn: (name: string, input: unknown) => Promise<unknown>): void;
   setOnTurnComplete?(fn: (tokens: { input: number; output: number }) => void): void;
+  setSessionCallbacks?(callbacks: SessionCallbacks): void;
 }
 
 export class NativeAPIRuntime implements AgentRuntime {
   private client: Anthropic;
   private toolExecutor: (name: string, input: unknown) => Promise<unknown>;
   private onTurnComplete?: (tokens: { input: number; output: number }) => void;
+  private sessionCallbacks?: SessionCallbacks;
 
   constructor(apiKey: string) {
     this.client = new Anthropic({ apiKey });
@@ -27,6 +38,10 @@ export class NativeAPIRuntime implements AgentRuntime {
     this.onTurnComplete = fn;
   }
 
+  setSessionCallbacks(callbacks: SessionCallbacks): void {
+    this.sessionCallbacks = callbacks;
+  }
+
   async run(config: AgentConfig, input: string): Promise<AgentResult> {
     const maxIterations = config.maxIterations ?? 10;
     const tokenBudget = config.tokenBudget ?? { input: 30_000, output: 4_000 };
@@ -34,6 +49,8 @@ export class NativeAPIRuntime implements AgentRuntime {
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: input },
     ];
+
+    this.sessionCallbacks?.onMessage({ role: "user", content: input });
 
     const toolCalls: AgentResult["toolCalls"] = [];
     let totalInputTokens = 0;
@@ -58,6 +75,7 @@ export class NativeAPIRuntime implements AgentRuntime {
         );
         const text = textBlocks.map((b) => b.text).join("\n");
 
+        this.sessionCallbacks?.onMessage({ role: "assistant", content: text });
         this.onTurnComplete?.({ input: totalInputTokens, output: totalOutputTokens });
         return {
           text,
@@ -78,6 +96,7 @@ export class NativeAPIRuntime implements AgentRuntime {
         );
         const text = textBlocks.map((b) => b.text).join("\n");
 
+        this.sessionCallbacks?.onMessage({ role: "assistant", content: text });
         this.onTurnComplete?.({ input: totalInputTokens, output: totalOutputTokens });
         return {
           text,
@@ -100,6 +119,9 @@ export class NativeAPIRuntime implements AgentRuntime {
           content: typeof output === "string" ? output : JSON.stringify(output),
         });
       }
+
+      // Notify session of tool results
+      this.sessionCallbacks?.onMessage({ role: "tool_result", content: toolResults });
 
       // Append tool results as user message
       messages.push({ role: "user", content: toolResults });

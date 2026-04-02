@@ -101,6 +101,44 @@ export const visionCache = pgTable(
   ]
 );
 
+export const assets = pgTable("assets", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  type: text("type").notNull(),
+  storageKey: text("storage_key").notNull(),
+  tags: jsonb("tags").default([]).notNull(),
+  generationContext: jsonb("generation_context"),
+  projectId: uuid("project_id").references(() => projects.id),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const brandKits = pgTable("brand_kits", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  brandSlug: text("brand_slug"),
+  visualConfig: jsonb("visual_config"),
+  toneConfig: jsonb("tone_config"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const skills = pgTable(
+  "skills",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    agentType: text("agent_type").notNull(),
+    content: text("content").notNull(),
+    frontmatter: jsonb("frontmatter"),
+    skillStatus: text("skill_status").default("draft").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("skills_agent_type_idx").on(table.agentType),
+    index("skills_status_idx").on(table.skillStatus),
+  ]
+);
+
 export const explorationSessions = pgTable("exploration_sessions", {
   id: uuid("id").primaryKey().defaultRandom(),
   projectId: uuid("project_id")

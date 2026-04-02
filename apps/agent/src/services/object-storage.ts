@@ -8,9 +8,9 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "crypto";
 import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
+import { Readable } from "stream";
 import { join, extname } from "path";
 import { tmpdir } from "os";
-import type { Readable } from "stream";
 
 export interface ObjectStorageConfig {
   accountId: string;
@@ -117,6 +117,7 @@ export class ObjectStorage {
    * Download an object from R2, streaming it to a temp file.
    * Returns the absolute path of the written temp file.
    * Uses streaming to avoid loading the entire file into memory.
+   * Handles both Node.js Readable and web ReadableStream bodies.
    */
   async downloadToTempFile(key: string): Promise<string> {
     const command = new GetObjectCommand({
@@ -132,9 +133,15 @@ export class ObjectStorage {
 
     const ext = extname(key);
     const tmpPath = join(tmpdir(), `${randomUUID()}${ext}`);
-    const writeStream = createWriteStream(tmpPath);
 
-    await pipeline(response.Body as Readable, writeStream);
+    // Convert web ReadableStream to Node.js Readable if needed.
+    // The S3 SDK v3 Body can be a web ReadableStream in some runtimes (e.g. Bun).
+    const nodeStream =
+      response.Body instanceof Readable
+        ? response.Body
+        : Readable.fromWeb(response.Body as ReadableStream);
+
+    await pipeline(nodeStream, createWriteStream(tmpPath));
 
     return tmpPath;
   }

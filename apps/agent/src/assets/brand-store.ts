@@ -1,4 +1,6 @@
 import { randomUUID } from "crypto";
+import { eq } from "drizzle-orm";
+import { brandKits } from "../db/schema.js";
 
 export interface BrandCreateParams {
   userId: string;
@@ -16,19 +18,24 @@ export class BrandStore {
 
   async create(params: BrandCreateParams): Promise<{ id: string }> {
     const id = randomUUID();
-    await this.db.insert("brand_kits", {
+    await this.db.insert(brandKits).values({
       id,
-      user_id: params.userId,
       name: params.name,
-      colors: params.colors ?? [],
-      fonts: params.fonts ?? [],
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      brandSlug: params.name.toLowerCase().replace(/\s+/g, "-"),
+      visualConfig: {
+        colors: params.colors ?? [],
+        fonts: params.fonts ?? [],
+      },
+      createdAt: new Date(),
     });
     return { id };
   }
 
   async get(brandId: string): Promise<any | null> {
-    return this.db.findOne("brand_kits", { id: brandId });
+    const rows = await this.db
+      .select()
+      .from(brandKits)
+      .where(eq(brandKits.id, brandId));
+    return rows[0] ?? null;
   }
 }

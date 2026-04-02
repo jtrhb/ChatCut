@@ -31,10 +31,12 @@ interface SignalClassification {
 export class MemoryExtractor {
   private readonly changeLog: ChangeLog;
   private readonly memoryStore: MemoryStoreLike;
+  private readonly sessionId: string;
 
-  constructor(deps: { changeLog: ChangeLog; memoryStore: MemoryStore | MemoryStoreLike }) {
+  constructor(deps: { changeLog: ChangeLog; memoryStore: MemoryStore | MemoryStoreLike; sessionId?: string }) {
     this.changeLog = deps.changeLog;
     this.memoryStore = deps.memoryStore as MemoryStoreLike;
+    this.sessionId = deps.sessionId ?? `session-${nanoid(6)}`;
   }
 
   // -------------------------------------------------------------------------
@@ -85,7 +87,8 @@ export class MemoryExtractor {
       last_reinforced_at: now,
       source_change_ids: entries.map((e) => e.id),
       used_in_changeset_ids: [changesetId],
-      created_session_id: changesetId, // use changesetId as session proxy when no session context
+      created_session_id: this.sessionId,
+      last_reinforced_session_id: this.sessionId,
       scope: "global",
       scope_level: "global",
       semantic_key: `rejected-${signal.type}-pattern`,
@@ -126,6 +129,7 @@ export class MemoryExtractor {
         ...memory,
         reinforced_count: memory.reinforced_count + 1,
         last_reinforced_at: now,
+        last_reinforced_session_id: this.sessionId,
         updated: now,
         used_in_changeset_ids: [...memory.used_in_changeset_ids, changesetId],
       };
@@ -160,7 +164,8 @@ export class MemoryExtractor {
       last_reinforced_at: now,
       source_change_ids: [],
       used_in_changeset_ids: [],
-      created_session_id: `explicit-${nanoid(4)}`,
+      created_session_id: this.sessionId,
+      last_reinforced_session_id: this.sessionId,
       scope: input.scope,
       scope_level: scopeLevel,
       semantic_key: `explicit-${nanoid(6)}`,

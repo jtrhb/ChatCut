@@ -53,6 +53,70 @@ describe("ProjectContextManager", () => {
     });
   });
 
+  describe("updateVideoAnalysis()", () => {
+    it("sets videoAnalysis from null to a full object", () => {
+      expect(manager.get().videoAnalysis).toBeNull();
+
+      const analysis = {
+        scenes: [{ start: 0, end: 5.2, description: "Opening shot" }],
+        characters: ["Alice"],
+        mood: "tense",
+        style: "documentary",
+        sourceStorageKey: "s3://bucket/video.mp4",
+        analyzedAtSnapshotVersion: 3,
+        lastAnalyzedAt: "2026-01-15T10:00:00.000Z",
+      };
+
+      manager.updateVideoAnalysis(analysis);
+      const ctx = manager.get();
+
+      expect(ctx.videoAnalysis).not.toBeNull();
+      expect(ctx.videoAnalysis!.scenes).toHaveLength(1);
+      expect(ctx.videoAnalysis!.scenes[0]).toEqual({
+        start: 0,
+        end: 5.2,
+        description: "Opening shot",
+      });
+      expect(ctx.videoAnalysis!.characters).toEqual(["Alice"]);
+      expect(ctx.videoAnalysis!.mood).toBe("tense");
+      expect(ctx.videoAnalysis!.style).toBe("documentary");
+      expect(ctx.videoAnalysis!.sourceStorageKey).toBe("s3://bucket/video.mp4");
+      expect(ctx.videoAnalysis!.analyzedAtSnapshotVersion).toBe(3);
+      expect(ctx.videoAnalysis!.lastAnalyzedAt).toBe("2026-01-15T10:00:00.000Z");
+    });
+
+    it("replaces a previous videoAnalysis entirely", () => {
+      manager.updateVideoAnalysis({
+        scenes: [{ start: 0, end: 1, description: "first" }],
+        characters: ["A"],
+        mood: "calm",
+        style: "vlog",
+        sourceStorageKey: "key-1",
+        analyzedAtSnapshotVersion: 1,
+        lastAnalyzedAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      manager.updateVideoAnalysis({
+        scenes: [
+          { start: 0, end: 2, description: "new-first" },
+          { start: 2, end: 4, description: "new-second" },
+        ],
+        characters: ["B", "C"],
+        mood: "energetic",
+        style: "cinematic",
+        sourceStorageKey: "key-2",
+        analyzedAtSnapshotVersion: 5,
+        lastAnalyzedAt: "2026-03-01T00:00:00.000Z",
+      });
+
+      const va = manager.get().videoAnalysis!;
+      expect(va.scenes).toHaveLength(2);
+      expect(va.characters).toEqual(["B", "C"]);
+      expect(va.sourceStorageKey).toBe("key-2");
+      expect(va.analyzedAtSnapshotVersion).toBe(5);
+    });
+  });
+
   describe("updateTimeline()", () => {
     it("changes timelineState", () => {
       manager.updateTimeline("new-state", 1);

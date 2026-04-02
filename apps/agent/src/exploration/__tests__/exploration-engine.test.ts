@@ -78,6 +78,8 @@ describe("ExplorationEngine", () => {
     engine = new ExplorationEngine({ serverCore: serverCore as any, jobQueue: jobQueue as any, objectStorage: objectStorage as any, db });
   });
 
+  // --- Core materialization ---
+
   it("materializes all candidates — clone called once per candidate", async () => {
     await engine.explore(BASE_PARAMS);
     expect(serverCore.clone).toHaveBeenCalledTimes(BASE_PARAMS.candidates.length);
@@ -104,7 +106,6 @@ describe("ExplorationEngine", () => {
   it("enqueues one pg-boss job per candidate", async () => {
     await engine.explore(BASE_PARAMS);
     expect(jobQueue.enqueue).toHaveBeenCalledTimes(BASE_PARAMS.candidates.length);
-    // Each call should use the preview-render job name
     for (const call of jobQueue.enqueue.mock.calls) {
       expect(call[0]).toBe("preview-render");
     }
@@ -136,6 +137,168 @@ describe("ExplorationEngine", () => {
     expect(serverCore.clone).toHaveBeenCalledTimes(4);
     expect(jobQueue.enqueue).toHaveBeenCalledTimes(4);
     expect(result.candidates).toHaveLength(4);
+  });
+
+  // --- Command application (bug fix: commands no longer discarded) ---
+
+  it("applies commands on each clone via executeAgentCommand", async () => {
+    await engine.explore(BASE_PARAMS);
+    // Each candidate has 1 command, 2 candidates total
+    expect(cloneInstance.executeAgentCommand).toHaveBeenCalledTimes(2);
+    const firstCall = cloneInstance.executeAgentCommand.mock.calls[0]!;
+    expect(firstCall[0]).toEqual({ type: "trim", targetId: "el-1" });
+    expect(firstCall[1]).toBe("exploration-engine");
+  });
+
+  it("includes commands in the preview-render job payload", async () => {
+    await engine.explore(BASE_PARAMS);
+    for (const call of jobQueue.enqueue.mock.calls) {
+      const payload = call[1];
+      expect(payload).toHaveProperty("commands");
+      expect(payload.commands).toEqual([{ type: "trim", targetId: "el-1" }]);
+    }
+  });
+
+  // --- State machine ---
+
+  it("returns completed status after explore() finishes", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    expect(result.status).toBe("completed");
+  });
+
+  it("getStatus returns completed after explore()", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    expect(engine.getStatus(result.explorationId)).toBe("completed");
+  });
+
+  it("getStatus returns undefined for unknown explorationId", () => {
+    expect(engine.getStatus("nonexistent-id")).toBeUndefined();
+  });
+
+  it("selectCandidate transitions to user_selected", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    const candidateId = result.candidates[0]!.candidateId;
+    engine.selectCandidate(result.explorationId, candidateId);
+    expect(engine.getStatus(result.explorationId)).toBe("user_selected");
+  });
+
+  it("selectCandidate throws for unknown exploration", () => {
+    expect(() => engine.selectCandidate("bad-id", "c1")).toThrow(
+      "Unknown exploration"
+    );
+  });
+
+  it("selectCandidate throws for unknown candidate", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    expect(() =>
+      engine.selectCandidate(result.explorationId, "nonexistent-candidate")
+    ).toThrow("Unknown candidate");
+  });
+
+  it("applySelection transitions from user_selected to applied", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    const candidateId = result.candidates[0]!.candidateId;
+    engine.selectCandidate(result.explorationId, candidateId);
+    engine.applySelection(result.explorationId);
+    expect(engine.getStatus(result.explorationId)).toBe("applied");
+  });
+
+  it("applySelection throws when no candidate selected", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    // status is "completed", no candidate selected — should throw
+    expect(() => engine.applySelection(result.explorationId)).toThrow(
+      "No candidate selected"
+    );
+  });
+
+  it("applySelection throws for unknown exploration", () => {
+    expect(() => engine.applySelection("bad-id")).toThrow(
+      "Unknown exploration"
+    );
+  });
+
+  it("cancel transitions to cancelled from completed", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    engine.cancel(result.explorationId);
+    expect(engine.getStatus(result.explorationId)).toBe("cancelled");
+  });
+
+  it("cancel throws for unknown exploration", () => {
+    expect(() => engine.cancel("bad-id")).toThrow("Unknown exploration");
+  });
+
+  it("cancel throws from terminal state (applied)", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    const candidateId = result.candidates[0]!.candidateId;
+    engine.selectCandidate(result.explorationId, candidateId);
+    engine.applySelection(result.explorationId);
+    expect(() => engine.cancel(result.explorationId)).toThrow(
+      "Invalid transition"
+    );
+  });
+
+  it("cancel throws from terminal state (cancelled)", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    engine.cancel(result.explorationId);
+    expect(() => engine.cancel(result.explorationId)).toThrow(
+      "Invalid transition"
+    );
+  });
+
+  it("selectCandidate throws from cancelled state", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    engine.cancel(result.explorationId);
+    const candidateId = result.candidates[0]!.candidateId;
+    expect(() =>
+      engine.selectCandidate(result.explorationId, candidateId)
+    ).toThrow("Invalid transition");
+  });
+
+  it("getSession returns a snapshot of the session", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    const session = engine.getSession(result.explorationId);
+    expect(session).toBeDefined();
+    expect(session!.status).toBe("completed");
+    expect(session!.candidates).toHaveLength(2);
+    expect(session!.selectedCandidateId).toBeNull();
+    expect(session!.createdAt).toBeGreaterThan(0);
+  });
+
+  it("getSession returns undefined for unknown id", () => {
+    expect(engine.getSession("nonexistent")).toBeUndefined();
+  });
+
+  it("single candidate skips partial, goes running -> completed", async () => {
+    const params = {
+      ...BASE_PARAMS,
+      candidates: [buildCandidate("Solo")],
+    };
+    const result = await engine.explore(params);
+    expect(result.status).toBe("completed");
+    expect(engine.getStatus(result.explorationId)).toBe("completed");
+  });
+
+  // --- Full lifecycle ---
+
+  it("full lifecycle: explore -> select -> apply", async () => {
+    const result = await engine.explore(BASE_PARAMS);
+    expect(engine.getStatus(result.explorationId)).toBe("completed");
+
+    const candidateId = result.candidates[1]!.candidateId;
+    engine.selectCandidate(result.explorationId, candidateId);
+    expect(engine.getStatus(result.explorationId)).toBe("user_selected");
+
+    const session = engine.getSession(result.explorationId);
+    expect(session!.selectedCandidateId).toBe(candidateId);
+
+    engine.applySelection(result.explorationId);
+    expect(engine.getStatus(result.explorationId)).toBe("applied");
+  });
+
+  it("DB row status matches final session status", async () => {
+    await engine.explore(BASE_PARAMS);
+    const dbValues = db.insert().values.mock.calls[0]![0];
+    expect(dbValues.status).toBe("completed");
   });
 });
 

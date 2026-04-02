@@ -57,10 +57,12 @@ describe("MemoryExtractor", () => {
   let memoryStore: ReturnType<typeof makeMockMemoryStore>;
   let extractor: MemoryExtractor;
 
+  const TEST_SESSION_ID = "test-session-42";
+
   beforeEach(() => {
     changeLog = new ChangeLog();
     memoryStore = makeMockMemoryStore();
-    extractor = new MemoryExtractor({ changeLog, memoryStore: memoryStore as any });
+    extractor = new MemoryExtractor({ changeLog, memoryStore: memoryStore as any, sessionId: TEST_SESSION_ID });
   });
 
   // ── 1. start() subscribes to changeLog decision events ───────────────────
@@ -87,7 +89,10 @@ describe("MemoryExtractor", () => {
     expect(memory!.source).toBe("implicit");
     expect(memory!.status).toBe("draft");
     expect(memory!.confidence).toBe("low");
-    expect(memoryStore.writeMemory).toHaveBeenCalledOnce();
+    expect(memory!.created_session_id).toBe(TEST_SESSION_ID);
+    expect(memory!.last_reinforced_session_id).toBe(TEST_SESSION_ID);
+    expect(memory!.used_in_changeset_ids).toEqual(["cs-reject-1"]);
+    expect(memoryStore.writeMemory).toHaveBeenCalledTimes(1);
   });
 
   // ── 3. handleRejection with 3+ consecutive rejections sets activation_scope
@@ -125,7 +130,7 @@ describe("MemoryExtractor", () => {
     await extractor.handleRejection("cs-base");
 
     // Verify memory was created
-    expect(memoryStore.writeMemory).toHaveBeenCalledOnce();
+    expect(memoryStore.writeMemory).toHaveBeenCalledTimes(1);
     const firstCall = memoryStore.writeMemory.mock.calls[0];
     const draftMemory = firstCall[1] as ParsedMemory;
     expect(draftMemory.reinforced_count).toBe(0);
@@ -221,7 +226,7 @@ describe("MemoryExtractor", () => {
     expect(memory.status).toBe("active");
     expect(memory.confidence).toBe("high");
     expect(memory.content).toBe("Always use jump cuts for sports content");
-    expect(memoryStore.writeMemory).toHaveBeenCalledOnce();
+    expect(memoryStore.writeMemory).toHaveBeenCalledTimes(1);
   });
 
   // ── 7. canPromoteDraft returns false when same session ────────────────────
@@ -326,6 +331,69 @@ describe("MemoryExtractor", () => {
       // The signal classification should produce a meaningful semantic_key or tag
       expect(memory!.tags.length).toBeGreaterThan(0);
     });
+  });
+
+  // ── 11a. handleApproval updates last_reinforced_session_id ────────────────
+  it("handleApproval sets last_reinforced_session_id to extractor sessionId", async () => {
+    const before = new Date("2020-01-01T00:00:00.000Z").toISOString();
+
+    const existingMemory: ParsedMemory = {
+      memory_id: "mem-sess-track",
+      type: "pattern",
+      status: "draft",
+      confidence: "low",
+      source: "implicit",
+      created: before,
+      updated: before,
+      reinforced_count: 0,
+      last_reinforced_at: before,
+      source_change_ids: [],
+      used_in_changeset_ids: [],
+      created_session_id: "old-session",
+      last_reinforced_session_id: "old-session",
+      scope: "global",
+      scope_level: "global",
+      semantic_key: "update-pattern",
+      tags: ["update"],
+      content: "test memory",
+    };
+
+    const memPath = "drafts/mem-sess-track.md";
+    memoryStore._written.set(memPath, existingMemory);
+    memoryStore.listDir.mockResolvedValue(["mem-sess-track.md"]);
+    memoryStore.readParsed.mockImplementation(async (p: string) => {
+      const mem = memoryStore._written.get(p);
+      if (!mem) throw new Error(`Not found: ${p}`);
+      return mem;
+    });
+
+    changeLog.record({
+      source: "agent",
+      changesetId: "cs-sess-track",
+      action: { type: "update", targetType: "element", targetId: "elem-1", details: {} },
+      summary: "Updated clip",
+    });
+
+    await extractor.handleApproval("cs-sess-track");
+
+    const lastCall = memoryStore.writeMemory.mock.calls.at(-1);
+    expect(lastCall).toBeDefined();
+    const reinforced = lastCall![1] as ParsedMemory;
+    expect(reinforced.last_reinforced_session_id).toBe(TEST_SESSION_ID);
+    expect(reinforced.used_in_changeset_ids).toContain("cs-sess-track");
+  });
+
+  // ── 11b. handleExplicitInput populates causal tracking fields ───────────
+  it("handleExplicitInput sets created_session_id and last_reinforced_session_id to extractor sessionId", async () => {
+    const memory = await extractor.handleExplicitInput({
+      content: "Prefer smooth transitions",
+      scope: "brand:acme",
+      tags: ["transitions"],
+    });
+
+    expect(memory.created_session_id).toBe(TEST_SESSION_ID);
+    expect(memory.last_reinforced_session_id).toBe(TEST_SESSION_ID);
+    expect(memory.used_in_changeset_ids).toEqual([]);
   });
 
   // ── 11. Single approval does not create new memory (only reinforces) ──────

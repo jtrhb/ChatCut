@@ -1,5 +1,5 @@
 import EventEmitter from "eventemitter3";
-import { nanoid } from "nanoid";
+import { generateUUID } from "./utils/id";
 import type { ChangeEntry, ChangesetDecisionEvent } from "./types/change-log";
 
 export class ChangeLog extends EventEmitter {
@@ -13,7 +13,7 @@ export class ChangeLog extends EventEmitter {
   record(input: Omit<ChangeEntry, "id" | "timestamp">): ChangeEntry {
     const entry: ChangeEntry = {
       ...input,
-      id: nanoid(),
+      id: generateUUID(),
       timestamp: Date.now(),
     };
     this.entries.push(entry);

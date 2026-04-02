@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SkillLoader } from "../loader.js";
+import { parseFrontmatter } from "../../utils/frontmatter.js";
 import type { ParsedMemory } from "../../memory/types.js";
 
 // ---------------------------------------------------------------------------
@@ -66,8 +67,7 @@ class TestableSkillLoader extends SkillLoader {
     const results: ParsedMemory[] = [];
     for (const { content } of this.presetRaw) {
       try {
-        // Access the private parser via a cast trick
-        const mem = (this as any).parseFrontmatter(content);
+        const mem = parseFrontmatter(content);
         const at = mem.agent_type;
         const matches = Array.isArray(at) ? at.includes(agentType) : at === agentType;
         if (matches) {

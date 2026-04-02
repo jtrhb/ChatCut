@@ -14,10 +14,13 @@ export interface ProjectContext {
   timelineState: string;
   snapshotVersion: number;
   videoAnalysis: {
-    scenes: any[];
+    scenes: Array<{ start: number; end: number; description: string }>;
     characters: string[];
     mood: string;
     style: string;
+    sourceStorageKey: string;
+    analyzedAtSnapshotVersion: number;
+    lastAnalyzedAt: string;
   } | null;
   currentIntent: {
     raw: string;
@@ -70,6 +73,11 @@ export class ProjectContextManager {
   /** Return a readonly view of the current context. */
   get(): Readonly<ProjectContext> {
     return this._ctx;
+  }
+
+  /** Replace the video analysis data wholesale. */
+  updateVideoAnalysis(analysis: NonNullable<ProjectContext["videoAnalysis"]>): void {
+    this._ctx.videoAnalysis = analysis;
   }
 
   /** Update the serialized timeline state and snapshot version together. */

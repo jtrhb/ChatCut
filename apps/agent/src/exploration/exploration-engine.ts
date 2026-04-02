@@ -3,6 +3,31 @@ import type { ServerEditorCore } from "../services/server-editor-core.js";
 import type { JobQueue } from "../services/job-queue.js";
 import type { ObjectStorage } from "../services/object-storage.js";
 
+export type ExplorationStatus =
+  | "queued"
+  | "running"
+  | "partial"
+  | "completed"
+  | "user_selected"
+  | "applied"
+  | "cancelled"
+  | "expired";
+
+/**
+ * Valid state transitions for the exploration state machine.
+ * Each key maps to the set of states it can transition to.
+ */
+const VALID_TRANSITIONS: Record<ExplorationStatus, ExplorationStatus[]> = {
+  queued: ["running", "cancelled"],
+  running: ["partial", "completed", "cancelled"],
+  partial: ["completed", "cancelled"],
+  completed: ["user_selected", "cancelled", "expired"],
+  user_selected: ["applied", "cancelled"],
+  applied: [],
+  cancelled: [],
+  expired: [],
+};
+
 export interface ExplorationCandidate {
   label: string;
   summary: string;
@@ -27,7 +52,15 @@ export interface CandidateResult {
 
 export interface ExploreResult {
   explorationId: string;
+  status: ExplorationStatus;
   candidates: CandidateResult[];
+}
+
+export interface ExplorationSession {
+  status: ExplorationStatus;
+  candidates: CandidateResult[];
+  selectedCandidateId: string | null;
+  createdAt: number;
 }
 
 export interface ExplorationEngineDeps {
@@ -38,23 +71,28 @@ export interface ExplorationEngineDeps {
 }
 
 /**
- * ExplorationEngine — orchestrates fan-out candidate materialization.
+ * ExplorationEngine — orchestrates fan-out candidate materialization
+ * with a full state machine tracking each exploration session.
+ *
+ * State machine:
+ *   queued -> running -> partial -> completed -> user_selected -> applied
+ *                    \-> completed               \-> cancelled
+ *                    \-> cancelled                \-> expired
  *
  * For each candidate skeleton it:
  *   1. Clones the serverCore to produce an isolated editor instance
- *   2. Materializes the candidate (applies commands on the clone)
+ *   2. Applies commands on the clone to materialize the candidate
  *   3. Generates a unique candidateId
  *   4. Stores the result timeline snapshot
- *   5. Enqueues a pg-boss "preview-render" job for the candidate
- *
- * Finally it persists the exploration session in the DB and returns
- * the explorationId plus candidate metadata.
+ *   5. Enqueues a pg-boss "preview-render" job (with commands in payload)
  */
 export class ExplorationEngine {
   private readonly serverCore: ServerEditorCore;
   private readonly jobQueue: JobQueue;
   private readonly objectStorage: ObjectStorage;
   private readonly db: any;
+
+  private readonly sessions = new Map<string, ExplorationSession>();
 
   constructor(deps: ExplorationEngineDeps) {
     this.serverCore = deps.serverCore;
@@ -67,21 +105,32 @@ export class ExplorationEngine {
     const explorationId = randomUUID();
     const candidateResults: CandidateResult[] = [];
 
-    for (const skeleton of params.candidates) {
+    // Initialize session as queued
+    this.sessions.set(explorationId, {
+      status: "queued",
+      candidates: [],
+      selectedCandidateId: null,
+      createdAt: Date.now(),
+    });
+
+    // Transition to running
+    this.transition(explorationId, "running");
+
+    for (let i = 0; i < params.candidates.length; i++) {
+      const skeleton = params.candidates[i]!;
+
       // 1. Clone serverCore for isolation
       const clone = this.serverCore.clone();
 
-      // 2. Materialize — apply each command on the clone
-      // Commands are opaque at this layer; real invocation would
-      // dispatch through clone.executeAgentCommand(). The clone is
-      // materialized by the act of cloning — command application
-      // is intentionally deferred to the preview-render worker.
-      void skeleton.commands;
+      // 2. Apply commands on the clone to materialize the candidate
+      for (const cmd of skeleton.commands) {
+        clone.executeAgentCommand(cmd as any, "exploration-engine");
+      }
 
       // 3. Generate candidateId
       const candidateId = randomUUID();
 
-      // 4. Store result timeline snapshot
+      // 4. Store result timeline snapshot (post-command application)
       const serialized = clone.serialize();
       await this.objectStorage.upload(
         Buffer.from(JSON.stringify(serialized)),
@@ -92,21 +141,36 @@ export class ExplorationEngine {
         }
       );
 
-      // 5. Enqueue preview-render job
+      // 5. Enqueue preview-render job with commands in payload
       await this.jobQueue.enqueue("preview-render", {
         explorationId,
         candidateId,
         label: skeleton.label,
+        commands: skeleton.commands,
         timelineSnapshot: params.timelineSnapshot,
       });
 
-      candidateResults.push({
+      const result: CandidateResult = {
         candidateId,
         label: skeleton.label,
         summary: skeleton.summary,
         expectedMetrics: skeleton.expectedMetrics,
-      });
+      };
+
+      candidateResults.push(result);
+
+      // Transition to partial after first candidate completes
+      if (i === 0 && params.candidates.length > 1) {
+        this.transition(explorationId, "partial");
+      }
     }
+
+    // All candidates processed — transition to completed
+    this.transition(explorationId, "completed");
+
+    // Update session with final candidate list
+    const session = this.sessions.get(explorationId)!;
+    session.candidates = candidateResults;
 
     // 6. Persist exploration session in DB
     await this.db
@@ -116,10 +180,89 @@ export class ExplorationEngine {
         intent: params.intent,
         baseSnapshotVersion: params.baseSnapshotVersion,
         candidates: candidateResults,
-        status: "queued",
+        status: session.status,
         createdAt: new Date(),
       });
 
-    return { explorationId, candidates: candidateResults };
+    return {
+      explorationId,
+      status: session.status,
+      candidates: candidateResults,
+    };
+  }
+
+  /** Get the current status of an exploration session. */
+  getStatus(explorationId: string): ExplorationStatus | undefined {
+    return this.sessions.get(explorationId)?.status;
+  }
+
+  /** Get the full session data for an exploration. */
+  getSession(explorationId: string): ExplorationSession | undefined {
+    const session = this.sessions.get(explorationId);
+    if (!session) return undefined;
+    return { ...session, candidates: [...session.candidates] };
+  }
+
+  /** Mark a candidate as selected by the user. Transitions to "user_selected". */
+  selectCandidate(explorationId: string, candidateId: string): void {
+    const session = this.sessions.get(explorationId);
+    if (!session) {
+      throw new Error(`Unknown exploration: ${explorationId}`);
+    }
+
+    const found = session.candidates.some((c) => c.candidateId === candidateId);
+    if (!found) {
+      throw new Error(
+        `Unknown candidate ${candidateId} in exploration ${explorationId}`
+      );
+    }
+
+    this.transition(explorationId, "user_selected");
+    session.selectedCandidateId = candidateId;
+  }
+
+  /** Apply the selected candidate to the main editor. Transitions to "applied". */
+  applySelection(explorationId: string): void {
+    const session = this.sessions.get(explorationId);
+    if (!session) {
+      throw new Error(`Unknown exploration: ${explorationId}`);
+    }
+    if (!session.selectedCandidateId) {
+      throw new Error(
+        `No candidate selected in exploration ${explorationId}`
+      );
+    }
+
+    this.transition(explorationId, "applied");
+  }
+
+  /** Cancel an exploration session. Transitions to "cancelled". */
+  cancel(explorationId: string): void {
+    const session = this.sessions.get(explorationId);
+    if (!session) {
+      throw new Error(`Unknown exploration: ${explorationId}`);
+    }
+
+    this.transition(explorationId, "cancelled");
+  }
+
+  /**
+   * Transition the session to a new status, enforcing the state machine.
+   * Throws if the transition is not allowed.
+   */
+  private transition(explorationId: string, to: ExplorationStatus): void {
+    const session = this.sessions.get(explorationId);
+    if (!session) {
+      throw new Error(`Unknown exploration: ${explorationId}`);
+    }
+
+    const allowed = VALID_TRANSITIONS[session.status];
+    if (!allowed.includes(to)) {
+      throw new Error(
+        `Invalid transition: ${session.status} -> ${to} for exploration ${explorationId}`
+      );
+    }
+
+    session.status = to;
   }
 }
