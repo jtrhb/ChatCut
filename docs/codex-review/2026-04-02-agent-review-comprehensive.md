@@ -43,37 +43,40 @@
 | W6 | `index.ts` 不创建 MasterAgent 和 sub-agents | 完整 agent 堆栈在启动时构建并接入 |
 | W7 | `availableTools: []` 导致 skill 解析拿不到工具名 | 从 `masterToolDefinitions` 提取真实工具名 |
 
-## 仍存在的已知问题（非本次修复范围）
+## 第二轮修复（commit `07dd9eac`）
 
-### 设计文档与实现的偏离
+以下问题在第二轮中全部修复。
 
-| # | 设计文档要求 | 实际状态 | 优先级 |
-|---|---|---|---|
-| D1 | `chatcut-agent-system.md §2.2`: AgentRuntime 含 `saveSession`/`restoreSession` | `NativeAPIRuntime` 无对话历史持久化，会话间不保留上下文 | P1 |
-| D2 | `chatcut-agent-system.md §3.2`: ProjectContext 含版本化 `videoAnalysis`（`analyzedAtSnapshotVersion`） | `scenes: any[]`，无版本化字段 | P1 |
-| D3 | `chatcut-memory-layer.md §3.4`: Memory 含 `used_in_changeset_ids`、`created_session_id` | `memory-extractor.ts` 不写这些因果追踪字段 | P1 |
-| D4 | `chatcut-fanout-exploration.md §2`: Exploration 状态机 | `exploration-engine.ts` 无状态机，`void skeleton.commands` 丢弃 commands | P1 |
-| D5 | `chatcut-plan.md §3.2.1`: `downloadToTempFile` 流式落盘避免 OOM | 当前实现把整个 body 读入内存再写文件 | P2 |
+### 设计文档偏离 — 已修复
 
-### 半成品模块（Phase 4-5 计划内）
-
-以下是设计文档中明确分阶段的未实现部分，不是 bug：
-
-| 模块 | 当前状态 | 目标 Phase |
+| # | 问题 | 修复 |
 |---|---|---|
-| Asset stores (asset/brand/skill) | DB API 不匹配 Drizzle，无对应 schema 表 | Phase 5 |
-| Routes: commands, project, media | Stub 返回 hardcoded 值 | Phase 4 |
-| MasterAgent: propose_changes, explore_options, export_video | Stub 返回 pending/queued | Phase 4 |
-| ExplorationEngine | 未物化 commands，无 preview pipeline | Phase 4 |
-| Content editing pipeline (extract→generate→replace) | 服务类存在，未接入 agent 链路 | Phase 3 |
+| D1 | `NativeAPIRuntime` 无对话历史持久化 | 添加 `setSessionCallbacks` + `onMessage` 回调，user/assistant/tool_result 三路消息持久化 |
+| D2 | `videoAnalysis` 无版本化字段，`scenes: any[]` | 添加 `sourceStorageKey`/`analyzedAtSnapshotVersion`/`lastAnalyzedAt`，scenes 改为强类型 |
+| D3 | `memory-extractor` 不写因果追踪字段 | `created_session_id`/`last_reinforced_session_id` 在 create/reinforce 时写入 |
+| D4 | `ExplorationEngine` 无状态机，commands 被丢弃 | 8 状态生命周期 + commands 应用到 clone + 5 个生命周期方法 + 15 新测试 |
+| D5 | `downloadToTempFile` 全量读入内存 | 改为流式 pipe (`Readable.fromWeb` → `createWriteStream`) |
 
-### packages/core 问题
+### Phase 4-5 stubs — 已接入真实服务
 
-| # | 问题 | 优先级 |
-|---|---|---|
-| C1 | `change-log.ts` 用 nanoid，其余用 crypto.randomUUID — 两种 ID 格式共存 | P2 |
-| C2 | core ↔ web 大量工具函数重复（track-utils, bookmarks, string, effects） | P2 |
-| C3 | `parseFrontmatter` 在 memory-store 和 skills/loader 中重复实现 | P2 |
+| 模块 | 修复 |
+|---|---|
+| Asset stores | 3 个 Drizzle schema 表 (assets, brandKits, skills) + stores 改用真实 Drizzle API |
+| Routes: commands, project, media | 转为 DI factory 模式，接入 ServerEditorCore/ContextManager/ObjectStorage |
+| MasterAgent: propose_changes | 接入 ChangesetManager.propose()（optional dep，无依赖时保留 stub） |
+| MasterAgent: explore_options | 接入 ExplorationEngine.explore() |
+| MasterAgent: export_video | 接入 TaskRegistry.createTask() |
+| ExplorationEngine | 状态机 + commands 物化（见 D4） |
+
+### packages/core — 已修复
+
+| # | 修复 |
+|---|---|
+| C1 | `change-log.ts` 改用 `generateUUID()`，移除 `nanoid` 依赖 |
+| C2 | 已记录需更新的 web 文件（需先添加 `@opencut/core` 为 web 依赖） |
+| C3 | 提取 `apps/agent/src/utils/frontmatter.ts`，memory-store 和 loader 共用 |
+
+## 仍存在的已知问题
 
 ### 预存在的测试问题
 
@@ -84,13 +87,27 @@
 | `vi.clearAllMocks` 不兼容 bun | `vision-cache.test.ts` 失败 |
 | ChangesetManager error-case 测试 | 2 个 approve/reject 状态互斥测试失败 |
 
+## 仍未落地
+
+| 项目 | 说明 |
+|---|---|
+| C2 完整落地 | `apps/web` 需添加 `@opencut/core` 依赖后，将 `capitalizeFirstLetter` 等导入切到 core |
+| Content editing pipeline | `content-editor.ts`/`generation-client.ts` 存在但未接入 agent 链路（Phase 3 范围） |
+| Sandbox + Preview 渲染 | ExplorationEngine 有状态机但 Daytona sandbox 和 Playwright 渲染未实现 |
+
 ## 新增测试清单
 
-本次 review 共新增 24 个测试：
+本次 review 共新增 **42 个测试**：
 
+第一轮（24 个）：
 - `memory-selector.test.ts`: 5 个（activation_scope 组合、confidence/source/updated 单独决胜）
 - `tool-pipeline.test.ts`: 8 个（pre/post-hook failure → onFailure、key reserve/release/commit、async await）
 - `loader.test.ts`: 6 个（agent_type 数组匹配、store/preset 双路径）
 - `change-log.test.ts`: 2 个修复（bun 兼容）
 - `event-bus.test.ts`: 1 个修复（bun 兼容）
 - `sub-agents.test.ts` + `verification-agent.test.ts`: 2 个修复（apiKey 构造参数）
+
+第二轮（18 个）：
+- `exploration-engine.test.ts`: 15 个（状态机生命周期、commands 应用、select/apply/cancel）
+- `project-context.test.ts`: 2 个（updateVideoAnalysis 版本化字段）
+- `memory-extractor.test.ts`: 3 个（因果追踪字段写入 + bun 兼容修复）
