@@ -169,6 +169,7 @@ export {
 	ensureMainTrack,
 	canElementGoOnTrack,
 	validateElementTrackCompatibility,
+	getEarliestMainTrackElement,
 	enforceMainTrackStart,
 } from "./utils/track-utils";
 export { updateElementInTracks } from "./utils/track-element-update";
@@ -185,6 +186,7 @@ export {
 	updateSceneInArray,
 } from "./utils/scenes";
 export {
+	BOOKMARK_TIME_EPSILON,
 	getFrameTime,
 	isBookmarkAtTime,
 	toggleBookmarkInArray,
