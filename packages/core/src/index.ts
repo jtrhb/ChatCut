@@ -158,6 +158,7 @@ export {
 	getElementsAtTime,
 } from "./utils/element-utils";
 export {
+	canTrackHaveAudio,
 	canTracktHaveAudio,
 	canTrackBeHidden,
 	buildEmptyTrack,

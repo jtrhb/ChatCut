@@ -68,7 +68,9 @@ class TestableSkillLoader extends SkillLoader {
       try {
         // Access the private parser via a cast trick
         const mem = (this as any).parseFrontmatter(content);
-        if (mem.agent_type === agentType) {
+        const at = mem.agent_type;
+        const matches = Array.isArray(at) ? at.includes(agentType) : at === agentType;
+        if (matches) {
           results.push(mem);
         }
       } catch {
@@ -178,7 +180,63 @@ describe("SkillLoader.loadSkills", () => {
     expect(dirs).toContain("brands/acme/_skills/");
   });
 
-  // ── 5. queries series _skills/ path when provided ─────────────────────────
+  // ── 5. matches skills with agent_type as array ───────────────────────────
+  it("matches a skill whose agent_type is an array containing the requested type", async () => {
+    const multiSkill = makeSkill({
+      skill_id: "s-multi",
+      agent_type: ["master", "editor"],
+      semantic_key: "multi-agent-skill",
+    });
+
+    const store = {
+      listDir: vi.fn(async () => ["s-multi.md"]),
+      readParsed: vi.fn().mockResolvedValueOnce(multiSkill),
+    };
+
+    const loader = new SkillLoader(store as any);
+    const editorResult = await loader.loadSkills("editor", { brand: "acme" });
+    expect(editorResult).toHaveLength(1);
+    expect(editorResult[0].skill_id).toBe("s-multi");
+  });
+
+  // ── 5b. array agent_type is excluded when target not in list ─────────────
+  it("excludes a skill whose agent_type array does not contain the requested type", async () => {
+    const multiSkill = makeSkill({
+      skill_id: "s-multi",
+      agent_type: ["master", "editor"],
+      semantic_key: "multi-agent-skill",
+    });
+
+    const store = {
+      listDir: vi.fn(async () => ["s-multi.md"]),
+      readParsed: vi.fn().mockResolvedValueOnce(multiSkill),
+    };
+
+    const loader = new SkillLoader(store as any);
+    const audioResult = await loader.loadSkills("audio", { brand: "acme" });
+    expect(audioResult).toHaveLength(0);
+  });
+
+  // ── 5c. single-string agent_type still works (backward compat) ──────────
+  it("still matches skills with a single-string agent_type (backward compat)", async () => {
+    const singleSkill = makeSkill({
+      skill_id: "s-single",
+      agent_type: "master",
+      semantic_key: "single-agent-skill",
+    });
+
+    const store = {
+      listDir: vi.fn(async () => ["s-single.md"]),
+      readParsed: vi.fn().mockResolvedValueOnce(singleSkill),
+    };
+
+    const loader = new SkillLoader(store as any);
+    const result = await loader.loadSkills("master", { brand: "acme" });
+    expect(result).toHaveLength(1);
+    expect(result[0].skill_id).toBe("s-single");
+  });
+
+  // ── 6. queries series _skills/ path when provided ─────────────────────────
   it("also queries series/_skills/ path when series is provided", async () => {
     const store = {
       listDir: vi.fn(async () => []),
@@ -244,6 +302,17 @@ describe("SkillLoader.loadSkillsGrouped", () => {
   });
 });
 
+const MULTI_AGENT_PRESET_RAW = `---
+skill_id: skill_preset_multi_agent
+skill_status: validated
+agent_type: ["master", "editor"]
+applies_to: ["orchestration"]
+---
+
+# Multi-Agent Skill
+
+Applies to both master and editor agents.`;
+
 // ---------------------------------------------------------------------------
 // Tests: loadSystemPresets
 // ---------------------------------------------------------------------------
@@ -286,7 +355,48 @@ describe("SkillLoader.loadSystemPresets", () => {
     expect(presets[0].applies_to).toEqual(["mixing", "ducking"]);
   });
 
-  // ── 11. returns empty when store is null (preset-only mode works fine) ────
+  // ── 11. preset with array agent_type matches both agent types ────────────
+  it("matches a preset with array agent_type for each listed type", async () => {
+    const loader = new TestableSkillLoader(null, [
+      { file: "multi-agent.md", content: MULTI_AGENT_PRESET_RAW },
+    ]);
+
+    const masterPresets = await loader.loadSystemPresets("master");
+    expect(masterPresets).toHaveLength(1);
+    expect(masterPresets[0].skill_id).toBe("skill_preset_multi_agent");
+
+    // Re-create to avoid state issues
+    const loader2 = new TestableSkillLoader(null, [
+      { file: "multi-agent.md", content: MULTI_AGENT_PRESET_RAW },
+    ]);
+    const editorPresets = await loader2.loadSystemPresets("editor");
+    expect(editorPresets).toHaveLength(1);
+    expect(editorPresets[0].skill_id).toBe("skill_preset_multi_agent");
+  });
+
+  // ── 11b. preset with array agent_type excludes non-listed types ─────────
+  it("excludes a preset with array agent_type for non-listed types", async () => {
+    const loader = new TestableSkillLoader(null, [
+      { file: "multi-agent.md", content: MULTI_AGENT_PRESET_RAW },
+    ]);
+
+    const audioPresets = await loader.loadSystemPresets("audio");
+    expect(audioPresets).toHaveLength(0);
+  });
+
+  // ── 11c. parsed agent_type is an array (not coerced to string) ──────────
+  it("preserves array agent_type from frontmatter instead of coercing to string", async () => {
+    const loader = new TestableSkillLoader(null, [
+      { file: "multi-agent.md", content: MULTI_AGENT_PRESET_RAW },
+    ]);
+
+    const presets = await loader.loadSystemPresets("master");
+    expect(presets).toHaveLength(1);
+    expect(Array.isArray(presets[0].agent_type)).toBe(true);
+    expect(presets[0].agent_type).toEqual(["master", "editor"]);
+  });
+
+  // ── 12. returns empty when store is null (preset-only mode works fine) ────
   it("works in preset-only mode (store=null) for system presets", async () => {
     const loader = new TestableSkillLoader(null, [
       { file: "editor-beat-sync.md", content: EDITOR_PRESET_RAW },

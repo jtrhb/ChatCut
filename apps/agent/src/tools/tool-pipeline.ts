@@ -27,11 +27,26 @@ type ExecutorFn = (
   ctx: { agentType: AgentType; taskId: string },
 ) => Promise<ToolCallResult>;
 
+/**
+ * Pipeline state machine:
+ *   validated → reserved → executed → post_processed → committed
+ *
+ * On failure at any stage after reservation, the idempotency key is
+ * released so legitimate retries are accepted.
+ */
+type PipelineStage =
+  | "validated"
+  | "reserved"
+  | "executed"
+  | "post_processed"
+  | "committed";
+
 export class ToolPipeline {
   private tools = new Map<string, ToolDefinition>();
   private hooks: ToolHook[] = [];
-  private idempotencyKeys: string[] = [];
-  private idempotencyKeySet = new Set<string>();
+  private committedKeys: string[] = [];
+  private committedKeySet = new Set<string>();
+  private reservedKeys = new Set<string>();
   private traces: TraceEntry[] = [];
   private executor: ExecutorFn;
   private maxTraces: number;
@@ -66,8 +81,36 @@ export class ToolPipeline {
       try {
         await h.onFailure({ ...hookCtx, input: effectiveInput }, result);
       } catch {
-        // onFailure hook errors are silently swallowed
+        // onFailure hook errors are silently swallowed — never crash the pipeline
       }
+    }
+  }
+
+  /**
+   * Reserve an idempotency key to prevent concurrent duplicates.
+   * Returns false if the key is already reserved or committed.
+   */
+  private reserveKey(key: string): boolean {
+    if (this.committedKeySet.has(key) || this.reservedKeys.has(key)) {
+      return false;
+    }
+    this.reservedKeys.add(key);
+    return true;
+  }
+
+  /** Release a reserved key so retries are accepted after failure. */
+  private releaseKey(key: string): void {
+    this.reservedKeys.delete(key);
+  }
+
+  /** Permanently commit a reserved key after full pipeline success. */
+  private commitKey(key: string): void {
+    this.reservedKeys.delete(key);
+    this.committedKeys.push(key);
+    this.committedKeySet.add(key);
+    while (this.committedKeys.length > this.maxIdempotencyKeys) {
+      const evicted = this.committedKeys.shift()!;
+      this.committedKeySet.delete(evicted);
     }
   }
 
@@ -85,6 +128,8 @@ export class ToolPipeline {
     idempotencyKey?: string,
   ): Promise<PipelineResult> {
     const start = Date.now();
+    let stage: PipelineStage = "validated";
+    let keyReserved = false;
 
     const fail = (error: string): PipelineResult => {
       const classified = classifyFailure(error);
@@ -100,7 +145,7 @@ export class ToolPipeline {
       return { success: false, error, classified };
     };
 
-    // ── Stage 1: Preflight ─────────────────────────────────────────────────
+    // ── Stage 1: Validate ──────────────────────────────────────────────────
 
     const tool = this.tools.get(toolName);
     if (!tool) {
@@ -118,14 +163,18 @@ export class ToolPipeline {
       return fail(parsed.error.message);
     }
 
-    // Idempotency guard — only enforced for write/read_write tools
+    // ── Stage 2: Reserve idempotency key ───────────────────────────────────
+    // Reserve the key to block concurrent duplicates. If the pipeline fails
+    // at any later stage, the key is released so retries are accepted.
+
     const isWrite = tool.accessMode === "write" || tool.accessMode === "read_write";
     if (idempotencyKey && isWrite) {
-      if (this.idempotencyKeySet.has(idempotencyKey)) {
+      if (!this.reserveKey(idempotencyKey)) {
         return fail(`idempotency conflict: key "${idempotencyKey}" already used`);
       }
-      // Key is committed AFTER successful execution (see Stage 3 below)
+      keyReserved = true;
     }
+    stage = "reserved";
 
     let effectiveInput: unknown = parsed.data;
 
@@ -137,7 +186,7 @@ export class ToolPipeline {
       idempotencyKey,
     };
 
-    // ── Stage 2: Pre-hooks ─────────────────────────────────────────────────
+    // ── Stage 3: Pre-hooks ─────────────────────────────────────────────────
 
     for (const hook of this.hooks) {
       if (!hook.pre) continue;
@@ -146,6 +195,7 @@ export class ToolPipeline {
         if (preResult.block) {
           const reason = preResult.reason ?? `blocked by hook "${hook.name}"`;
           const result = fail(`blocked by hook: ${reason}`);
+          if (keyReserved) this.releaseKey(idempotencyKey!);
           await this.runFailureHooks(hookCtx, effectiveInput, result);
           return result;
         }
@@ -154,12 +204,13 @@ export class ToolPipeline {
         }
       } catch {
         const result = fail(`pre-hook "${hook.name}" threw an error`);
+        if (keyReserved) this.releaseKey(idempotencyKey!);
         await this.runFailureHooks(hookCtx, effectiveInput, result);
         return result;
       }
     }
 
-    // ── Stage 3: Execute ───────────────────────────────────────────────────
+    // ── Stage 4: Execute ───────────────────────────────────────────────────
 
     let execResult: ToolCallResult;
     try {
@@ -167,6 +218,7 @@ export class ToolPipeline {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const result = fail(msg);
+      if (keyReserved) this.releaseKey(idempotencyKey!);
       await this.runFailureHooks(hookCtx, effectiveInput, result);
       return result;
     }
@@ -174,6 +226,7 @@ export class ToolPipeline {
     if (!execResult.success) {
       const classified = classifyFailure(execResult.error ?? "execution_error");
       const result: PipelineResult = { ...execResult, classified };
+      if (keyReserved) this.releaseKey(idempotencyKey!);
       await this.runFailureHooks(hookCtx, effectiveInput, result);
       this.pushTrace({
         toolName,
@@ -186,8 +239,9 @@ export class ToolPipeline {
       });
       return result;
     }
+    stage = "executed";
 
-    // ── Stage 4: Post-hooks ────────────────────────────────────────────────
+    // ── Stage 5: Post-hooks ────────────────────────────────────────────────
 
     let finalResult: ToolCallResult = execResult;
     for (const hook of this.hooks) {
@@ -201,25 +255,24 @@ export class ToolPipeline {
           finalResult = postResult.transformedResult;
         }
       } catch {
-        // Post-hook error: do NOT commit idempotency key, trigger onFailure, return failure
         const result = fail(`post-hook "${hook.name}" threw an error`);
+        if (keyReserved) this.releaseKey(idempotencyKey!);
         await this.runFailureHooks(hookCtx, effectiveInput, result);
         return result;
       }
     }
+    stage = "post_processed";
 
-    // ── Stage 5: Commit idempotency key (only after ALL post-hooks succeed) ──
+    // ── Stage 6: Commit idempotency key ────────────────────────────────────
+    // Only permanently commit after the full pipeline succeeds (exec + all
+    // post-hooks). This ensures failed pipelines release the key for retries.
 
-    if (idempotencyKey && isWrite) {
-      this.idempotencyKeys.push(idempotencyKey);
-      this.idempotencyKeySet.add(idempotencyKey);
-      while (this.idempotencyKeys.length > this.maxIdempotencyKeys) {
-        const evicted = this.idempotencyKeys.shift()!;
-        this.idempotencyKeySet.delete(evicted);
-      }
+    if (keyReserved) {
+      this.commitKey(idempotencyKey!);
     }
+    stage = "committed";
 
-    // ── Stage 6: Trace ─────────────────────────────────────────────────────
+    // ── Stage 7: Trace ─────────────────────────────────────────────────────
 
     this.pushTrace({
       toolName,

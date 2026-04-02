@@ -19,7 +19,7 @@ export class BatchCommand extends Command {
 
 	redo(): void {
 		for (const command of this.commands) {
-			command.execute();
+			command.redo();
 		}
 	}
 }

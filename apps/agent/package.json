@@ -20,7 +20,9 @@
     "@aws-sdk/s3-request-presigner": "^3.800.0",
     "pg-boss": "^10.2.0",
     "zod": "^3.25.0",
-    "@anthropic-ai/sdk": "^0.36.3"
+    "@anthropic-ai/sdk": "^0.36.3",
+    "zod-to-json-schema": "^3.25.2",
+    "nanoid": "^5.1.5"
   },
   "devDependencies": {
     "typescript": "^5.8.3",

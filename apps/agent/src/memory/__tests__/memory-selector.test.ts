@@ -131,7 +131,110 @@ describe("MemorySelector", () => {
     expect(result.map((m) => m.memory_id)).not.toContain("db1");
   });
 
-  // 7. same scope_level conflict uses confidence → source → updated tiebreaker
+  // 7a. includes draft when ALL activation_scope fields match
+  it("includes draft when project_id, batch_id, and session_id all match", () => {
+    const draft = makeMemory({
+      memory_id: "da1",
+      semantic_key: "sk-da",
+      status: "draft",
+      activation_scope: { project_id: "proj-1", batch_id: "batch-1", session_id: "sess-1" },
+      content: "All scopes match.",
+    });
+    const task: TaskContext = { ...BASE_TASK, projectId: "proj-1", batchId: "batch-1", sessionId: "sess-1" };
+    const result = selector.selectRelevant([draft], task);
+    expect(result.map((m) => m.memory_id)).toContain("da1");
+  });
+
+  // 7b. excludes draft when one of multiple activation_scope fields mismatches
+  it("excludes draft when project_id matches but session_id does not", () => {
+    const draft = makeMemory({
+      memory_id: "da2",
+      semantic_key: "sk-da2",
+      status: "draft",
+      activation_scope: { project_id: "proj-1", session_id: "sess-OTHER" },
+      content: "Partial scope match.",
+    });
+    const task: TaskContext = { ...BASE_TASK, projectId: "proj-1", sessionId: "sess-1" };
+    const result = selector.selectRelevant([draft], task);
+    expect(result.map((m) => m.memory_id)).not.toContain("da2");
+  });
+
+  // 7c. confidence alone breaks a tie (same scope, source, updated)
+  it("breaks tie by confidence when scope_level, source, and updated are equal", () => {
+    const lowConf = makeMemory({
+      memory_id: "lc1",
+      scope_level: "brand",
+      semantic_key: "conf-key",
+      confidence: "low",
+      source: "explicit",
+      updated: "2025-01-01",
+      content: "Low confidence.",
+    });
+    const highConf = makeMemory({
+      memory_id: "hc1",
+      scope_level: "brand",
+      semantic_key: "conf-key",
+      confidence: "high",
+      source: "explicit",
+      updated: "2025-01-01",
+      content: "High confidence.",
+    });
+    const result = selector.selectRelevant([lowConf, highConf], BASE_TASK);
+    expect(result).toHaveLength(1);
+    expect(result[0].memory_id).toBe("hc1");
+  });
+
+  // 7d. source alone breaks a tie (same scope, confidence, updated)
+  it("breaks tie by source when scope_level, confidence, and updated are equal", () => {
+    const implicit = makeMemory({
+      memory_id: "im1",
+      scope_level: "brand",
+      semantic_key: "src-key",
+      confidence: "high",
+      source: "implicit",
+      updated: "2025-01-01",
+      content: "Implicit source.",
+    });
+    const explicit = makeMemory({
+      memory_id: "ex1",
+      scope_level: "brand",
+      semantic_key: "src-key",
+      confidence: "high",
+      source: "explicit",
+      updated: "2025-01-01",
+      content: "Explicit source.",
+    });
+    const result = selector.selectRelevant([implicit, explicit], BASE_TASK);
+    expect(result).toHaveLength(1);
+    expect(result[0].memory_id).toBe("ex1");
+  });
+
+  // 7e. updated alone breaks a tie (same scope, confidence, source)
+  it("breaks tie by updated when scope_level, confidence, and source are equal", () => {
+    const older = makeMemory({
+      memory_id: "old1",
+      scope_level: "brand",
+      semantic_key: "upd-key",
+      confidence: "high",
+      source: "explicit",
+      updated: "2025-01-01",
+      content: "Older memory.",
+    });
+    const newer = makeMemory({
+      memory_id: "new1",
+      scope_level: "brand",
+      semantic_key: "upd-key",
+      confidence: "high",
+      source: "explicit",
+      updated: "2025-06-01",
+      content: "Newer memory.",
+    });
+    const result = selector.selectRelevant([older, newer], BASE_TASK);
+    expect(result).toHaveLength(1);
+    expect(result[0].memory_id).toBe("new1");
+  });
+
+  // 7f. full tiebreaker chain bundled
   it("breaks same-scope ties by confidence, then source, then updated", () => {
     const weaker = makeMemory({
       memory_id: "w1",

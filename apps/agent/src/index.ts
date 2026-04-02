@@ -3,6 +3,11 @@ import { createApp } from "./server.js";
 import { SkillLoader } from "./skills/loader.js";
 
 async function main() {
+  // Validate API key at startup — fail fast instead of opaque 401s per dispatch
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error("ANTHROPIC_API_KEY environment variable is required");
+  }
+
   // Load skill contracts before creating the app (requires async I/O)
   const skillLoader = new SkillLoader(null); // null = preset-only mode for now
   const skillContracts = await skillLoader.loadAllSkillContracts(

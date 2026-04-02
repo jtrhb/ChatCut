@@ -20,11 +20,14 @@ const TRACK_DEFAULT_NAMES: Record<TrackType, string> = {
 	effect: "Effect track",
 };
 
-export function canTracktHaveAudio(
+export function canTrackHaveAudio(
 	track: TimelineTrack,
 ): track is VideoTrack | AudioTrack {
 	return track.type === "audio" || track.type === "video";
 }
+
+/** @deprecated Use `canTrackHaveAudio` instead. */
+export const canTracktHaveAudio = canTrackHaveAudio;
 
 export function canTrackBeHidden(
 	track: TimelineTrack,

@@ -66,7 +66,7 @@ describe("EditorAgent", () => {
 
   beforeEach(() => {
     mockRun.mockClear();
-    agent = new EditorAgent({ toolExecutor: makeMockToolExecutor() });
+    agent = new EditorAgent({ toolExecutor: makeMockToolExecutor(), apiKey: "test-key" });
   });
 
   it("dispatch() returns a DispatchOutput with result, toolCallCount, tokensUsed", async () => {
@@ -110,7 +110,7 @@ describe("CreatorAgent", () => {
 
   beforeEach(() => {
     mockRun.mockClear();
-    agent = new CreatorAgent({ toolExecutor: makeMockToolExecutor() });
+    agent = new CreatorAgent({ toolExecutor: makeMockToolExecutor(), apiKey: "test-key" });
   });
 
   it("dispatch() returns a DispatchOutput with result, toolCallCount, tokensUsed", async () => {
@@ -154,7 +154,7 @@ describe("AudioAgent", () => {
 
   beforeEach(() => {
     mockRun.mockClear();
-    agent = new AudioAgent({ toolExecutor: makeMockToolExecutor() });
+    agent = new AudioAgent({ toolExecutor: makeMockToolExecutor(), apiKey: "test-key" });
   });
 
   it("dispatch() returns a DispatchOutput with result, toolCallCount, tokensUsed", async () => {
@@ -198,7 +198,7 @@ describe("VisionAgent", () => {
 
   beforeEach(() => {
     mockRun.mockClear();
-    agent = new VisionAgent({ toolExecutor: makeMockToolExecutor() });
+    agent = new VisionAgent({ toolExecutor: makeMockToolExecutor(), apiKey: "test-key" });
   });
 
   it("dispatch() returns a DispatchOutput with result, toolCallCount, tokensUsed", async () => {
@@ -242,7 +242,7 @@ describe("AssetAgent", () => {
 
   beforeEach(() => {
     mockRun.mockClear();
-    agent = new AssetAgent({ toolExecutor: makeMockToolExecutor() });
+    agent = new AssetAgent({ toolExecutor: makeMockToolExecutor(), apiKey: "test-key" });
   });
 
   it("dispatch() returns a DispatchOutput with result, toolCallCount, tokensUsed", async () => {

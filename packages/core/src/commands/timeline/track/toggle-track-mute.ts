@@ -1,7 +1,7 @@
 import { Command } from "../../base-command";
 import type { TimelineTrack } from "../../../types/timeline";
 import { EditorCore } from "../../../editor-core";
-import { canTracktHaveAudio } from "../../../utils/track-utils";
+import { canTrackHaveAudio } from "../../../utils/track-utils";
 
 export class ToggleTrackMuteCommand extends Command {
 	private savedState: TimelineTrack[] | null = null;
@@ -22,7 +22,7 @@ export class ToggleTrackMuteCommand extends Command {
 		}
 
 		const updatedTracks = this.savedState.map((track) =>
-			track.id === this.trackId && canTracktHaveAudio(track)
+			track.id === this.trackId && canTrackHaveAudio(track)
 				? { ...track, muted: !track.muted }
 				: track,
 		);

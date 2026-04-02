@@ -10,14 +10,15 @@ import { createAgentPipeline } from "./create-agent-pipeline.js";
 
 export class CreatorAgent {
   private toolExecutor: (name: string, input: unknown) => Promise<unknown>;
+  private apiKey: string;
 
-  constructor(deps: { toolExecutor: (name: string, input: unknown) => Promise<unknown> }) {
+  constructor(deps: { toolExecutor: (name: string, input: unknown) => Promise<unknown>; apiKey: string }) {
     this.toolExecutor = deps.toolExecutor;
+    this.apiKey = deps.apiKey;
   }
 
   async dispatch(input: DispatchInput): Promise<DispatchOutput> {
-    const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
-    const runtime = new NativeAPIRuntime(apiKey);
+    const runtime = new NativeAPIRuntime(this.apiKey);
     const { executor } = createAgentPipeline(this.toolExecutor, creatorToolDefinitions, "creator");
     runtime.setToolExecutor(executor);
 

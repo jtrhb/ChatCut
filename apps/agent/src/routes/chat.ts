@@ -8,24 +8,6 @@ const chatSchema = z.object({
   sessionId: z.string().uuid().optional(),
 });
 
-const chat = new Hono();
-
-chat.post("/", async (c) => {
-  let body: unknown;
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "Invalid JSON body" }, 400);
-  }
-
-  const result = chatSchema.safeParse(body);
-  if (!result.success) {
-    return c.json({ error: "Invalid request body", issues: result.error.issues }, 400);
-  }
-
-  return c.json({ status: "processing", sessionId: "placeholder" });
-});
-
 function createChatRouter(deps: { sessionManager: SessionManager }): Hono {
   const { sessionManager } = deps;
   const router = new Hono();
@@ -70,4 +52,4 @@ function createChatRouter(deps: { sessionManager: SessionManager }): Hono {
   return router;
 }
 
-export { chat, createChatRouter };
+export { createChatRouter };

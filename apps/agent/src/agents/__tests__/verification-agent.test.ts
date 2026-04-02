@@ -27,7 +27,7 @@ describe("VerificationAgent", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     const toolExecutor = vi.fn(async () => "ok");
-    agent = new VerificationAgent({ toolExecutor });
+    agent = new VerificationAgent({ toolExecutor, apiKey: "test-key" });
   });
 
   it("returns PASS verdict in result text", async () => {

@@ -21,7 +21,7 @@ export interface ParsedMemory {
   // Skill fields (optional)
   skill_id?: string;
   skill_status?: "draft" | "validated" | "deprecated";
-  agent_type?: string;
+  agent_type?: string | string[];
   applies_to?: string[];
   // Skill runtime frontmatter (optional — parsed from skill files)
   allowed_tools?: string[];

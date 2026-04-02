@@ -26,9 +26,3 @@ export function createStatusRouter(deps: {
   return router;
 }
 
-// Backward-compatible export
-const status = new Hono();
-status.get("/", (c) => {
-  return c.json({ agentStatus: "idle", activeChangesets: 0 });
-});
-export { status };

@@ -36,7 +36,7 @@ describe("EventBus", () => {
     bus.emit(event);
 
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler).toHaveBeenCalledWith(event);
+    expect(handler.mock.calls[0][0]).toEqual(event);
   });
 
   // 2. emit does NOT deliver to non-matching subscribers

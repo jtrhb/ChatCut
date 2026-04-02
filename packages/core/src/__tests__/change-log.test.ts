@@ -96,8 +96,8 @@ describe("ChangeLog", () => {
 
     const entry = log.record(makeInput());
 
-    expect(listener).toHaveBeenCalledOnce();
-    expect(listener).toHaveBeenCalledWith(entry);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener.mock.calls[0][0]).toEqual(entry);
   });
 
   it("emits 'decision' event on emitDecision", () => {
@@ -112,8 +112,8 @@ describe("ChangeLog", () => {
     };
     log.emitDecision(decision);
 
-    expect(listener).toHaveBeenCalledOnce();
-    expect(listener).toHaveBeenCalledWith(decision);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener.mock.calls[0][0]).toEqual(decision);
   });
 
   it("length property returns number of recorded entries", () => {

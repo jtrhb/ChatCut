@@ -57,7 +57,7 @@ describe("ToolPipeline", () => {
     const result = await pipeline.execute("read_value", { value: "hello" }, ctx);
     expect(result.success).toBe(true);
     expect((result.data as { executed: boolean }).executed).toBe(true);
-    expect(executorFn).toHaveBeenCalledOnce();
+    expect(executorFn).toHaveBeenCalledTimes(1);
   });
 
   // 2. execute() rejects unknown tools
@@ -100,8 +100,8 @@ describe("ToolPipeline", () => {
 
     await pipeline.execute("read_value", { value: "hi" }, ctx);
 
-    expect(preSpy).toHaveBeenCalledOnce();
-    expect(executorFn).toHaveBeenCalledOnce();
+    expect(preSpy).toHaveBeenCalledTimes(1);
+    expect(executorFn).toHaveBeenCalledTimes(1);
     // pre must be called before executor
     expect(preSpy.mock.invocationCallOrder[0]).toBeLessThan(
       executorFn.mock.invocationCallOrder[0],
@@ -133,11 +133,11 @@ describe("ToolPipeline", () => {
 
     await pipeline.execute("read_value", { value: "original" }, ctx);
 
-    expect(executorFn).toHaveBeenCalledWith(
-      "read_value",
-      { value: "rewritten" },
-      ctx,
-    );
+    expect(executorFn).toHaveBeenCalledTimes(1);
+    const callArgs = executorFn.mock.calls[0];
+    expect(callArgs[0]).toBe("read_value");
+    expect(callArgs[1]).toEqual({ value: "rewritten" });
+    expect(callArgs[2]).toEqual(ctx);
   });
 
   // 8. post-hook called after successful execution
@@ -150,7 +150,7 @@ describe("ToolPipeline", () => {
 
     const result = await pipeline.execute("read_value", { value: "hi" }, ctx);
 
-    expect(postSpy).toHaveBeenCalledOnce();
+    expect(postSpy).toHaveBeenCalledTimes(1);
     expect((result.data as { transformed: boolean }).transformed).toBe(true);
   });
 
@@ -165,7 +165,7 @@ describe("ToolPipeline", () => {
     const result = await pipeline.execute("read_value", { value: "hi" }, ctx);
 
     expect(result.success).toBe(false);
-    expect(failureSpy).toHaveBeenCalledOnce();
+    expect(failureSpy).toHaveBeenCalledTimes(1);
   });
 
   // 10. duplicate idempotency keys rejected (only for write tools)
@@ -175,7 +175,7 @@ describe("ToolPipeline", () => {
 
     expect(second.success).toBe(false);
     expect(second.error).toContain("idempotency");
-    expect(executorFn).toHaveBeenCalledOnce(); // only first call goes through
+    expect(executorFn).toHaveBeenCalledTimes(1); // only first call goes through
   });
 
   // 11. different idempotency keys are allowed
@@ -217,11 +217,15 @@ describe("ToolPipeline", () => {
     expect(result.error).toContain("pre-hook");
   });
 
-  // 14. post-hook throwing returns structured failure and does NOT commit idempotency key
-  it("does not commit idempotency key when post-hook throws", async () => {
+  // 14. post-hook throwing returns structured failure and releases idempotency key for retry
+  it("releases idempotency key when post-hook throws, allowing retry on same pipeline", async () => {
+    let shouldThrow = true;
     const hook: ToolHook = {
       name: "post-thrower",
-      post: async () => { throw new Error("post crash"); },
+      post: async () => {
+        if (shouldThrow) throw new Error("post crash");
+        return {};
+      },
     };
     pipeline.registerHook(hook);
 
@@ -229,9 +233,8 @@ describe("ToolPipeline", () => {
     expect(r1.success).toBe(false);
     expect(r1.error).toContain("post-hook");
 
-    // Key should NOT be occupied — retry allowed
-    pipeline = new ToolPipeline(executorFn); // fresh pipeline without the bad hook
-    pipeline.registerTool(makeTool({ name: "write_value", accessMode: "write" }));
+    // Same pipeline, same key — retry should be allowed because the key was released
+    shouldThrow = false;
     const r2 = await pipeline.execute("write_value", { value: "x" }, ctx, "post-fail-key");
     expect(r2.success).toBe(true);
   });
@@ -261,6 +264,147 @@ describe("ToolPipeline", () => {
     executorFn.mockResolvedValueOnce({ success: true, data: "ok" });
     const r2 = await pipeline.execute("write_value", { value: "x" }, ctx, "retry-key");
     expect(r2.success).toBe(true);
+  });
+
+  // 17. pre-hook failure triggers onFailure hooks
+  it("pre-hook failure triggers onFailure hooks", async () => {
+    const failureSpy = vi.fn(async () => {});
+    const preHook: ToolHook = {
+      name: "crashing-pre",
+      pre: async () => { throw new Error("pre crash"); },
+    };
+    const failureHook: ToolHook = {
+      name: "failure-observer",
+      onFailure: failureSpy,
+    };
+    pipeline.registerHook(preHook);
+    pipeline.registerHook(failureHook);
+
+    const result = await pipeline.execute("read_value", { value: "x" }, ctx);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("pre-hook");
+    expect(failureSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // 18. post-hook failure triggers onFailure hooks
+  it("post-hook failure triggers onFailure hooks", async () => {
+    const failureSpy = vi.fn(async () => {});
+    const postHook: ToolHook = {
+      name: "crashing-post",
+      post: async () => { throw new Error("post crash"); },
+    };
+    const failureHook: ToolHook = {
+      name: "failure-observer",
+      onFailure: failureSpy,
+    };
+    pipeline.registerHook(postHook);
+    pipeline.registerHook(failureHook);
+
+    const result = await pipeline.execute("read_value", { value: "x" }, ctx);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("post-hook");
+    expect(failureSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // 19. onFailure hooks are always awaited (async side effects complete before return)
+  it("onFailure hooks are fully awaited before execute returns", async () => {
+    let sideEffectComplete = false;
+    executorFn.mockResolvedValueOnce({ success: false, error: "exec failed" });
+
+    const hook: ToolHook = {
+      name: "async-failure-hook",
+      onFailure: async () => {
+        // Simulate async work
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        sideEffectComplete = true;
+      },
+    };
+    pipeline.registerHook(hook);
+
+    await pipeline.execute("read_value", { value: "x" }, ctx);
+    // If onFailure were fire-and-forget, sideEffectComplete would still be false
+    expect(sideEffectComplete).toBe(true);
+  });
+
+  // 20. onFailure hook throwing does not crash pipeline (across all failure paths)
+  it("onFailure hook throwing during post-hook failure does not crash pipeline", async () => {
+    const postHook: ToolHook = {
+      name: "crashing-post",
+      post: async () => { throw new Error("post crash"); },
+    };
+    const badFailureHook: ToolHook = {
+      name: "crashing-failure-hook",
+      onFailure: async () => { throw new Error("failure hook also crashed"); },
+    };
+    pipeline.registerHook(postHook);
+    pipeline.registerHook(badFailureHook);
+
+    const result = await pipeline.execute("read_value", { value: "x" }, ctx);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("post-hook");
+    // Should not throw — returns normally
+  });
+
+  // 21. pre-hook block releases idempotency key for retry
+  it("pre-hook block releases idempotency key allowing retry", async () => {
+    let shouldBlock = true;
+    const hook: ToolHook = {
+      name: "conditional-blocker",
+      pre: async () => shouldBlock ? { block: true, reason: "temp block" } : {},
+    };
+    pipeline.registerHook(hook);
+
+    const r1 = await pipeline.execute("write_value", { value: "x" }, ctx, "block-key");
+    expect(r1.success).toBe(false);
+    expect(r1.error).toContain("blocked by hook");
+
+    // Same key retry after block is lifted
+    shouldBlock = false;
+    const r2 = await pipeline.execute("write_value", { value: "x" }, ctx, "block-key");
+    expect(r2.success).toBe(true);
+  });
+
+  // 22. pre-hook throw releases idempotency key for retry
+  it("pre-hook throw releases idempotency key allowing retry", async () => {
+    let shouldThrow = true;
+    const hook: ToolHook = {
+      name: "conditional-thrower",
+      pre: async () => {
+        if (shouldThrow) throw new Error("pre crash");
+        return {};
+      },
+    };
+    pipeline.registerHook(hook);
+
+    const r1 = await pipeline.execute("write_value", { value: "x" }, ctx, "pre-throw-key");
+    expect(r1.success).toBe(false);
+
+    shouldThrow = false;
+    const r2 = await pipeline.execute("write_value", { value: "x" }, ctx, "pre-throw-key");
+    expect(r2.success).toBe(true);
+  });
+
+  // 23. executor throw releases idempotency key for retry
+  it("executor throw releases idempotency key allowing retry", async () => {
+    executorFn.mockRejectedValueOnce(new Error("executor exploded"));
+
+    const r1 = await pipeline.execute("write_value", { value: "x" }, ctx, "exec-throw-key");
+    expect(r1.success).toBe(false);
+
+    // Retry with same key succeeds
+    executorFn.mockResolvedValueOnce({ success: true, data: "ok" });
+    const r2 = await pipeline.execute("write_value", { value: "x" }, ctx, "exec-throw-key");
+    expect(r2.success).toBe(true);
+  });
+
+  // 24. successfully committed key still rejects duplicates
+  it("committed idempotency key rejects subsequent calls", async () => {
+    const r1 = await pipeline.execute("write_value", { value: "x" }, ctx, "committed-key");
+    expect(r1.success).toBe(true);
+
+    const r2 = await pipeline.execute("write_value", { value: "x" }, ctx, "committed-key");
+    expect(r2.success).toBe(false);
+    expect(r2.error).toContain("idempotency");
   });
 
   describe("resource limits", () => {

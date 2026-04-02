@@ -170,7 +170,9 @@ export class MemoryStore {
       mem.skill_status = fields.skill_status as ParsedMemory["skill_status"];
     }
     if (fields.agent_type !== undefined) {
-      mem.agent_type = String(fields.agent_type);
+      mem.agent_type = Array.isArray(fields.agent_type)
+        ? (fields.agent_type as string[])
+        : String(fields.agent_type);
     }
     if (fields.applies_to !== undefined) {
       mem.applies_to = fields.applies_to as string[];

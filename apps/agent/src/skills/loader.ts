@@ -9,6 +9,17 @@ import type { SkillContract, SkillFrontmatter } from "./types.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PRESETS_DIR = join(__dirname, "presets");
 
+/** Check whether a ParsedMemory's agent_type (string or string[]) matches a target. */
+function agentTypeMatches(
+  memAgentType: string | string[] | undefined,
+  target: string,
+): boolean {
+  if (memAgentType === undefined) return false;
+  return Array.isArray(memAgentType)
+    ? memAgentType.includes(target)
+    : memAgentType === target;
+}
+
 export class SkillLoader {
   private readonly store: MemoryStore | null;
 
@@ -53,7 +64,7 @@ export class SkillLoader {
 
     return all.filter(
       (m) =>
-        m.agent_type === agentType && m.skill_status !== "deprecated"
+        agentTypeMatches(m.agent_type, agentType) && m.skill_status !== "deprecated"
     );
   }
 
@@ -123,7 +134,7 @@ export class SkillLoader {
       try {
         const raw = readFileSync(join(PRESETS_DIR, file), "utf-8");
         const mem = this.parseFrontmatter(raw);
-        if (mem.agent_type === agentType) {
+        if (agentTypeMatches(mem.agent_type, agentType)) {
           results.push(mem);
         }
       } catch {
@@ -233,7 +244,9 @@ export class SkillLoader {
     if (fields.skill_status !== undefined)
       mem.skill_status = fields.skill_status as ParsedMemory["skill_status"];
     if (fields.agent_type !== undefined)
-      mem.agent_type = String(fields.agent_type);
+      mem.agent_type = Array.isArray(fields.agent_type)
+        ? (fields.agent_type as string[])
+        : String(fields.agent_type);
     if (fields.applies_to !== undefined)
       mem.applies_to = fields.applies_to as string[];
 
