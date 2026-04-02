@@ -7,19 +7,22 @@ import { formatToolsForApi } from "../tools/format-for-api.js";
 import { identitySection, taskSection } from "../prompt/sections.js";
 import type { PromptContext } from "../prompt/types.js";
 import { createAgentPipeline } from "./create-agent-pipeline.js";
+import type { ToolHook } from "../tools/hooks.js";
 
 export class AudioAgent {
   private toolExecutor: (name: string, input: unknown) => Promise<unknown>;
   private apiKey: string;
+  private hooks: ToolHook[];
 
-  constructor(deps: { toolExecutor: (name: string, input: unknown) => Promise<unknown>; apiKey: string }) {
+  constructor(deps: { toolExecutor: (name: string, input: unknown) => Promise<unknown>; apiKey: string; hooks?: ToolHook[] }) {
     this.toolExecutor = deps.toolExecutor;
     this.apiKey = deps.apiKey;
+    this.hooks = deps.hooks ?? [];
   }
 
   async dispatch(input: DispatchInput): Promise<DispatchOutput> {
     const runtime = new NativeAPIRuntime(this.apiKey);
-    const { executor } = createAgentPipeline(this.toolExecutor, audioToolDefinitions, "audio");
+    const { executor } = createAgentPipeline(this.toolExecutor, audioToolDefinitions, "audio", this.hooks);
     runtime.setToolExecutor(executor);
 
     const config: AgentConfig = {

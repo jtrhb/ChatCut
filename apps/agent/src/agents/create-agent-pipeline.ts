@@ -1,5 +1,6 @@
 import { ToolPipeline } from "../tools/tool-pipeline.js";
 import type { ToolDefinition, AgentType } from "../tools/types.js";
+import type { ToolHook } from "../tools/hooks.js";
 
 /**
  * Wrap a raw tool executor function with a ToolPipeline that provides
@@ -11,6 +12,7 @@ export function createAgentPipeline(
   rawExecutor: (name: string, input: unknown) => Promise<unknown>,
   tools: ToolDefinition[],
   agentType: AgentType,
+  hooks?: ToolHook[],
 ): { pipeline: ToolPipeline; executor: (name: string, input: unknown) => Promise<unknown> } {
   const pipeline = new ToolPipeline(async (name, input) => {
     const result = await rawExecutor(name, input);
@@ -22,6 +24,12 @@ export function createAgentPipeline(
 
   for (const tool of tools) {
     pipeline.registerTool(tool);
+  }
+
+  if (hooks) {
+    for (const hook of hooks) {
+      pipeline.registerHook(hook);
+    }
   }
 
   const executor = async (name: string, input: unknown): Promise<unknown> => {

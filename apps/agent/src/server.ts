@@ -14,8 +14,88 @@ import { createStatusRouter } from "./routes/status.js";
 import type { SkillContract } from "./skills/types.js";
 import { createEventBusHook } from "./tools/hooks.js";
 import type { ToolHook } from "./tools/hooks.js";
+import type { MessageHandler } from "./routes/chat.js";
+import { NativeAPIRuntime } from "./agents/runtime.js";
+import { MasterAgent } from "./agents/master-agent.js";
+import type { ProjectContextManager } from "./context/project-context.js";
+import type { ProjectWriteLock } from "./context/write-lock.js";
+import type { DispatchInput, DispatchOutput } from "./agents/types.js";
 
-export function createApp(opts?: { skillContracts?: SkillContract[] }) {
+export interface AppServices {
+  sessionManager: SessionManager;
+  taskRegistry: TaskRegistry;
+  eventBus: EventBus;
+  eventBusHook: ToolHook;
+  skillContracts: SkillContract[];
+}
+
+/**
+ * Create a session-aware MessageHandler that wires MasterAgent execution
+ * with session turn tracking and event emission.
+ */
+export function createMessageHandler(deps: {
+  masterAgent: MasterAgent;
+  sessionManager: SessionManager;
+  eventBus: EventBus;
+}): MessageHandler {
+  return async (message: string, sessionId: string) => {
+    deps.eventBus.emit({
+      type: "agent.turn_start",
+      timestamp: Date.now(),
+      sessionId,
+      data: { message },
+    });
+
+    const response = await deps.masterAgent.handleUserMessage(message);
+
+    // incrementTurn is called within the runtime via onTurnComplete callback
+    // but we also emit the event for SSE consumers
+    deps.eventBus.emit({
+      type: "agent.turn_end",
+      timestamp: Date.now(),
+      sessionId,
+      data: { responseLength: response.length },
+    });
+
+    return response;
+  };
+}
+
+/**
+ * Create a MasterAgent with full production wiring: session-aware runtime,
+ * EventBus hook on pipeline, sub-agent dispatchers with shared hooks.
+ */
+export function createWiredMasterAgent(deps: {
+  apiKey: string;
+  contextManager: ProjectContextManager;
+  writeLock: ProjectWriteLock;
+  sessionManager: SessionManager;
+  sessionId: string;
+  eventBusHook: ToolHook;
+  skillContracts: SkillContract[];
+  subAgentDispatchers: Map<string, (input: DispatchInput) => Promise<DispatchOutput>>;
+}): MasterAgent {
+  const runtime = new NativeAPIRuntime(deps.apiKey);
+
+  // Wire session turn tracking into the runtime
+  runtime.setOnTurnComplete((tokens) => {
+    deps.sessionManager.incrementTurn(deps.sessionId, tokens);
+  });
+
+  return new MasterAgent({
+    runtime,
+    contextManager: deps.contextManager,
+    writeLock: deps.writeLock,
+    subAgentDispatchers: deps.subAgentDispatchers,
+    hooks: [deps.eventBusHook],
+    skillContracts: deps.skillContracts,
+  });
+}
+
+export function createApp(opts?: {
+  skillContracts?: SkillContract[];
+  messageHandler?: MessageHandler;
+}) {
   const app = new Hono();
 
   // Instantiate shared services
@@ -40,12 +120,16 @@ export function createApp(opts?: { skillContracts?: SkillContract[] }) {
   app.route("/changeset", changeset);
 
   // DI-wired routes
-  app.route("/chat", createChatRouter({ sessionManager }));
+  app.route("/chat", createChatRouter({
+    sessionManager,
+    eventBus,
+    messageHandler: opts?.messageHandler,
+  }));
   app.route("/events", createEventsRouter({ eventBus }));
   app.route("/status", createStatusRouter({ sessionManager, taskRegistry }));
 
-  // Expose services for production wiring (MasterAgent construction etc.)
+  // Expose services for external wiring
   return Object.assign(app, {
-    services: { sessionManager, taskRegistry, eventBus, eventBusHook, skillContracts },
+    services: { sessionManager, taskRegistry, eventBus, eventBusHook, skillContracts } as AppServices,
   });
 }

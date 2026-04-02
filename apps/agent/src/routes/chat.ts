@@ -1,6 +1,13 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { SessionManager } from "../session/session-manager.js";
+import type { EventBus } from "../events/event-bus.js";
+
+/**
+ * Message handler function — decouples routing from agent execution.
+ * In production, this wraps MasterAgent.handleUserMessage().
+ */
+export type MessageHandler = (message: string, sessionId: string) => Promise<string>;
 
 const chatSchema = z.object({
   projectId: z.string().uuid(),
@@ -8,8 +15,12 @@ const chatSchema = z.object({
   sessionId: z.string().uuid().optional(),
 });
 
-function createChatRouter(deps: { sessionManager: SessionManager }): Hono {
-  const { sessionManager } = deps;
+function createChatRouter(deps: {
+  sessionManager: SessionManager;
+  eventBus?: EventBus;
+  messageHandler?: MessageHandler;
+}): Hono {
+  const { sessionManager, eventBus, messageHandler } = deps;
   const router = new Hono();
 
   router.post("/", async (c) => {
@@ -46,7 +57,34 @@ function createChatRouter(deps: { sessionManager: SessionManager }): Hono {
       timestamp: Date.now(),
     });
 
-    return c.json({ status: "processing", sessionId: session.sessionId });
+    eventBus?.emit({
+      type: "session.created",
+      timestamp: Date.now(),
+      sessionId: session.sessionId,
+      data: { projectId },
+    });
+
+    // If no handler is wired, return processing (test/stub mode)
+    if (!messageHandler) {
+      return c.json({ status: "processing", sessionId: session.sessionId });
+    }
+
+    // Execute through the agent and record the response
+    try {
+      const response = await messageHandler(message, session.sessionId);
+
+      sessionManager.appendMessage(session.sessionId, {
+        role: "assistant",
+        content: response,
+        timestamp: Date.now(),
+      });
+
+      return c.json({ status: "completed", sessionId: session.sessionId, response });
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      sessionManager.updateStatus(session.sessionId, "failed");
+      return c.json({ status: "error", sessionId: session.sessionId, error: errorMsg }, 500);
+    }
   });
 
   return router;
