@@ -18,11 +18,15 @@ import { ToolPipeline } from "../tools/tool-pipeline.js";
 import type { ToolHook } from "../tools/hooks.js";
 import { SkillRuntime } from "../skills/skill-runtime.js";
 import type { SkillContract } from "../skills/types.js";
-import type { ToolDefinition } from "../tools/types.js";
+import type { ToolDefinition, ToolFormatContext } from "../tools/types.js";
 import { formatToolsForApi } from "../tools/format-for-api.js";
 import type { ChangesetManager } from "../changeset/changeset-manager.js";
 import type { ExplorationEngine } from "../exploration/exploration-engine.js";
 import type { TaskRegistry } from "../tasks/task-registry.js";
+import { DeferredRegistry } from "../tools/deferred-registry.js";
+import { createResolveToolsTool } from "../tools/resolve-tools-tool.js";
+import { OverflowStore } from "../tools/overflow-store.js";
+import { createReadOverflowTool, executeReadOverflow } from "../tools/read-overflow-tool.js";
 
 // ---------------------------------------------------------------------------
 // Tool-name → sub-agent mapping
@@ -52,6 +56,8 @@ export class MasterAgent {
   private changesetManager?: ChangesetManager;
   private explorationEngine?: ExplorationEngine;
   private taskRegistry?: TaskRegistry;
+  private currentDeferredRegistry?: DeferredRegistry;
+  private overflowStore: OverflowStore;
 
   constructor(deps: {
     runtime: AgentRuntime;
@@ -73,9 +79,12 @@ export class MasterAgent {
     this.explorationEngine = deps.explorationEngine;
     this.taskRegistry = deps.taskRegistry;
 
+    // Create session-scoped overflow store for result budget control (P2)
+    this.overflowStore = new OverflowStore();
+
     // Create ToolPipeline wrapping the raw tool handler
     this.pipeline = new ToolPipeline(
-      async (name, input) => {
+      async (name, input, _ctx, _onProgress) => {
         const result = await this.handleToolCall(name, input);
         // Detect business-level failures (handleToolCall returns { error: ... })
         if (result && typeof result === "object" && "error" in (result as Record<string, unknown>)) {
@@ -83,6 +92,7 @@ export class MasterAgent {
         }
         return { success: true, data: result };
       },
+      { overflowStore: this.overflowStore },
     );
 
     // Register all master tools with the pipeline
@@ -90,11 +100,21 @@ export class MasterAgent {
       this.pipeline.registerTool(tool);
     }
 
+    // Register read_overflow tool for result budget dereferencing (P2)
+    const readOverflowTool = createReadOverflowTool();
+    this.pipeline.registerTool(readOverflowTool);
+
     // Register any provided hooks
     if (deps.hooks) {
       for (const hook of deps.hooks) {
         this.pipeline.registerHook(hook);
       }
+    }
+
+    // Wire tool registry for order-preserving parallel execution
+    if (this.runtime.setToolRegistry) {
+      const toolRegistryMap = new Map(masterToolDefinitions.map((t) => [t.name, t]));
+      this.runtime.setToolRegistry(toolRegistryMap);
     }
 
     // Wire pipeline into runtime — all tool calls now go through the pipeline
@@ -117,30 +137,66 @@ export class MasterAgent {
 
   // ── Public API ──────────────────────────────────────────────────────────────
 
-  async handleUserMessage(message: string): Promise<string> {
+  async handleUserMessage(message: string): Promise<{ text: string; tokensUsed: { input: number; output: number } }> {
     const ctx = this.contextManager.get();
 
     // Match skills to intent and use as active skills for this message
     const matchedSkills = this.matchSkillsForIntent(message);
     const activeSkills = matchedSkills.length > 0 ? matchedSkills : this.skillContracts;
 
-    const systemPrompt = this.buildSystemPrompt(ctx, activeSkills);
-
     // Apply skill constraints to runtime config
     const resolvedModel = this.resolveModel(activeSkills);
-    const resolvedTools = this.resolveTools(activeSkills);
+    const allTools = this.resolveTools(activeSkills);
+
+    const formatCtx: ToolFormatContext = {
+      filterContext: { projectContext: ctx },
+      descriptionContext: {
+        projectContext: ctx,
+        activeSkills: activeSkills.map((s) => ({ name: s.name })),
+        agentType: "master",
+      },
+    };
+
+    // Separate core tools (fully loaded) from deferred tools
+    const coreTools = allTools.filter((t) => !t.shouldDefer);
+    const deferredTools = allTools.filter((t) => t.shouldDefer);
+
+    // Create deferred registry and wire into runtime
+    const deferredRegistry = new DeferredRegistry(deferredTools, formatCtx.filterContext);
+
+    if (this.runtime.setDeferredRegistry) {
+      this.runtime.setDeferredRegistry(deferredRegistry);
+    }
+
+    // Add resolve_tools to core tools if there are deferred tools
+    const apiTools = [...coreTools];
+    if (deferredRegistry.getDeferredListing()) {
+      apiTools.push(createResolveToolsTool());
+      // Register resolve_tools with the pipeline
+      this.pipeline.registerTool(createResolveToolsTool());
+    }
+
+    // Build system prompt with deferred listing appended
+    let systemPrompt = this.buildSystemPrompt(ctx, activeSkills);
+    const deferredListing = deferredRegistry.getDeferredListing();
+    if (deferredListing) {
+      systemPrompt += `\n\n${deferredListing}`;
+    }
+
+    // Store registry for resolve_tools handler
+    this.currentDeferredRegistry = deferredRegistry;
 
     const config: AgentConfig = {
       agentType: "master",
       model: resolvedModel,
       system: systemPrompt,
-      tools: formatToolsForApi(resolvedTools),
+      tools: formatToolsForApi(apiTools, formatCtx),
       tokenBudget: TOKEN_BUDGETS.master,
       maxIterations: MAX_ITERATIONS.master,
     };
 
     const result = await this.runtime.run(config, message);
-    return result.text;
+    return { text: result.text, tokensUsed: result.tokensUsed };
   }
 
   /**
@@ -257,6 +313,23 @@ export class MasterAgent {
     }
 
     switch (name) {
+      case "read_overflow": {
+        const params = input as { ref: string; offset?: number; limit?: number };
+        return executeReadOverflow(params, this.overflowStore);
+      }
+
+      case "resolve_tools": {
+        if (this.currentDeferredRegistry) {
+          const params = input as { names?: string[]; search?: string };
+          const resolved = this.currentDeferredRegistry.resolve(params.names, params.search);
+          return {
+            resolved: resolved.map((t) => t.name),
+            count: resolved.length,
+          };
+        }
+        return { resolved: [], count: 0 };
+      }
+
       case "propose_changes": {
         if (this.changesetManager) {
           const params = input as { summary: string; affectedElements: string[]; projectId?: string };

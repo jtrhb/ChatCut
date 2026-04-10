@@ -14,7 +14,7 @@ export function createAgentPipeline(
   agentType: AgentType,
   hooks?: ToolHook[],
 ): { pipeline: ToolPipeline; executor: (name: string, input: unknown) => Promise<unknown> } {
-  const pipeline = new ToolPipeline(async (name, input) => {
+  const pipeline = new ToolPipeline(async (name, input, _ctx, _onProgress) => {
     const result = await rawExecutor(name, input);
     if (result && typeof result === "object" && "error" in (result as Record<string, unknown>)) {
       return { success: false, error: String((result as Record<string, unknown>).error) };

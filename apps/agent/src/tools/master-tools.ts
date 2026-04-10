@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ToolDefinition } from "./types.js";
+import type { ToolDefinition, ToolDescriptionContext } from "./types.js";
 
 // ── Shared sub-schemas ────────────────────────────────────────────────────────
 
@@ -12,32 +12,38 @@ const ContextSchema = z.record(z.string(), z.unknown());
 
 // ── Zod Schemas ──────────────────────────────────────────────────────────────
 
+const AccessModeSchema = z.enum(["read", "write", "read_write"]);
+
 export const DispatchVisionSchema = z.object({
   task: z.string(),
+  accessMode: AccessModeSchema.default("read"),
   context: ContextSchema.optional(),
   constraints: ConstraintsSchema.optional(),
 });
 
 export const DispatchEditorSchema = z.object({
   task: z.string(),
-  accessMode: z.enum(["read", "write", "read_write"]).default("read_write"),
+  accessMode: AccessModeSchema.default("read_write"),
   context: ContextSchema.optional(),
   constraints: ConstraintsSchema.optional(),
 });
 
 export const DispatchCreatorSchema = z.object({
   task: z.string(),
+  accessMode: AccessModeSchema.default("read_write"),
   context: ContextSchema.optional(),
   constraints: ConstraintsSchema.optional(),
 });
 
 export const DispatchAudioSchema = z.object({
   task: z.string(),
+  accessMode: AccessModeSchema.default("read_write"),
   context: ContextSchema.optional(),
 });
 
 export const DispatchAssetSchema = z.object({
   task: z.string(),
+  accessMode: AccessModeSchema.default("read"),
   context: ContextSchema.optional(),
 });
 
@@ -84,6 +90,8 @@ export const masterToolDefinitions: ToolDefinition[] = [
     inputSchema: DispatchVisionSchema,
     agentTypes: ["master"],
     accessMode: "read",
+    isReadOnly: true,
+    isConcurrencySafe: true,
   },
   {
     name: "dispatch_editor",
@@ -92,6 +100,13 @@ export const masterToolDefinitions: ToolDefinition[] = [
     inputSchema: DispatchEditorSchema,
     agentTypes: ["master"],
     accessMode: "read_write",
+    isConcurrencySafe: false,
+    descriptionSuffix: (ctx: ToolDescriptionContext) => {
+      if (ctx.projectContext && ctx.projectContext["activeExplorationId"]) {
+        return "(Note: edits will be queued during exploration)";
+      }
+      return undefined;
+    },
   },
   {
     name: "dispatch_creator",
@@ -100,6 +115,7 @@ export const masterToolDefinitions: ToolDefinition[] = [
     inputSchema: DispatchCreatorSchema,
     agentTypes: ["master"],
     accessMode: "read_write",
+    isConcurrencySafe: false,
   },
   {
     name: "dispatch_audio",
@@ -108,6 +124,7 @@ export const masterToolDefinitions: ToolDefinition[] = [
     inputSchema: DispatchAudioSchema,
     agentTypes: ["master"],
     accessMode: "read_write",
+    isConcurrencySafe: false,
   },
   {
     name: "dispatch_asset",
@@ -116,6 +133,8 @@ export const masterToolDefinitions: ToolDefinition[] = [
     inputSchema: DispatchAssetSchema,
     agentTypes: ["master"],
     accessMode: "read",
+    isReadOnly: true,
+    isConcurrencySafe: true,
   },
   {
     name: "explore_options",
@@ -124,6 +143,14 @@ export const masterToolDefinitions: ToolDefinition[] = [
     inputSchema: ExploreOptionsSchema,
     agentTypes: ["master"],
     accessMode: "read",
+    isReadOnly: true,
+    isConcurrencySafe: false,
+    descriptionSuffix: (ctx: ToolDescriptionContext) => {
+      if (ctx.projectContext && ctx.projectContext["activeExplorationId"]) {
+        return "(Note: per-project limit: 1 concurrent exploration)";
+      }
+      return undefined;
+    },
   },
   {
     name: "propose_changes",
@@ -132,6 +159,13 @@ export const masterToolDefinitions: ToolDefinition[] = [
     inputSchema: ProposeChangesSchema,
     agentTypes: ["master"],
     accessMode: "write",
+    isConcurrencySafe: false,
+    descriptionSuffix: (ctx: ToolDescriptionContext) => {
+      if (ctx.projectContext && ctx.projectContext["pendingChangesetId"]) {
+        return "(Note: another changeset awaiting review)";
+      }
+      return undefined;
+    },
   },
   {
     name: "export_video",
@@ -140,6 +174,8 @@ export const masterToolDefinitions: ToolDefinition[] = [
     inputSchema: ExportVideoSchema,
     agentTypes: ["master"],
     accessMode: "read",
+    isReadOnly: true,
+    isConcurrencySafe: false,
   },
   {
     name: "dispatch_verification",
@@ -148,5 +184,7 @@ export const masterToolDefinitions: ToolDefinition[] = [
     inputSchema: DispatchVerificationSchema,
     agentTypes: ["master"],
     accessMode: "read" as const,
+    isReadOnly: true,
+    isConcurrencySafe: true,
   },
 ];

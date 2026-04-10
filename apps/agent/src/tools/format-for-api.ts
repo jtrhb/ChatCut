@@ -1,5 +1,5 @@
 import { zodToJsonSchema } from "zod-to-json-schema";
-import type { ToolDefinition } from "./types.js";
+import type { ToolDefinition, ToolFormatContext } from "./types.js";
 
 /**
  * Format contract: Anthropic SDK expects tools as:
@@ -32,7 +32,43 @@ export function formatToolForApi(def: ToolDefinition): ApiToolFormat {
   };
 }
 
-/** Convert an array of ToolDefinitions to Anthropic API format. */
-export function formatToolsForApi(defs: ToolDefinition[]): ApiToolFormat[] {
-  return defs.map(formatToolForApi);
+/**
+ * Convert an array of ToolDefinitions to Anthropic API format.
+ *
+ * When ctx is provided:
+ *   - Tools with isEnabled are filtered (fail-closed on throw)
+ *   - Tools with descriptionSuffix get the suffix appended
+ * Output is always sorted by name for deterministic cache keys.
+ */
+export function formatToolsForApi(
+  tools: ToolDefinition[],
+  ctx?: ToolFormatContext,
+): ApiToolFormat[] {
+  let filtered = tools;
+  if (ctx) {
+    filtered = tools.filter((t) => {
+      if (!t.isEnabled) return true;
+      try {
+        return t.isEnabled(ctx.filterContext);
+      } catch {
+        console.warn(`isEnabled threw for tool "${t.name}", disabling it (fail-closed)`);
+        return false;
+      }
+    });
+  }
+
+  const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name));
+
+  return sorted.map((t) => {
+    let description = t.description;
+    if (ctx && t.descriptionSuffix) {
+      try {
+        const suffix = t.descriptionSuffix(ctx.descriptionContext);
+        if (suffix) description = `${description} ${suffix}`;
+      } catch {
+        console.warn(`descriptionSuffix threw for tool "${t.name}", skipping suffix`);
+      }
+    }
+    return formatToolForApi({ ...t, description });
+  });
 }

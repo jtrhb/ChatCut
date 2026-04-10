@@ -1,6 +1,9 @@
-import type { AgentType, ToolCallResult, ToolDefinition } from "./types.js";
+import type { AgentType, ToolCallResult, ToolDefinition, ToolProgressEvent } from "./types.js";
 import type { ToolHook, ToolHookContext } from "./hooks.js";
 import { classifyFailure, type ClassifiedFailure } from "./failure-classifier.js";
+import type { OverflowStore } from "./overflow-store.js";
+import { summarizeJson } from "./json-summarizer.js";
+import type { EventBus } from "../events/event-bus.js";
 
 export interface PipelineResult extends ToolCallResult {
   classified?: ClassifiedFailure;
@@ -9,6 +12,8 @@ export interface PipelineResult extends ToolCallResult {
 export interface ToolPipelineOptions {
   maxTraces?: number;
   maxIdempotencyKeys?: number;
+  overflowStore?: OverflowStore;
+  eventBus?: EventBus;
 }
 
 export interface TraceEntry {
@@ -24,7 +29,8 @@ export interface TraceEntry {
 type ExecutorFn = (
   name: string,
   input: unknown,
-  ctx: { agentType: AgentType; taskId: string },
+  ctx: { agentType: AgentType; taskId: string; toolCallId?: string },
+  onProgress?: (event: ToolProgressEvent) => void,
 ) => Promise<ToolCallResult>;
 
 /**
@@ -51,14 +57,29 @@ export class ToolPipeline {
   private executor: ExecutorFn;
   private maxTraces: number;
   private maxIdempotencyKeys: number;
+  private overflowStore?: OverflowStore;
+  private eventBus?: EventBus;
+  private refCounter = 0;
 
   constructor(executor: ExecutorFn, opts?: ToolPipelineOptions) {
     this.executor = executor;
     this.maxTraces = opts?.maxTraces ?? 1000;
     this.maxIdempotencyKeys = opts?.maxIdempotencyKeys ?? 10000;
+    this.overflowStore = opts?.overflowStore;
+    this.eventBus = opts?.eventBus;
   }
 
   registerTool(tool: ToolDefinition): void {
+    if (tool.isReadOnly === true) {
+      if (tool.accessMode === "write" || tool.accessMode === "read_write") {
+        throw new Error(
+          `Tool "${tool.name}" declares isReadOnly:true but accessMode:"${tool.accessMode}" — conflict`,
+        );
+      }
+      if (!tool.accessMode) {
+        tool.accessMode = "read";
+      }
+    }
     this.tools.set(tool.name, tool);
   }
 
@@ -121,12 +142,64 @@ export class ToolPipeline {
     }
   }
 
+  /**
+   * Check if a successful result exceeds the tool's maxResultSizeChars.
+   * If so, store the full result in overflow and return a preview.
+   */
+  private applyResultBudget(
+    tool: ToolDefinition,
+    result: ToolCallResult,
+  ): ToolCallResult {
+    if (!this.overflowStore) return result;
+
+    const maxChars = tool.maxResultSizeChars ?? 30000;
+    const serialized = typeof result.data === "string"
+      ? result.data
+      : JSON.stringify(result.data);
+
+    if (serialized.length <= maxChars) {
+      return result;
+    }
+
+    // Generate preview
+    const preview = tool.summarize
+      ? tool.summarize(result.data)
+      : summarizeJson(result.data, maxChars);
+
+    const sizeBytes = Buffer.byteLength(serialized);
+
+    // Try to store in overflow
+    const ref = `overflow_${tool.name}_${++this.refCounter}`;
+    const stored = this.overflowStore.store(ref, serialized);
+
+    if (stored) {
+      return {
+        success: true,
+        data: { preview, ref, size_bytes: sizeBytes },
+      };
+    }
+
+    // Overflow store rejected (single entry > maxBytes) — return preview only with error hint
+    return {
+      success: true,
+      data: {
+        preview,
+        error: "result too large for overflow (>10MB), only preview available",
+        size_bytes: sizeBytes,
+      },
+    };
+  }
+
   async execute(
     toolName: string,
     input: unknown,
-    ctx: { agentType: AgentType; taskId: string },
+    ctx: { agentType: AgentType; taskId: string; toolCallId?: string },
     idempotencyKey?: string,
+    onProgress?: (event: ToolProgressEvent) => void,
   ): Promise<PipelineResult> {
+    // Touch overflow store on every tool call to prevent idle cleanup
+    this.overflowStore?.touch();
+
     const start = Date.now();
     let stage: PipelineStage = "validated";
     let keyReserved = false;
@@ -212,9 +285,35 @@ export class ToolPipeline {
 
     // ── Stage 4: Execute ───────────────────────────────────────────────────
 
+    // Wrap onProgress to auto-inject toolCallId and forward to EventBus
+    const wrappedProgress = onProgress
+      ? (event: ToolProgressEvent): void => {
+          const enriched: ToolProgressEvent = {
+            ...event,
+            toolCallId: ctx.toolCallId ?? event.toolCallId,
+            toolName,
+          };
+          onProgress(enriched);
+          if (this.eventBus) {
+            this.eventBus.emit({
+              type: "tool.progress",
+              timestamp: Date.now(),
+              taskId: ctx.taskId,
+              data: {
+                toolName: enriched.toolName,
+                toolCallId: enriched.toolCallId,
+                step: enriched.step,
+                totalSteps: enriched.totalSteps,
+                text: enriched.text,
+              },
+            });
+          }
+        }
+      : undefined;
+
     let execResult: ToolCallResult;
     try {
-      execResult = await this.executor(toolName, effectiveInput, ctx);
+      execResult = await this.executor(toolName, effectiveInput, ctx, wrappedProgress);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const result = fail(msg);
@@ -262,6 +361,14 @@ export class ToolPipeline {
       }
     }
     stage = "post_processed";
+
+    // ── Stage 5b: Result budget check ─────────────────────────────────────
+    // If an overflow store is configured and the result exceeds the tool's
+    // maxResultSizeChars, store the full result and return a preview.
+
+    if (this.overflowStore && finalResult.success && finalResult.data !== undefined) {
+      finalResult = this.applyResultBudget(tool, finalResult);
+    }
 
     // ── Stage 6: Commit idempotency key ────────────────────────────────────
     // Only permanently commit after the full pipeline succeeds (exec + all
