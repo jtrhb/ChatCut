@@ -20,7 +20,7 @@ function createMediaRouter(deps: { objectStorage?: ObjectStorage } = {}): Hono {
       const url = await objectStorage.getSignedUrl(storageKey);
       return c.json({ mediaId: storageKey, url });
     }
-    return c.json({ mediaId: "placeholder" });
+    return c.json({ error: "ObjectStorage not configured", available: false }, 503);
   });
 
   router.get("/:id", async (c) => {
@@ -29,7 +29,7 @@ function createMediaRouter(deps: { objectStorage?: ObjectStorage } = {}): Hono {
       const url = await objectStorage.getSignedUrl(id);
       return c.json({ url });
     }
-    return c.json({ url: "placeholder" });
+    return c.json({ error: "ObjectStorage not configured", available: false }, 503);
   });
 
   return router;

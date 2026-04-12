@@ -17,7 +17,7 @@ function createProjectRouter(deps: { contextManager?: ProjectContextManager } = 
       });
     }
 
-    return c.json({ projectId: id, snapshotVersion: 0, timeline: null });
+    return c.json({ error: "ProjectContext not configured", available: false }, 503);
   });
 
   return router;

@@ -22,6 +22,7 @@ import type { ProjectWriteLock } from "./context/write-lock.js";
 import type { DispatchInput, DispatchOutput } from "./agents/types.js";
 import type { ServerEditorCore } from "./services/server-editor-core.js";
 import type { ObjectStorage } from "./services/object-storage.js";
+import type { ChangesetManager } from "./changeset/changeset-manager.js";
 
 /** Optional infrastructure deps — wired when real backends are available. */
 export interface InfrastructureDeps {
@@ -92,6 +93,8 @@ export function createWiredMasterAgent(deps: {
   eventBusHook: ToolHook;
   skillContracts: SkillContract[];
   subAgentDispatchers: Map<string, (input: DispatchInput) => Promise<DispatchOutput>>;
+  changesetManager?: ChangesetManager;
+  taskRegistry?: TaskRegistry;
 }): MasterAgent {
   const runtime = new NativeAPIRuntime(deps.apiKey);
 
@@ -102,6 +105,8 @@ export function createWiredMasterAgent(deps: {
     subAgentDispatchers: deps.subAgentDispatchers,
     hooks: [deps.eventBusHook],
     skillContracts: deps.skillContracts,
+    changesetManager: deps.changesetManager,
+    taskRegistry: deps.taskRegistry,
   });
 }
 

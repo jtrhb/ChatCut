@@ -39,7 +39,7 @@ function createCommandsRouter(deps: { serverEditorCore?: ServerEditorCore } = {}
       }
     }
 
-    return c.json({ success: true, snapshotVersion: 1 });
+    return c.json({ error: "ServerEditorCore not configured", available: false }, 503);
   });
 
   return router;

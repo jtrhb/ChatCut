@@ -14,6 +14,11 @@ export abstract class ToolExecutor {
     this.tools.set(tool.name, tool);
   }
 
+  /** Returns true if a tool with the given name is registered. */
+  hasToolName(name: string): boolean {
+    return this.tools.has(name);
+  }
+
   /**
    * Validate that the given agent type is permitted to use the named tool.
    * Throws if the tool is unknown or if the agent is not in the tool's agentTypes list.

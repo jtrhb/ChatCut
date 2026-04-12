@@ -11,6 +11,10 @@ import { AssetAgent } from "./agents/asset-agent.js";
 import { VerificationAgent } from "./agents/verification-agent.js";
 import { masterToolDefinitions } from "./tools/master-tools.js";
 import type { DispatchInput, DispatchOutput } from "./agents/types.js";
+import { ServerEditorCore } from "./services/server-editor-core.js";
+import { EditorToolExecutor } from "./tools/editor-tools.js";
+import { ChangesetManager } from "./changeset/changeset-manager.js";
+import { ChangeLog } from "@opencut/core";
 
 async function main() {
   // Validate API key at startup — fail fast instead of opaque 401s per dispatch
@@ -38,15 +42,35 @@ async function main() {
   const contextManager = new ProjectContextManager();
   const writeLock = new ProjectWriteLock();
 
+  // Create a default ServerEditorCore with empty timeline.
+  // Multi-project support will create per-project cores later.
+  const serverEditorCore = ServerEditorCore.fromSnapshot({
+    project: null,
+    scenes: [{
+      id: "default",
+      name: "Scene 1",
+      isMain: true,
+      tracks: [],
+      bookmarks: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }],
+    activeSceneId: "default",
+  });
+
+  // Create EditorToolExecutor backed by real ServerEditorCore
+  const editorToolExecutor = new EditorToolExecutor(serverEditorCore);
+
+  // Create ChangesetManager for propose/approve/reject workflow
+  const changeLog = new ChangeLog();
+  const changesetManager = new ChangesetManager({ changeLog, serverCore: serverEditorCore });
+
   // Tool executor for sub-agents — routes to real implementations when available.
-  // EditorToolExecutor requires ServerEditorCore which is created per-project.
-  // For now, this returns an explicit error that identifies the missing dependency,
-  // rather than a silent stub that pretends to succeed.
-  const toolExecutor = async (name: string, _input: unknown) => {
-    throw new Error(
-      `Tool "${name}" requires a project-scoped ServerEditorCore. ` +
-      `Ensure the session is bound to a project before dispatching sub-agents.`
-    );
+  const toolExecutor = async (name: string, input: unknown) => {
+    if (editorToolExecutor.hasToolName(name)) {
+      return editorToolExecutor.execute(name, input, { agentType: "editor", taskId: "default" });
+    }
+    return { success: false, error: `Tool "${name}" has no registered executor` };
   };
 
   // Build sub-agent dispatchers
@@ -68,6 +92,7 @@ async function main() {
   ]);
 
   // Wire MasterAgent — turn tracking is per-request in messageHandler (B3 fix)
+  const { taskRegistry } = services;
   const masterAgent = createWiredMasterAgent({
     apiKey,
     contextManager,
@@ -75,6 +100,8 @@ async function main() {
     eventBusHook,
     skillContracts,
     subAgentDispatchers,
+    changesetManager,
+    taskRegistry,
   });
 
   const messageHandler = createMessageHandler({
@@ -87,7 +114,7 @@ async function main() {
   const app = createApp({
     services,
     messageHandler,
-    infrastructure: { contextManager },
+    infrastructure: { serverEditorCore, contextManager },
   });
   const port = parseInt(process.env.PORT || "4000");
 
