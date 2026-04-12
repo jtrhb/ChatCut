@@ -137,7 +137,7 @@ export class MasterAgent {
 
   // ── Public API ──────────────────────────────────────────────────────────────
 
-  async handleUserMessage(message: string): Promise<{ text: string; tokensUsed: { input: number; output: number } }> {
+  async handleUserMessage(message: string, history?: Array<{ role: string; content: string }>): Promise<{ text: string; tokensUsed: { input: number; output: number } }> {
     const ctx = this.contextManager.get();
 
     // Match skills to intent and use as active skills for this message
@@ -195,7 +195,13 @@ export class MasterAgent {
       maxIterations: MAX_ITERATIONS.master,
     };
 
-    const result = await this.runtime.run(config, message);
+    // Convert history to Anthropic message format for multi-turn context
+    const anthropicHistory = history?.map((m) => ({
+      role: m.role as "user" | "assistant",
+      content: m.content,
+    }));
+
+    const result = await this.runtime.run(config, message, anthropicHistory);
     return { text: result.text, tokensUsed: result.tokensUsed };
   }
 
@@ -335,7 +341,7 @@ export class MasterAgent {
           const params = input as { summary: string; affectedElements: string[]; projectId?: string };
           return this.changesetManager.propose(params);
         }
-        return { status: "pending", input };
+        return { error: "propose_changes unavailable: ChangesetManager not configured for this session" };
       }
 
       case "explore_options": {
@@ -354,7 +360,7 @@ export class MasterAgent {
           };
           return this.explorationEngine.explore(params);
         }
-        return { status: "queued", input };
+        return { error: "explore_options unavailable: ExplorationEngine not configured for this session" };
       }
 
       case "export_video": {
@@ -366,7 +372,7 @@ export class MasterAgent {
           });
           return { task_id: task.taskId };
         }
-        return { task_id: crypto.randomUUID(), input };
+        return { error: "export_video unavailable: TaskRegistry not configured for this session" };
       }
 
       default:

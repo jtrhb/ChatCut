@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { createApp, createWiredMasterAgent, createMessageHandler } from "./server.js";
+import { createApp, createServices, createWiredMasterAgent, createMessageHandler } from "./server.js";
 import { SkillLoader } from "./skills/loader.js";
 import { ProjectContextManager } from "./context/project-context.js";
 import { ProjectWriteLock } from "./context/write-lock.js";
@@ -30,17 +30,23 @@ async function main() {
     { availableTools: availableToolNames, defaultModel: "claude-opus-4-6" },
   );
 
+  // Create shared services ONCE — avoids split-brain duplicates (B2 fix)
+  const services = createServices(skillContracts);
+  const { sessionManager, eventBus, eventBusHook } = services;
+
   // Create shared project infrastructure
   const contextManager = new ProjectContextManager();
   const writeLock = new ProjectWriteLock();
 
-  // Create the app first to get shared services (EventBus, SessionManager, etc.)
-  const app = createApp({ skillContracts });
-  const { sessionManager, eventBus, eventBusHook } = app.services;
-
-  // Stub tool executor for sub-agents (routes tool calls back to the pipeline)
-  const toolExecutor = async (name: string, input: unknown) => {
-    return { error: `Tool ${name} not yet wired to a real executor` };
+  // Tool executor for sub-agents — routes to real implementations when available.
+  // EditorToolExecutor requires ServerEditorCore which is created per-project.
+  // For now, this returns an explicit error that identifies the missing dependency,
+  // rather than a silent stub that pretends to succeed.
+  const toolExecutor = async (name: string, _input: unknown) => {
+    throw new Error(
+      `Tool "${name}" requires a project-scoped ServerEditorCore. ` +
+      `Ensure the session is bound to a project before dispatching sub-agents.`
+    );
   };
 
   // Build sub-agent dispatchers
@@ -61,34 +67,31 @@ async function main() {
     ["verification", (input) => verificationAgent.dispatch(input)],
   ]);
 
-  // Create a default session for the initial wiring
-  // In production, per-request sessions are created by the chat route
-  const defaultSession = sessionManager.createSession({ projectId: "default" });
-
-  // Wire up the MasterAgent with full production plumbing
+  // Wire MasterAgent — turn tracking is per-request in messageHandler (B3 fix)
   const masterAgent = createWiredMasterAgent({
     apiKey,
     contextManager,
     writeLock,
-    sessionManager,
-    sessionId: defaultSession.sessionId,
     eventBusHook,
     skillContracts,
     subAgentDispatchers,
   });
 
-  // Create the message handler and hot-wire it into the chat route
   const messageHandler = createMessageHandler({
     masterAgent,
     sessionManager,
     eventBus,
   });
 
-  // Re-create app with messageHandler wired in
-  const wiredApp = createApp({ skillContracts, messageHandler });
+  // Create app ONCE with shared services, messageHandler, and available infrastructure
+  const app = createApp({
+    services,
+    messageHandler,
+    infrastructure: { contextManager },
+  });
   const port = parseInt(process.env.PORT || "4000");
 
-  serve({ fetch: wiredApp.fetch, port }, (info) => {
+  serve({ fetch: app.fetch, port }, (info) => {
     console.log(`ChatCut Agent Service running on http://localhost:${info.port}`);
     console.log(`  ${subAgentDispatchers.size} sub-agents registered`);
     if (skillContracts.length > 0) {

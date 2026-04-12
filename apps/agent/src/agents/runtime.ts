@@ -15,7 +15,7 @@ export interface SessionCallbacks {
 }
 
 export interface AgentRuntime {
-  run(config: AgentConfig, input: string): Promise<AgentResult>;
+  run(config: AgentConfig, input: string, history?: Anthropic.MessageParam[]): Promise<AgentResult>;
   setToolExecutor(fn: (name: string, input: unknown) => Promise<unknown>): void;
   setToolRegistry?(registry: Map<string, ToolDefinition>): void;
   setOnTurnComplete?(fn: (tokens: { input: number; output: number }) => void): void;
@@ -59,13 +59,15 @@ export class NativeAPIRuntime implements AgentRuntime {
     this.deferredRegistry = registry;
   }
 
-  async run(config: AgentConfig, input: string): Promise<AgentResult> {
+  async run(config: AgentConfig, input: string, history?: Anthropic.MessageParam[]): Promise<AgentResult> {
     const maxIterations = config.maxIterations ?? 10;
     const tokenBudget = config.tokenBudget ?? { input: 30_000, output: 4_000 };
 
-    const messages: Anthropic.MessageParam[] = [
-      { role: "user", content: input },
-    ];
+    // Start from conversation history if provided (multi-turn session),
+    // otherwise start fresh (single-turn or sub-agent dispatch)
+    const messages: Anthropic.MessageParam[] = history
+      ? [...history, { role: "user" as const, content: input }]
+      : [{ role: "user", content: input }];
 
     this.sessionCallbacks?.onMessage({ role: "user", content: input });
 

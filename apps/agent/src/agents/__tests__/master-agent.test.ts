@@ -38,7 +38,7 @@ function makeDispatcher(result = "done"): ReturnType<typeof vi.fn> {
   });
 }
 
-function makeContextManager(overrides?: Partial<Parameters<typeof ProjectContextManager["prototype"]["get"]>[0] extends never ? ReturnType<typeof ProjectContextManager["prototype"]["get"]> : never>) {
+function makeContextManager(overrides?: Record<string, unknown>) {
   return new ProjectContextManager({
     timelineState: '{"tracks":[]}',
     snapshotVersion: 1,
@@ -55,7 +55,7 @@ function makeContextManager(overrides?: Partial<Parameters<typeof ProjectContext
         timestamp: Date.now(),
       },
     ],
-    ...overrides,
+    ...(overrides ?? {}),
   });
 }
 
@@ -180,15 +180,15 @@ describe("MasterAgent", () => {
     );
   });
 
-  // ── 9. propose_changes returns pending status ─────────────────────────────
-  it("propose_changes returns pending status", async () => {
+  // ── 9. propose_changes returns explicit error when ChangesetManager not configured ──
+  it("propose_changes returns error when ChangesetManager not configured", async () => {
     const result = await runtime.callTool("propose_changes", {
       summary: "Remove intro clip",
       affectedElements: ["clip-1"],
     });
 
     expect(result).toEqual(
-      expect.objectContaining({ status: "pending" })
+      expect.objectContaining({ error: expect.stringContaining("ChangesetManager not configured") })
     );
   });
 
@@ -224,20 +224,19 @@ describe("MasterAgent", () => {
     });
 
     expect(result).toEqual(
-      expect.objectContaining({ status: "queued" })
+      expect.objectContaining({ error: expect.stringContaining("ExplorationEngine not configured") })
     );
   });
 
-  // ── 11. export_video returns task_id ──────────────────────────────────────
-  it("export_video returns a task_id", async () => {
+  // ── 11. export_video returns error when TaskRegistry not configured ──────
+  it("export_video returns error when TaskRegistry not configured", async () => {
     const result = (await runtime.callTool("export_video", {
       format: "mp4",
       quality: "standard",
-    })) as { task_id: string };
+    })) as { error: string };
 
-    expect(result).toHaveProperty("task_id");
-    expect(typeof result.task_id).toBe("string");
-    expect(result.task_id.length).toBeGreaterThan(0);
+    expect(result).toHaveProperty("error");
+    expect(result.error).toContain("TaskRegistry not configured");
   });
 
   // ── 12. routes dispatch_verification through DISPATCH_ROUTES ─────────────
@@ -270,7 +269,8 @@ describe("MasterAgent", () => {
     const result = await agent.handleUserMessage("Trim the first clip");
 
     expect(runtime.run).toHaveBeenCalledOnce();
-    expect(result).toBe("I trimmed the clip for you.");
+    expect(result.text).toBe("I trimmed the clip for you.");
+    expect(result.tokensUsed).toEqual({ input: 200, output: 100 });
 
     // Verify config shape
     const config = runtime.run.mock.calls[0][0];

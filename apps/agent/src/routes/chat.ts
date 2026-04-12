@@ -39,6 +39,7 @@ function createChatRouter(deps: {
     const { projectId, message, sessionId: incomingSessionId } = result.data;
 
     let session;
+    let isNewSession = false;
     if (incomingSessionId) {
       session = sessionManager.getSession(incomingSessionId);
       if (!session) {
@@ -49,6 +50,7 @@ function createChatRouter(deps: {
       }
     } else {
       session = sessionManager.createSession({ projectId });
+      isNewSession = true;
     }
 
     sessionManager.appendMessage(session.sessionId, {
@@ -58,7 +60,7 @@ function createChatRouter(deps: {
     });
 
     eventBus?.emit({
-      type: "session.created",
+      type: isNewSession ? "session.created" : "session.resumed",
       timestamp: Date.now(),
       sessionId: session.sessionId,
       data: { projectId },
