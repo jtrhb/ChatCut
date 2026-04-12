@@ -320,8 +320,9 @@ export class MasterAgent {
 
     switch (name) {
       case "read_overflow": {
-        const params = input as { ref: string; offset?: number; limit?: number };
-        return executeReadOverflow(params, this.overflowStore);
+        const { ReadOverflowSchema } = await import("../tools/read-overflow-tool.js");
+        const parsed = ReadOverflowSchema.parse(input);
+        return executeReadOverflow(parsed, this.overflowStore);
       }
 
       case "resolve_tools": {

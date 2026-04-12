@@ -56,11 +56,14 @@ export function createMessageHandler(deps: {
       data: { message },
     });
 
-    // Retrieve conversation history for multi-turn context
+    // Retrieve conversation history for multi-turn context.
+    // Cap at 50 messages to avoid exceeding model context window.
+    const MAX_HISTORY_MESSAGES = 50;
     const session = deps.sessionManager.getSession(sessionId);
     const history = session?.messages
       ?.filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role, content: m.content }))
+      .slice(-MAX_HISTORY_MESSAGES)
+      .map((m) => ({ role: m.role, content: String(m.content) }))
       ?? [];
 
     const { text: response, tokensUsed } = await deps.masterAgent.handleUserMessage(message, history);

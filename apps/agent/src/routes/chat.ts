@@ -53,12 +53,6 @@ function createChatRouter(deps: {
       isNewSession = true;
     }
 
-    sessionManager.appendMessage(session.sessionId, {
-      role: "user",
-      content: message,
-      timestamp: Date.now(),
-    });
-
     eventBus?.emit({
       type: isNewSession ? "session.created" : "session.resumed",
       timestamp: Date.now(),
@@ -68,13 +62,25 @@ function createChatRouter(deps: {
 
     // If no handler is wired, return processing (test/stub mode)
     if (!messageHandler) {
+      sessionManager.appendMessage(session.sessionId, {
+        role: "user",
+        content: message,
+        timestamp: Date.now(),
+      });
       return c.json({ status: "processing", sessionId: session.sessionId });
     }
 
     // Execute through the agent and record the response
+    // Append messages AFTER handler completes to avoid history duplication
+    // (handler reads history, then runtime adds current message)
     try {
       const response = await messageHandler(message, session.sessionId);
 
+      sessionManager.appendMessage(session.sessionId, {
+        role: "user",
+        content: message,
+        timestamp: Date.now(),
+      });
       sessionManager.appendMessage(session.sessionId, {
         role: "assistant",
         content: response,
