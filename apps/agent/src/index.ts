@@ -13,6 +13,9 @@ import { masterToolDefinitions } from "./tools/master-tools.js";
 import type { DispatchInput, DispatchOutput } from "./agents/types.js";
 import { ServerEditorCore } from "./services/server-editor-core.js";
 import { EditorToolExecutor } from "./tools/editor-tools.js";
+import { AssetToolExecutor } from "./tools/asset-tool-executor.js";
+import { EmbeddingClient } from "./services/embedding-client.js";
+import { CharacterStore } from "./assets/character-store.js";
 import { ChangesetManager } from "./changeset/changeset-manager.js";
 import { ChangeLog } from "@opencut/core";
 import { PatternObserver } from "./memory/pattern-observer.js";
@@ -86,6 +89,21 @@ async function main() {
   // Create EditorToolExecutor backed by real ServerEditorCore
   const editorToolExecutor = new EditorToolExecutor(serverEditorCore);
 
+  // Create AssetToolExecutor when embedding credentials are available
+  const embeddingClient = process.env.EMBEDDING_API_URL
+    ? new EmbeddingClient(process.env.EMBEDDING_API_URL, process.env.EMBEDDING_API_KEY ?? "")
+    : null;
+
+  const assetToolExecutor = embeddingClient
+    ? new AssetToolExecutor({
+        assetStore: {} as any,    // DB placeholder — wired when connection is available
+        brandStore: {} as any,
+        characterStore: new CharacterStore(null as any),
+        objectStorage: {} as any,
+        embeddingClient,
+      })
+    : null;
+
   // Create ChangesetManager for propose/approve/reject workflow
   const changeLog = new ChangeLog();
   const changesetManager = new ChangesetManager({ changeLog, serverCore: serverEditorCore });
@@ -94,6 +112,9 @@ async function main() {
   const toolExecutor = async (name: string, input: unknown) => {
     if (editorToolExecutor.hasToolName(name)) {
       return editorToolExecutor.execute(name, input, { agentType: "editor", taskId: "default" });
+    }
+    if (assetToolExecutor?.hasToolName(name)) {
+      return assetToolExecutor.execute(name, input, { agentType: "asset", taskId: "default" });
     }
     return { success: false, error: `Tool "${name}" has no registered executor` };
   };

@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import { eq } from "drizzle-orm";
-import { brandKits } from "../db/schema.js";
+import { brandKits, brandAssetLinks, assets } from "../db/schema.js";
 
 export interface BrandCreateParams {
   userId: string;
@@ -37,5 +37,35 @@ export class BrandStore {
       .from(brandKits)
       .where(eq(brandKits.id, brandId));
     return rows[0] ?? null;
+  }
+
+  async linkAsset(brandId: string, assetId: string, role: string): Promise<void> {
+    await this.db.insert(brandAssetLinks).values({
+      id: randomUUID(),
+      brandId,
+      assetId,
+      assetRole: role,
+    });
+  }
+
+  async getWithAssets(
+    brandId: string,
+  ): Promise<{ brand: any; assets: any[] }> {
+    const brand = await this.get(brandId);
+    if (!brand) return { brand: null, assets: [] };
+
+    const linked = await this.db
+      .select()
+      .from(brandAssetLinks)
+      .innerJoin(assets, eq(brandAssetLinks.assetId, assets.id))
+      .where(eq(brandAssetLinks.brandId, brandId));
+
+    return {
+      brand,
+      assets: linked.map((row: any) => ({
+        ...row.assets,
+        role: row.brand_asset_links.assetRole,
+      })),
+    };
   }
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql, type SQL } from "drizzle-orm";
 import { assets } from "../db/schema.js";
 
 export interface AssetSaveParams {
@@ -45,7 +45,7 @@ export class AssetStore {
   async search(params: AssetSearchParams): Promise<any[]> {
     let query = this.db.select().from(assets);
 
-    const conditions = [];
+    const conditions: SQL<unknown>[] = [];
     if (params.type !== undefined) {
       conditions.push(eq(assets.type, params.type));
     }
@@ -66,5 +66,54 @@ export class AssetStore {
     }
 
     return results;
+  }
+
+  async findById(id: string): Promise<any | null> {
+    const rows = await this.db
+      .select()
+      .from(assets)
+      .where(eq(assets.id, id));
+    return rows[0] ?? null;
+  }
+
+  async updateTags(id: string, tags: string[]): Promise<void> {
+    await this.db
+      .update(assets)
+      .set({ tags })
+      .where(eq(assets.id, id));
+  }
+
+  async saveWithEmbedding(
+    params: AssetSaveParams,
+    embedding: number[],
+  ): Promise<{ id: string }> {
+    const id = randomUUID();
+    await this.db.insert(assets).values({
+      id,
+      name: params.name,
+      type: params.type,
+      storageKey: params.storageKey,
+      tags: params.tags ?? [],
+      embedding,
+      generationContext: {
+        created_at: new Date().toISOString(),
+        source: "agent",
+        metadata: params.metadata ?? {},
+      },
+      createdAt: new Date(),
+    });
+    return { id };
+  }
+
+  async findSimilar(embedding: number[], limit = 5): Promise<any[]> {
+    const vectorStr = `[${embedding.join(",")}]`;
+    const result = await this.db.execute(
+      sql`SELECT *, embedding <=> ${vectorStr}::vector AS distance
+          FROM assets
+          WHERE embedding IS NOT NULL
+          ORDER BY distance ASC
+          LIMIT ${limit}`,
+    );
+    return result;
   }
 }

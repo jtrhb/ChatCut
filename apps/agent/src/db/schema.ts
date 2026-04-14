@@ -6,7 +6,20 @@ import {
   jsonb,
   timestamp,
   index,
+  customType,
 } from "drizzle-orm/pg-core";
+
+const vector = customType<{ data: number[]; driverData: string }>({
+  dataType() {
+    return "vector(768)";
+  },
+  toDriver(value: number[]): string {
+    return `[${value.join(",")}]`;
+  },
+  fromDriver(value: string): number[] {
+    return JSON.parse(value);
+  },
+});
 
 export const projects = pgTable("projects", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -109,6 +122,7 @@ export const assets = pgTable("assets", {
   tags: jsonb("tags").default([]).notNull(),
   generationContext: jsonb("generation_context"),
   projectId: uuid("project_id").references(() => projects.id),
+  embedding: vector("embedding"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -162,4 +176,35 @@ export const explorationSessions = pgTable("exploration_sessions", {
   memorySignals: jsonb("memory_signals"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   expiresAt: timestamp("expires_at").notNull(),
+});
+
+export const characters = pgTable("characters", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  description: text("description"),
+  projectId: uuid("project_id").references(() => projects.id),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const characterAssets = pgTable("character_assets", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  characterId: uuid("character_id")
+    .notNull()
+    .references(() => characters.id),
+  assetId: uuid("asset_id")
+    .notNull()
+    .references(() => assets.id),
+  role: text("role").default("reference").notNull(),
+});
+
+export const brandAssetLinks = pgTable("brand_asset_links", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  brandId: uuid("brand_id")
+    .notNull()
+    .references(() => brandKits.id),
+  assetId: uuid("asset_id")
+    .notNull()
+    .references(() => assets.id),
+  assetRole: text("asset_role").notNull(),
 });
