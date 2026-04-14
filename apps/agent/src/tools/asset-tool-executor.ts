@@ -115,9 +115,19 @@ export class AssetToolExecutor extends ToolExecutor {
     if (ipLower.startsWith("fe80:")) return "Link-local IPv6";
     if (ipLower.startsWith("fc00:") || ipLower.startsWith("fd00:")) return "Unique-local IPv6";
     if (ipLower.startsWith("::ffff:")) {
-      // IPv4-mapped IPv6 — extract and re-check
+      // IPv4-mapped IPv6 — may be dotted (::ffff:10.0.0.1) or hex (::ffff:a00:1)
       const mapped = ipLower.slice(7);
-      return this.validateResolvedIp(mapped);
+      if (mapped.includes(".")) {
+        return this.validateResolvedIp(mapped);
+      }
+      // Hex format: parse two 16-bit groups into IPv4 octets
+      const hexParts = mapped.split(":");
+      if (hexParts.length === 2) {
+        const hi = parseInt(hexParts[0], 16);
+        const lo = parseInt(hexParts[1], 16);
+        const ipv4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+        return this.validateResolvedIp(ipv4);
+      }
     }
     return null;
   }
@@ -152,10 +162,24 @@ export class AssetToolExecutor extends ToolExecutor {
         return "Link-local addresses are not allowed (cloud metadata protection)";
       }
 
-      // Block IPv6-mapped private addresses
+      // Block IPv6-mapped private addresses (dotted and hex formats)
       if (host.startsWith("::ffff:10.") || host.startsWith("::ffff:192.168.") ||
           host.startsWith("::ffff:169.254.")) {
         return "IPv6-mapped private addresses are not allowed";
+      }
+      // Node canonicalizes ::ffff:10.0.0.1 to ::ffff:a00:1 — check hex format too
+      if (host.startsWith("::ffff:")) {
+        const hexPart = host.slice(7);
+        if (!hexPart.includes(".") && hexPart.includes(":")) {
+          const parts = hexPart.split(":");
+          if (parts.length === 2) {
+            const hi = parseInt(parts[0], 16);
+            const ipv4First = (hi >> 8) & 0xff;
+            if (ipv4First === 10 || ipv4First === 127 || ipv4First === 169 || ipv4First === 192) {
+              return "IPv6-mapped private addresses are not allowed (hex format)";
+            }
+          }
+        }
       }
 
       // Block internal domains
