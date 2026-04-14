@@ -73,18 +73,21 @@ PatternObserver already accepts `MemoryStore` via constructor DI (line 34) and c
 
 SkillLoader reads from R2 `_skills/` paths at three scope levels (global → brand → series). It already filters `skill_status !== "deprecated"`.
 
-**Change needed**: Add `activation_scope` filtering for draft skills. Currently SkillLoader does NOT gate drafts by activation_scope — all drafts are loaded regardless of context. Add filtering logic:
+**Change needed**: Add draft skill scope filtering. Currently SkillLoader does NOT gate drafts by scope — all drafts are loaded regardless of context.
+
+Note: `activation_scope` on `ParsedMemory` has fields `{project_id?, batch_id?, session_id?}` — no `brand/series`. For draft skill filtering, use the skill's `scope` field (`"brand:acme"`, `"brand:acme/series:weekly"`) which IS brand-aware, rather than `activation_scope`.
 
 ```ts
 // In SkillLoader, after loading and filtering by status:
-if (memory.skill_status === "draft" && memory.activation_scope) {
-  const scope = memory.activation_scope;
-  if (scope.brand && scope.brand !== currentBrand) continue;
-  if (scope.series && scope.series !== currentSeries) continue;
+if (memory.skill_status === "draft" && memory.scope) {
+  // Parse scope string: "brand:acme" or "brand:acme/series:weekly"
+  const scopeParts = parseScope(memory.scope); // { brand?: string; series?: string }
+  if (scopeParts.brand && scopeParts.brand !== currentBrand) continue;
+  if (scopeParts.series && scopeParts.series !== currentSeries) continue;
 }
 ```
 
-This requires SkillLoader to receive current brand/series context, which it currently doesn't. Add `brand?: string; series?: string` to the load options.
+This requires SkillLoader to receive current brand/series context. Add `brand?: string; series?: string` to the load options.
 
 ### 4. SkillValidator — Implicit Validation Engine
 
@@ -93,6 +96,17 @@ This requires SkillLoader to receive current brand/series context, which it curr
 **Purpose**: Track draft skill performance across sessions and auto-promote/demote.
 
 **Persistence**: Use PostgreSQL `skills` table — extend with performance counters rather than in-memory Map. This survives server restarts.
+
+**Schema migration** — add columns to `skills` table:
+```sql
+ALTER TABLE skills ADD COLUMN approve_count INTEGER DEFAULT 0;
+ALTER TABLE skills ADD COLUMN reject_count INTEGER DEFAULT 0;
+ALTER TABLE skills ADD COLUMN sessions_seen INTEGER DEFAULT 0;
+ALTER TABLE skills ADD COLUMN consecutive_rejects INTEGER DEFAULT 0;
+ALTER TABLE skills ADD COLUMN created_session_id TEXT;
+ALTER TABLE skills ADD COLUMN last_session_id TEXT;
+```
+In Drizzle ORM, add corresponding fields to `apps/agent/src/db/schema.ts` skills table definition.
 
 ```ts
 // Extend SkillStore with new methods:
@@ -144,7 +158,7 @@ export class SkillValidator {
 | GET | /skills/:id | Get skill detail (content + frontmatter + performance stats) |
 | POST | /skills/:id/approve | Manual promote: draft → validated |
 | POST | /skills/:id/deprecate | Manual demote: any → deprecated |
-| DELETE | /skills/:id | Delete skill from R2 + DB |
+| DELETE | /skills/:id | Delete skill: `SkillStore.delete(id)` (DB) + `MemoryStore.deleteFile(skill.r2Path)` (R2). R2 path resolved from DB record's scope + skillId. |
 
 **Response shape**:
 ```ts
@@ -197,8 +211,8 @@ R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 3. SkillValidator refuses same-session promotion (session gate)
 4. SkillStore.findById/updateStatus/delete/recordOutcome round-trip
 5. MemoryStore.deleteFile removes file from R2
-6. SkillLoader filters draft skills by activation_scope (matching brand/series)
-7. SkillLoader loads drafts without activation_scope unconditionally
+6. SkillLoader filters draft skills by scope field (matching brand/series)
+7. SkillLoader loads drafts without scope unconditionally
 8. ProjectContextManager.getBrandForProject returns brand mapping
 
 ### Integration Tests
