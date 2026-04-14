@@ -22,10 +22,10 @@ AssetAgent.dispatch(task)
 AssetToolExecutor.executeImpl(toolName, input)
   ├── search_assets  → AssetStore.search(query, type)
   ├── get_asset_info → AssetStore.findById(id) + ObjectStorage.getSignedUrl(key)
-  ├── save_asset     → ObjectStorage.upload(file) + EmbeddingClient.embed(file) + AssetStore.saveWithEmbedding(meta, vector)
+  ├── save_asset     → fetch URL → ObjectStorage.upload(buffer) + EmbeddingClient.embed(description) + AssetStore.saveWithEmbedding(meta, vector)
   ├── tag_asset      → AssetStore.updateTags(id, tags)
   ├── find_similar   → AssetStore.findSimilar(embedding, limit) via pgvector <=> operator
-  ├── get_character  → CharacterStore.getWithAssets(name) + ObjectStorage.getSignedUrl per ref
+  ├── get_character  → CharacterStore.getById(characterId) + getWithAssets() + ObjectStorage.getSignedUrl per ref
   └── get_brand_assets → BrandStore.getWithAssets(brandId) + ObjectStorage.getSignedUrl per asset
 ```
 
@@ -58,7 +58,7 @@ POST {apiUrl}/v1/embeddings
 
 **Response**: `{ data: [{ embedding: number[] }] }`
 
-**For images/video**: Pass base64-encoded content or URL as input. The fly.io service handles multimodal routing internally.
+**V1 scope**: Text embedding only (asset descriptions, tags). Multimodal embedding (images/video) deferred to v2 when Gemini Embedding 2's multimodal capabilities are validated against the fly.io deployment.
 
 **Environment variables**:
 ```
@@ -78,7 +78,29 @@ ALTER TABLE assets ADD COLUMN embedding vector(768);
 CREATE INDEX assets_embedding_idx ON assets USING hnsw (embedding vector_cosine_ops);
 ```
 
-In Drizzle ORM, add a custom column type for vector(768). Use raw SQL for the HNSW index since Drizzle doesn't natively support pgvector index types.
+In Drizzle ORM, define a custom column type:
+
+```ts
+import { customType } from "drizzle-orm/pg-core";
+
+const vector = customType<{ data: number[]; driverData: string }>({
+  dataType() { return "vector(768)"; },
+  toDriver(value: number[]) { return `[${value.join(",")}]`; },
+  fromDriver(value: string) { return JSON.parse(value); },
+});
+
+// Usage in schema:
+embedding: vector("embedding"),
+```
+
+For `findSimilar`, use raw SQL since Drizzle doesn't support pgvector operators:
+```ts
+const result = await db.execute(
+  sql`SELECT *, embedding <=> ${vectorParam}::vector AS distance FROM assets WHERE embedding IS NOT NULL ORDER BY distance ASC LIMIT ${limit}`
+);
+```
+
+**Required npm dependency**: `bun add pgvector` (for JS vector serialization helpers, optional but convenient).
 
 ### 3. AssetStore Extensions
 
@@ -116,6 +138,7 @@ export const characters = pgTable("characters", {
   description: text("description"),
   projectId: uuid("project_id").references(() => projects.id),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
 // character_assets join table
@@ -139,6 +162,7 @@ export const brandAssetLinks = pgTable("brand_asset_links", {
 ```ts
 export class CharacterStore {
   constructor(private db: any) {}
+  async getById(id: string): Promise<Character | null>;
   async getByName(name: string, projectId?: string): Promise<Character | null>;
   async getWithAssets(characterId: string): Promise<{ character: Character; assets: Asset[] }>;
   async create(params: { name: string; description?: string; projectId?: string }): Promise<{ id: string }>;
@@ -192,10 +216,10 @@ export class AssetToolExecutor extends ToolExecutor {
 |------|-------|
 | search_assets | `AssetStore.search(query, type)` → return matches with signed URLs |
 | get_asset_info | `AssetStore.findById(id)` → enrich with `ObjectStorage.getSignedUrl(storageKey)` |
-| save_asset | Upload to R2 → generate embedding via EmbeddingClient → save to DB with vector |
+| save_asset | If `file_or_url` is URL: `fetch()` → Buffer. Upload Buffer to R2 via `ObjectStorage.upload(buffer, opts)`. Generate text embedding from asset name+tags via `EmbeddingClient.embed()`. Save to DB with vector via `AssetStore.saveWithEmbedding()`. |
 | tag_asset | `AssetStore.updateTags(id, tags)` |
 | find_similar | `AssetStore.findById(id)` → get embedding → `AssetStore.findSimilar(embedding, limit)` |
-| get_character | `CharacterStore.getByName(name)` → `getWithAssets()` → signed URLs for each ref |
+| get_character | `CharacterStore.getById(characterId)` → `getWithAssets()` → signed URLs for each ref |
 | get_brand_assets | `BrandStore.getWithAssets(brandId)` → signed URLs for each asset |
 
 ### 6. Production Wiring
@@ -275,6 +299,7 @@ EMBEDDING_API_KEY=<api key>
 17. find_similar on asset without embedding → returns error "no embedding available"
 18. get_character with unknown name → returns empty result, not error
 19. search_assets with no matches → returns empty array
+20. save_asset with R2 upload failure → returns error, does not create DB record
 
 ## Non-Goals
 
@@ -282,6 +307,7 @@ EMBEDDING_API_KEY=<api key>
 - No asset deduplication (same file uploaded twice = two assets)
 - No asset versioning (overwrite-only)
 - No video/audio embedding (text description embedding only for v1, multimodal later)
+- No per-user asset scoping — assets are project-scoped via `projectId`. The existing `userId` param in `AssetStore.save()` is stored in `generationContext` metadata but not used for access control
 
 ## File Structure
 
