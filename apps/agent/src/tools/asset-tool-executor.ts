@@ -103,14 +103,49 @@ export class AssetToolExecutor extends ToolExecutor {
     try {
       const parsed = new URL(url);
       if (parsed.protocol !== "https:") return "Only HTTPS URLs are allowed";
-      // Block internal/private IPs
-      const host = parsed.hostname;
-      if (host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" ||
-          host.startsWith("10.") || host.startsWith("192.168.") ||
-          host.startsWith("172.") || host.endsWith(".internal") ||
-          host.endsWith(".local") || host === "[::1]") {
-        return "Internal/private URLs are not allowed";
+
+      const host = parsed.hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+
+      // Block loopback (127.x.x.x, ::1, IPv6-mapped loopback)
+      if (host === "localhost" || host.startsWith("127.") || host === "0.0.0.0" ||
+          host === "::1" || host === "0:0:0:0:0:0:0:1" ||
+          host.startsWith("::ffff:127.") || host.startsWith("::ffff:7f")) {
+        return "Loopback addresses are not allowed";
       }
+
+      // Block private RFC-1918 ranges
+      if (host.startsWith("10.") || host.startsWith("192.168.")) {
+        return "Private network addresses are not allowed";
+      }
+      // 172.16.0.0 - 172.31.255.255
+      if (host.startsWith("172.")) {
+        const second = parseInt(host.split(".")[1], 10);
+        if (second >= 16 && second <= 31) return "Private network addresses are not allowed";
+      }
+
+      // Block link-local (169.254.x.x — cloud metadata endpoint)
+      if (host.startsWith("169.254.")) {
+        return "Link-local addresses are not allowed (cloud metadata protection)";
+      }
+
+      // Block IPv6-mapped private addresses
+      if (host.startsWith("::ffff:10.") || host.startsWith("::ffff:192.168.") ||
+          host.startsWith("::ffff:169.254.")) {
+        return "IPv6-mapped private addresses are not allowed";
+      }
+
+      // Block internal domains
+      if (host.endsWith(".internal") || host.endsWith(".local") || host.endsWith(".localhost")) {
+        return "Internal domain names are not allowed";
+      }
+
+      // Block raw IPv6 private ranges (fe80::, fc00::, fd00::)
+      const hostLower = host.toLowerCase();
+      if (hostLower.startsWith("fe80:") || hostLower.startsWith("fc00:") ||
+          hostLower.startsWith("fd00:")) {
+        return "IPv6 private addresses are not allowed";
+      }
+
       return null; // valid
     } catch {
       return "Invalid URL format";
@@ -178,9 +213,14 @@ export class AssetToolExecutor extends ToolExecutor {
       tags: input.tags,
     };
 
-    const result = embedding
-      ? await this.assetStore.saveWithEmbedding(saveParams, embedding)
-      : await this.assetStore.save!(saveParams);
+    let result: { id: string };
+    if (embedding) {
+      result = await this.assetStore.saveWithEmbedding(saveParams, embedding);
+    } else if (this.assetStore.save) {
+      result = await this.assetStore.save(saveParams);
+    } else {
+      return { success: false, error: "Cannot save asset: AssetStore.save is not available" };
+    }
 
     return { success: true, data: { asset_id: result.id, storageKey } };
   }
