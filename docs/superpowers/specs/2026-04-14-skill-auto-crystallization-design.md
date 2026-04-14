@@ -7,21 +7,21 @@ Wire the existing PatternObserver into the agent session lifecycle to enable aut
 ## Architecture
 
 ```
-Session End (idle timeout / explicit close)
+Session End (debounced post-response trigger)
     ↓ async, non-blocking
-PatternObserver.runAnalysis(scope)
+PatternObserver.runAnalysis({ brand, series? })
     ↓ 5+ high-confidence memories, 2+ shared tags
-crystallizeSkill() → R2 write draft skill .md
+crystallizeSkill() → R2 write draft skill .md (via existing MemoryStore)
     ↓
 Next Session Start
     ↓
-SkillLoader loads draft skills (activation_scope filtered)
+SkillLoader loads draft skills (+ new activation_scope filter)
     ↓
 Injected into system prompt (user unaware)
     ↓
 Session behavior observed
     ↓ MemoryExtractor monitors approve/reject
-SkillValidator evaluates performance
+SkillValidator evaluates performance (persisted to DB)
     ↓
 approve rate up → "validated" | reject rate up → "deprecated"
 ```
@@ -32,54 +32,59 @@ approve rate up → "validated" | reject rate up → "deprecated"
 
 **Location**: `apps/agent/src/server.ts` — `createMessageHandler()`
 
-**Mechanism**: After each successful handler response, check if enough time has passed since last analysis (debounce). On session idle timeout (30 min, reuse OverflowStore idle timer concept) or when a new session replaces the current one for the same project, trigger analysis asynchronously.
+**Mechanism**: After each successful handler response, debounced trigger runs PatternObserver analysis asynchronously. NOT a true session-end detector — just a debounced post-response hook.
 
 ```ts
-// In createMessageHandler, after successful response:
-queueMicrotask(() => {
-  patternObserver.runAnalysis(session.projectId, scope).catch(console.error);
-});
+// In createMessageHandler deps, add:
+patternObserver?: PatternObserver;
+lastAnalysisAt?: Map<string, number>;
+
+// After successful response, debounced trigger:
+const ANALYSIS_DEBOUNCE_MS = 10 * 60 * 1000; // 10 minutes
+const scopeKey = `${brand}:${series ?? ""}`;
+const lastAt = lastAnalysisAt.get(scopeKey) ?? 0;
+if (Date.now() - lastAt > ANALYSIS_DEBOUNCE_MS) {
+  lastAnalysisAt.set(scopeKey, Date.now());
+  queueMicrotask(() => {
+    patternObserver.runAnalysis({ brand, series }).catch(console.error);
+  });
+}
 ```
 
-**Debounce**: Don't re-analyze if less than 10 minutes since last analysis for this scope. Track via `lastAnalysisAt: Map<string, number>`.
+**Brand resolution**: Session has `projectId`. Need a `ProjectContextManager.getBrandForProject(projectId): { brand: string; series?: string }` method. If no brand mapping exists, skip analysis (no-op).
 
 **Non-blocking**: Analysis runs after response is sent. Errors are logged, never propagated to user.
 
 ### 2. R2 Write Layer
 
-**Location**: `apps/agent/src/memory/r2-client.ts` (new)
+**Uses existing `MemoryStore` class** at `apps/agent/src/memory/memory-store.ts`.
 
-**Interface**:
-```ts
-export interface MemoryStore {
-  read(path: string): Promise<string | null>;
-  write(path: string, content: string): Promise<void>;
-  list(prefix: string): Promise<string[]>;
-  delete(path: string): Promise<void>;
-}
+PatternObserver already accepts `MemoryStore` via constructor DI (line 34) and calls `this.memoryStore.writeMemory()` for crystallization. **No refactoring needed.**
 
-export class R2MemoryStore implements MemoryStore {
-  constructor(private bucket: R2Bucket | S3Client, private bucketName: string) {}
-  // S3-compatible implementation using @aws-sdk/client-s3
-}
-
-export class LocalMemoryStore implements MemoryStore {
-  constructor(private basePath: string) {}
-  // Local filesystem implementation for development
-}
-```
+**Missing method**: Add `deleteFile(path: string): Promise<void>` to existing `MemoryStore` class using `DeleteObjectCommand` from `@aws-sdk/client-s3` (already installed at `^3.800.0`).
 
 **Skill write path**: `brands/{brandId}/_skills/skill-{skillId}.md`
 
-**PatternObserver integration**: Replace direct R2 calls in `crystallizeSkill()` with injected `MemoryStore` interface. Currently PatternObserver has a hardcoded write — refactor to accept `MemoryStore` via constructor.
+**Local dev**: When `R2_ENDPOINT` env var is not set, `MemoryStore` can use a `LocalMemoryStore` adapter backed by `{projectRoot}/.local-memory/`. Implement as a constructor option on the existing class.
 
 ### 3. Draft Skill Auto-Loading
 
-**Already implemented** in `apps/agent/src/skills/loader.ts`.
+**Location**: `apps/agent/src/skills/loader.ts`
 
-SkillLoader reads from R2 `_skills/` paths at three scope levels (global → brand → series). Draft skills with `skill_status: "draft"` are loaded but gated by `activation_scope` — only injected if the current session matches the scope's project/brand/series constraints.
+SkillLoader reads from R2 `_skills/` paths at three scope levels (global → brand → series). It already filters `skill_status !== "deprecated"`.
 
-**No changes needed** — verify via integration test that a draft skill written by PatternObserver is picked up by SkillLoader in the next session.
+**Change needed**: Add `activation_scope` filtering for draft skills. Currently SkillLoader does NOT gate drafts by activation_scope — all drafts are loaded regardless of context. Add filtering logic:
+
+```ts
+// In SkillLoader, after loading and filtering by status:
+if (memory.skill_status === "draft" && memory.activation_scope) {
+  const scope = memory.activation_scope;
+  if (scope.brand && scope.brand !== currentBrand) continue;
+  if (scope.series && scope.series !== currentSeries) continue;
+}
+```
+
+This requires SkillLoader to receive current brand/series context, which it currently doesn't. Add `brand?: string; series?: string` to the load options.
 
 ### 4. SkillValidator — Implicit Validation Engine
 
@@ -87,35 +92,45 @@ SkillLoader reads from R2 `_skills/` paths at three scope levels (global → bra
 
 **Purpose**: Track draft skill performance across sessions and auto-promote/demote.
 
-```ts
-export interface SkillPerformance {
-  skillId: string;
-  sessionsSeen: number;        // sessions where this skill was active
-  approveCount: number;        // changesets approved while skill active
-  rejectCount: number;         // changesets rejected while skill active
-  distinctSessions: Set<string>; // session IDs for cross-session validation
-}
+**Persistence**: Use PostgreSQL `skills` table — extend with performance counters rather than in-memory Map. This survives server restarts.
 
+```ts
+// Extend SkillStore with new methods:
+export class SkillStore {
+  // Existing:
+  save(skill): Promise<void>;
+  search(filters): Promise<Skill[]>;
+  incrementUsage(id): Promise<void>;
+  
+  // New for Phase 5:
+  findById(id: string): Promise<Skill | null>;
+  updateStatus(id: string, status: "draft" | "validated" | "deprecated"): Promise<void>;
+  delete(id: string): Promise<void>;
+  recordOutcome(id: string, sessionId: string, approved: boolean): Promise<void>;
+  getPerformance(id: string): Promise<SkillPerformance>;
+}
+```
+
+```ts
 export class SkillValidator {
-  private performances = new Map<string, SkillPerformance>();
+  constructor(private skillStore: SkillStore, private memoryStore: MemoryStore) {}
   
   // Called by MemoryExtractor on approve/reject
-  recordOutcome(skillId: string, sessionId: string, approved: boolean): void;
+  async recordOutcome(skillId: string, sessionId: string, approved: boolean): Promise<void>;
   
-  // Check if any draft skill should be promoted or deprecated
-  evaluate(skillId: string): "promote" | "deprecate" | "keep";
-  
-  // Apply the evaluation — update skill_status in R2
-  async applyEvaluation(skillId: string, memoryStore: MemoryStore): Promise<void>;
+  // Check and apply promotion/demotion
+  async evaluateAndApply(skillId: string): Promise<"promoted" | "deprecated" | "unchanged">;
 }
 ```
 
 **Promotion rules**:
 - `promoted to "validated"`: 3+ positive reinforcements across 2+ distinct sessions
 - `deprecated`: 3 consecutive rejects of the skill's associated operation type in any session
-- **Session gate**: Cannot promote within the same session that created the draft (prevents self-reinforcement loop)
+- **Session gate**: Cannot promote within the same session that created the draft
 
-**Integration point**: MemoryExtractor already calls `handleApproval()` and `handleRejection()`. Add a hook that also notifies SkillValidator when a changeset is approved/rejected while a draft skill is active.
+**Dual-write**: When status changes, update both R2 (skill .md frontmatter) and PostgreSQL (`skills.skillStatus`).
+
+**Active skill tracking**: SkillLoader returns loaded draft skill IDs. Pass these to `createMessageHandler` so MemoryExtractor can correlate approve/reject events with active draft skills.
 
 ### 5. /skills API Route
 
@@ -144,23 +159,25 @@ export class SkillValidator {
     approveRate: number;
     rejectRate: number;
   };
-  content: string;  // markdown
+  content: string;
   frontmatter: Record<string, unknown>;
 }
 ```
 
-**Wire into**: `apps/agent/src/server.ts` — `app.route("/skills", createSkillsRouter({ memoryStore, skillStore }))` and `apps/agent/src/index.ts`.
+**Wire into**: `apps/agent/src/server.ts` and `apps/agent/src/index.ts`.
 
 ## Dependencies
 
 | Dependency | Status | Action |
 |-----------|--------|--------|
-| PatternObserver | Implemented | Refactor to accept MemoryStore interface |
-| SkillLoader | Implemented | No changes, verify via integration test |
-| MemoryExtractor | Implemented | Add SkillValidator hook |
-| SkillStore (DB) | Implemented | Use for metadata/search alongside R2 |
+| PatternObserver | Implemented (already uses MemoryStore DI) | Wire into session trigger in server.ts |
+| SkillLoader | Implemented | Add activation_scope filtering + brand/series context |
+| MemoryExtractor | Implemented | Add SkillValidator hook for approve/reject |
+| SkillStore (DB) | Implemented (save/search/incrementUsage) | Add findById, updateStatus, delete, recordOutcome, getPerformance |
+| MemoryStore (R2) | Implemented | Add deleteFile() method |
 | R2 bucket | Available (user has admin) | Create bucket, configure env vars |
-| @aws-sdk/client-s3 | Not installed | `bun add @aws-sdk/client-s3` |
+| @aws-sdk/client-s3 | Installed (^3.800.0) | No action needed |
+| ProjectContextManager | Implemented | Add getBrandForProject() method |
 
 ## Environment Variables
 
@@ -175,44 +192,51 @@ R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 ## Acceptance Tests
 
 ### Unit Tests
-1. PatternObserver with injected MemoryStore writes skill file to correct R2 path
-2. SkillValidator promotes draft after 3+ reinforcements across 2+ sessions
-3. SkillValidator deprecates after 3 consecutive rejects
-4. SkillValidator refuses same-session promotion (session gate)
-5. R2MemoryStore read/write/list/delete round-trip (against mock or local)
-6. LocalMemoryStore file operations match R2MemoryStore interface
+1. SkillValidator promotes draft after 3+ reinforcements across 2+ sessions
+2. SkillValidator deprecates after 3 consecutive rejects
+3. SkillValidator refuses same-session promotion (session gate)
+4. SkillStore.findById/updateStatus/delete/recordOutcome round-trip
+5. MemoryStore.deleteFile removes file from R2
+6. SkillLoader filters draft skills by activation_scope (matching brand/series)
+7. SkillLoader loads drafts without activation_scope unconditionally
+8. ProjectContextManager.getBrandForProject returns brand mapping
 
 ### Integration Tests
-7. End-to-end: create 5+ high-confidence memories → runAnalysis → draft skill appears in R2
-8. End-to-end: draft skill in R2 → SkillLoader picks it up → appears in system prompt
-9. /skills API: list, approve, deprecate, delete operations
-10. Session end trigger fires asynchronously after handler response
+9. End-to-end: create 5+ high-confidence memories → runAnalysis → draft skill appears in R2
+10. End-to-end: draft skill in R2 → SkillLoader picks it up → appears in system prompt
+11. /skills API: list, approve, deprecate, delete operations with dual-write (R2 + DB)
+12. Debounced trigger fires after response, skips if within 10 min window
 
 ### Edge Cases
-11. Duplicate crystallization prevention (same pattern already crystallized)
-12. Concurrent session ends for same scope don't produce duplicate skills
-13. Draft skill with activation_scope only loads in matching sessions
-14. Debounce prevents re-analysis within 10 minutes
+13. Duplicate crystallization: runAnalysis overwrites existing skill at same path (intentional, no versioning)
+14. Concurrent runAnalysis calls for same brand: last-write-wins (R2 is eventually consistent)
+15. Server restart: SkillValidator performance data survives (PostgreSQL-backed)
+16. Brand not mapped: analysis is no-op, no error
 
 ## Non-Goals
 
 - No UI for skill editing (API-only for now)
 - No multi-modal skill content (text-only markdown)
-- No skill versioning (overwrite on re-crystallization)
+- No skill versioning (overwrite on re-crystallization is intentional)
 - No cross-brand skill sharing (each brand scope is independent)
+- No real-time notification of new draft skills (discovered on next session load)
 
 ## File Structure
 
 ```
 apps/agent/src/
 ├── memory/
-│   ├── r2-client.ts              (new) MemoryStore interface + R2/Local implementations
-│   └── pattern-observer.ts       (modify) Accept MemoryStore, refactor crystallizeSkill
+│   ├── memory-store.ts           (modify) Add deleteFile() method
+│   └── pattern-observer.ts       (no change) Already uses MemoryStore DI
 ├── skills/
 │   ├── skill-validator.ts        (new) Implicit validation engine
-│   └── loader.ts                 (verify) No changes expected
+│   └── loader.ts                 (modify) Add activation_scope filter + brand/series context
+├── assets/
+│   └── skill-store.ts            (modify) Add findById, updateStatus, delete, recordOutcome
+├── context/
+│   └── project-context.ts        (modify) Add getBrandForProject()
 ├── routes/
 │   └── skills.ts                 (new) /skills API route
-├── server.ts                     (modify) Wire trigger + route
-└── index.ts                      (modify) Create R2 client, wire dependencies
+├── server.ts                     (modify) Wire trigger + route + PatternObserver
+└── index.ts                      (modify) Create PatternObserver, wire dependencies
 ```
