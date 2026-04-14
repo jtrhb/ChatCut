@@ -132,6 +132,7 @@ export function createApp(opts?: {
   skillContracts?: SkillContract[];
   messageHandler?: MessageHandler;
   skillsRouter?: Hono;
+  changesetRouter?: Hono;
 }) {
   const app = new Hono();
 
@@ -148,7 +149,7 @@ export function createApp(opts?: {
   app.route("/commands", createCommandsRouter({ serverEditorCore: infra.serverEditorCore }));
   app.route("/project", createProjectRouter({ contextManager: infra.contextManager }));
   app.route("/media", createMediaRouter({ objectStorage: infra.objectStorage }));
-  app.route("/changeset", changeset);
+  app.route("/changeset", opts?.changesetRouter ?? changeset);
 
   // DI-wired routes
   app.route("/chat", createChatRouter({

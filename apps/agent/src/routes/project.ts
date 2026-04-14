@@ -9,11 +9,15 @@ function createProjectRouter(deps: { contextManager?: ProjectContextManager } = 
     const id = c.req.param("id");
 
     if (contextManager) {
+      // WARNING: Currently returns global shared context regardless of project ID.
+      // Multi-project isolation requires per-project ServerEditorCore + ProjectContext.
+      // Until then, this is single-project only.
       const ctx = contextManager.get();
       return c.json({
         projectId: id,
         snapshotVersion: ctx.snapshotVersion,
         timeline: ctx.timelineState || null,
+        _warning: "single-project mode — context is shared across all project IDs",
       });
     }
 

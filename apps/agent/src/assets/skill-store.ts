@@ -17,6 +17,7 @@ export interface SkillSaveParams {
   agentType: string;
   scopeLevel: string;
   content: string;
+  sessionId?: string;
 }
 
 export interface SkillSearchParams {
@@ -41,6 +42,9 @@ export class SkillStore {
       content: params.content,
       frontmatter: { scopeLevel: params.scopeLevel, userId: params.userId },
       skillStatus: "draft",
+      createdSessionId: params.sessionId ?? null,
+      lastSessionId: params.sessionId ?? null,
+      sessionsSeen: params.sessionId ? 1 : 0,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -96,12 +100,17 @@ export class SkillStore {
     sessionId: string,
     approved: boolean,
   ): Promise<void> {
+    // Increment sessionsSeen only when this is a new session for this skill
+    // Uses SQL CASE to conditionally increment
+    const sessionsSql = sql`CASE WHEN ${skills.lastSessionId} IS NULL OR ${skills.lastSessionId} != ${sessionId} THEN ${skills.sessionsSeen} + 1 ELSE ${skills.sessionsSeen} END`;
+
     if (approved) {
       await this.db
         .update(skills)
         .set({
           approveCount: sql`${skills.approveCount} + 1`,
           consecutiveRejects: 0,
+          sessionsSeen: sessionsSql,
           lastSessionId: sessionId,
           updatedAt: new Date(),
         })
@@ -112,6 +121,7 @@ export class SkillStore {
         .set({
           rejectCount: sql`${skills.rejectCount} + 1`,
           consecutiveRejects: sql`${skills.consecutiveRejects} + 1`,
+          sessionsSeen: sessionsSql,
           lastSessionId: sessionId,
           updatedAt: new Date(),
         })

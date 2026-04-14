@@ -156,11 +156,24 @@ async function main() {
     eventBus,
   });
 
+  // Create /skills route for Phase 5a
+  const { createSkillsRouter } = await import("./routes/skills.js");
+  const skillsRouter = createSkillsRouter({
+    skillStore: {} as any, // DB placeholder — will be wired when DB connection is available
+    memoryStore: {} as any,
+  });
+
+  // Create changeset router wired to real ChangesetManager
+  const { createChangesetRouter } = await import("./routes/changeset.js");
+  const changesetRouter = createChangesetRouter({ changesetManager });
+
   // Create app ONCE with shared services, messageHandler, and available infrastructure
   const app = createApp({
     services,
     messageHandler,
     infrastructure: { serverEditorCore, contextManager },
+    skillsRouter,
+    changesetRouter,
   });
   const port = parseInt(process.env.PORT || "4000");
 

@@ -83,7 +83,7 @@ export class AssetToolExecutor extends ToolExecutor {
 
   private async _searchAssets(input: { query: string; type?: string }): Promise<ToolCallResult> {
     const results = await this.assetStore.search({
-      userId: "default",
+      userId: "unscoped", // TODO: Thread userId from session context for tenant isolation
       query: input.query,
       type: input.type,
     });
@@ -98,16 +98,61 @@ export class AssetToolExecutor extends ToolExecutor {
     return { success: true, data: { ...asset, url } };
   }
 
+  /** Validate URL to prevent SSRF — only allow https with public hosts. */
+  private validateAssetUrl(url: string): string | null {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "https:") return "Only HTTPS URLs are allowed";
+      // Block internal/private IPs
+      const host = parsed.hostname;
+      if (host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" ||
+          host.startsWith("10.") || host.startsWith("192.168.") ||
+          host.startsWith("172.") || host.endsWith(".internal") ||
+          host.endsWith(".local") || host === "[::1]") {
+        return "Internal/private URLs are not allowed";
+      }
+      return null; // valid
+    } catch {
+      return "Invalid URL format";
+    }
+  }
+
   private async _saveAsset(input: {
     file_or_url: string;
     metadata: Record<string, unknown>;
     tags?: string[];
   }): Promise<ToolCallResult> {
-    const response = await fetch(input.file_or_url);
-    if (!response.ok) {
-      return { success: false, error: `Failed to fetch: ${input.file_or_url}` };
+    // SSRF protection
+    const urlError = this.validateAssetUrl(input.file_or_url);
+    if (urlError) return { success: false, error: `URL rejected: ${urlError}` };
+
+    const MAX_ASSET_SIZE = 100 * 1024 * 1024; // 100MB
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000); // 30s timeout
+
+    let response: Response;
+    try {
+      response = await fetch(input.file_or_url, { signal: controller.signal });
+    } catch (err) {
+      clearTimeout(timeout);
+      return { success: false, error: `Failed to fetch: ${err instanceof Error ? err.message : String(err)}` };
     }
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return { success: false, error: `Failed to fetch: ${input.file_or_url} (${response.status})` };
+    }
+
+    // Check content-length before downloading
+    const contentLength = parseInt(response.headers.get("content-length") ?? "0", 10);
+    if (contentLength > MAX_ASSET_SIZE) {
+      return { success: false, error: `Asset too large: ${contentLength} bytes (max ${MAX_ASSET_SIZE})` };
+    }
+
     const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > MAX_ASSET_SIZE) {
+      return { success: false, error: `Asset too large: ${buffer.length} bytes (max ${MAX_ASSET_SIZE})` };
+    }
     const contentType = response.headers.get("content-type") ?? "application/octet-stream";
 
     const storageKey = await this.objectStorage.upload(buffer, {
@@ -125,7 +170,7 @@ export class AssetToolExecutor extends ToolExecutor {
     }
 
     const saveParams = {
-      userId: "default",
+      userId: "unscoped", // TODO: Thread userId from session context for tenant isolation
       type: contentType.split("/")[0],
       name,
       storageKey,
