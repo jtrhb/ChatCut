@@ -131,6 +131,7 @@ export function createApp(opts?: {
   infrastructure?: InfrastructureDeps;
   skillContracts?: SkillContract[];
   messageHandler?: MessageHandler;
+  skillsRouter?: Hono;
 }) {
   const app = new Hono();
 
@@ -157,6 +158,11 @@ export function createApp(opts?: {
   }));
   app.route("/events", createEventsRouter({ eventBus }));
   app.route("/status", createStatusRouter({ sessionManager, taskRegistry }));
+
+  // Optional /skills route — wired when skill infrastructure is available
+  if (opts?.skillsRouter) {
+    app.route("/skills", opts.skillsRouter);
+  }
 
   // Expose services for external wiring
   return Object.assign(app, { services });

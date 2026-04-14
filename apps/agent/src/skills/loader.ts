@@ -6,6 +6,7 @@ import type { MemoryStore } from "../memory/memory-store.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import { SkillRuntime } from "./skill-runtime.js";
 import type { SkillContract, SkillFrontmatter } from "./types.js";
+import { parseScope } from "./scope-parser.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PRESETS_DIR = join(__dirname, "presets");
@@ -63,27 +64,54 @@ export class SkillLoader {
       }
     }
 
-    return all.filter(
+    // Filter by agent type and status, then deduplicate by skill_id/memory_id.
+    // Paths are ordered global → brand → series (most specific last).
+    // When duplicates exist, keep the most specific scope (last wins).
+    const filtered = all.filter(
       (m) =>
         agentTypeMatches(m.agent_type, agentType) && m.skill_status !== "deprecated"
     );
+    const deduped = new Map<string, ParsedMemory>();
+    for (const m of filtered) {
+      deduped.set(m.skill_id ?? m.memory_id, m);
+    }
+    return Array.from(deduped.values());
   }
 
   /**
    * Load skills grouped by validation state.
    * mainSkills: skill_status === "validated"
-   * trialSkills: skill_status === "draft"
+   * trialSkills: skill_status === "draft" (scope-filtered to current brand/series)
    */
   async loadSkillsGrouped(
     agentType: string,
     params: { brand?: string; series?: string }
   ): Promise<{ mainSkills: ParsedMemory[]; trialSkills: ParsedMemory[] }> {
     const skills = await this.loadSkills(agentType, params);
+    const filtered = this.filterDraftsByScope(skills, params.brand, params.series);
 
     return {
-      mainSkills: skills.filter((s) => s.skill_status === "validated"),
-      trialSkills: skills.filter((s) => s.skill_status === "draft"),
+      mainSkills: filtered.filter((s) => s.skill_status === "validated"),
+      trialSkills: filtered.filter((s) => s.skill_status === "draft"),
     };
+  }
+
+  /**
+   * Filter draft skills by scope — only include drafts that match
+   * the current brand/series context. Validated skills are not filtered.
+   */
+  filterDraftsByScope(
+    skills: ParsedMemory[],
+    currentBrand?: string,
+    currentSeries?: string,
+  ): ParsedMemory[] {
+    return skills.filter((s) => {
+      if (s.skill_status !== "draft") return true; // non-drafts pass through
+      const scopeParts = parseScope(s.scope);
+      if (scopeParts.brand && scopeParts.brand !== currentBrand) return false;
+      if (scopeParts.series && scopeParts.series !== currentSeries) return false;
+      return true;
+    });
   }
 
   /**
@@ -165,9 +193,11 @@ export class SkillLoader {
   }
 
   private buildSkillPaths(params: { brand?: string; series?: string }): string[] {
-    const paths: string[] = [];
+    // Always include global skills — they apply regardless of scope
+    const paths: string[] = ["global/_skills/"];
 
     if (params.brand) {
+      // Brand and series scopes are additive — more specific scopes override global via dedup
       paths.push(`brands/${params.brand}/_skills/`);
       if (params.series) {
         paths.push(`brands/${params.brand}/series/${params.series}/_skills/`);

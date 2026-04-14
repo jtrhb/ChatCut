@@ -65,9 +65,18 @@ function defaultContext(): ProjectContext {
 
 export class ProjectContextManager {
   private _ctx: ProjectContext;
+  private brandMappings = new Map<string, { brand: string; series?: string }>();
 
   constructor(initial?: Partial<ProjectContext>) {
     this._ctx = { ...defaultContext(), ...initial };
+  }
+
+  registerBrand(projectId: string, mapping: { brand: string; series?: string }): void {
+    this.brandMappings.set(projectId, mapping);
+  }
+
+  getBrandForProject(projectId: string): { brand: string; series?: string } | null {
+    return this.brandMappings.get(projectId) ?? null;
   }
 
   /** Return a readonly view of the current context. */

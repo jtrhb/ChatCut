@@ -15,6 +15,31 @@ import { ServerEditorCore } from "./services/server-editor-core.js";
 import { EditorToolExecutor } from "./tools/editor-tools.js";
 import { ChangesetManager } from "./changeset/changeset-manager.js";
 import { ChangeLog } from "@opencut/core";
+import { PatternObserver } from "./memory/pattern-observer.js";
+import type { SkillValidator } from "./skills/skill-validator.js";
+
+// Debounce window for pattern analysis triggers (10 minutes)
+const ANALYSIS_DEBOUNCE_MS = 10 * 60 * 1000;
+const lastAnalysisAt = new Map<string, number>();
+
+/**
+ * Conditionally trigger pattern analysis if enough time has elapsed
+ * since the last analysis for this brand/series.
+ */
+export function maybeTriggerAnalysis(
+  patternObserver: PatternObserver,
+  brand: string,
+  series?: string,
+): void {
+  const key = `${brand}:${series ?? ""}`;
+  const lastAt = lastAnalysisAt.get(key) ?? 0;
+  if (Date.now() - lastAt > ANALYSIS_DEBOUNCE_MS) {
+    lastAnalysisAt.set(key, Date.now());
+    patternObserver.runAnalysis({ brand, series }).catch(() => {
+      // Analysis failure is non-fatal — log and continue
+    });
+  }
+}
 
 async function main() {
   // Validate API key at startup — fail fast instead of opaque 401s per dispatch

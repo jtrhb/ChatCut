@@ -3,6 +3,7 @@ import {
   GetObjectCommand,
   PutObjectCommand,
   ListObjectsV2Command,
+  DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
 import type { ParsedMemory } from "./types.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
@@ -85,6 +86,16 @@ export class MemoryStore {
       // Strip the prefix to return just the filename
       return obj.Key.slice(prefix.length);
     }).filter((name) => name.length > 0);
+  }
+
+  /** Delete a file from R2 at `userPrefix/path`. */
+  async deleteFile(path: string): Promise<void> {
+    const key = `${this.userPrefix}/${path}`;
+    const command = new DeleteObjectCommand({
+      Bucket: "memory",
+      Key: key,
+    });
+    await this.storage.client.send(command);
   }
 
   /** Return true if the file exists in R2, false otherwise. */

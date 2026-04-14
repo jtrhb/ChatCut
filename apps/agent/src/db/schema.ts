@@ -130,6 +130,13 @@ export const skills = pgTable(
     content: text("content").notNull(),
     frontmatter: jsonb("frontmatter"),
     skillStatus: text("skill_status").default("draft").notNull(),
+    // Phase 5: Performance tracking
+    approveCount: integer("approve_count").default(0).notNull(),
+    rejectCount: integer("reject_count").default(0).notNull(),
+    sessionsSeen: integer("sessions_seen").default(0).notNull(),
+    consecutiveRejects: integer("consecutive_rejects").default(0).notNull(),
+    createdSessionId: text("created_session_id"),
+    lastSessionId: text("last_session_id"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
   },
