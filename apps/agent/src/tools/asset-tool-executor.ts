@@ -98,6 +98,30 @@ export class AssetToolExecutor extends ToolExecutor {
     return { success: true, data: { ...asset, url } };
   }
 
+  /** Validate a resolved IP address against private/internal ranges. */
+  private validateResolvedIp(ip: string): string | null {
+    // IPv4 checks
+    if (ip.startsWith("127.") || ip === "0.0.0.0") return "Loopback address";
+    if (ip.startsWith("10.")) return "Private network (10.x)";
+    if (ip.startsWith("192.168.")) return "Private network (192.168.x)";
+    if (ip.startsWith("169.254.")) return "Link-local / cloud metadata";
+    if (ip.startsWith("172.")) {
+      const second = parseInt(ip.split(".")[1], 10);
+      if (second >= 16 && second <= 31) return "Private network (172.16-31.x)";
+    }
+    // IPv6 checks
+    const ipLower = ip.toLowerCase();
+    if (ipLower === "::1" || ipLower === "::") return "Loopback address";
+    if (ipLower.startsWith("fe80:")) return "Link-local IPv6";
+    if (ipLower.startsWith("fc00:") || ipLower.startsWith("fd00:")) return "Unique-local IPv6";
+    if (ipLower.startsWith("::ffff:")) {
+      // IPv4-mapped IPv6 — extract and re-check
+      const mapped = ipLower.slice(7);
+      return this.validateResolvedIp(mapped);
+    }
+    return null;
+  }
+
   /** Validate URL to prevent SSRF — only allow https with public hosts. */
   private validateAssetUrl(url: string): string | null {
     try {
@@ -157,22 +181,61 @@ export class AssetToolExecutor extends ToolExecutor {
     metadata: Record<string, unknown>;
     tags?: string[];
   }): Promise<ToolCallResult> {
-    // SSRF protection
+    // SSRF protection — validate URL format + hostname
     const urlError = this.validateAssetUrl(input.file_or_url);
     if (urlError) return { success: false, error: `URL rejected: ${urlError}` };
+
+    // DNS rebinding protection — resolve hostname and check resolved IP
+    try {
+      const { hostname } = new URL(input.file_or_url);
+      const dns = await import("dns/promises");
+      const { address } = await dns.lookup(hostname);
+      const ipError = this.validateResolvedIp(address);
+      if (ipError) return { success: false, error: `DNS resolved to blocked IP: ${ipError}` };
+    } catch (err) {
+      // DNS lookup failure — block the request
+      if (err instanceof Error && err.message.includes("blocked IP")) throw err;
+      return { success: false, error: `DNS resolution failed for URL` };
+    }
 
     const MAX_ASSET_SIZE = 100 * 1024 * 1024; // 100MB
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30_000); // 30s timeout
 
+    // Disable automatic redirects to prevent SSRF via 30x to internal addresses
     let response: Response;
     try {
-      response = await fetch(input.file_or_url, { signal: controller.signal });
+      response = await fetch(input.file_or_url, {
+        signal: controller.signal,
+        redirect: "manual",
+      });
     } catch (err) {
       clearTimeout(timeout);
       return { success: false, error: `Failed to fetch: ${err instanceof Error ? err.message : String(err)}` };
     }
     clearTimeout(timeout);
+
+    // Handle redirects manually — validate each hop
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location) {
+        return { success: false, error: "Redirect with no Location header" };
+      }
+      const redirectError = this.validateAssetUrl(location);
+      if (redirectError) {
+        return { success: false, error: `Redirect blocked: ${redirectError}` };
+      }
+      // Follow one validated redirect (no further chaining)
+      const controller2 = new AbortController();
+      const timeout2 = setTimeout(() => controller2.abort(), 30_000);
+      try {
+        response = await fetch(location, { signal: controller2.signal, redirect: "error" });
+      } catch (err) {
+        clearTimeout(timeout2);
+        return { success: false, error: `Failed to fetch redirect: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      clearTimeout(timeout2);
+    }
 
     if (!response.ok) {
       return { success: false, error: `Failed to fetch: ${input.file_or_url} (${response.status})` };
