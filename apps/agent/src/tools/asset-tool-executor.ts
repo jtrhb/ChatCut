@@ -176,70 +176,86 @@ export class AssetToolExecutor extends ToolExecutor {
     }
   }
 
-  private async _saveAsset(input: {
-    file_or_url: string;
-    metadata: Record<string, unknown>;
-    tags?: string[];
-  }): Promise<ToolCallResult> {
-    // SSRF protection — validate URL format + hostname
-    const urlError = this.validateAssetUrl(input.file_or_url);
-    if (urlError) return { success: false, error: `URL rejected: ${urlError}` };
+  /**
+   * Fetch a URL with full SSRF protection:
+   * 1. Validate URL format + hostname string
+   * 2. DNS resolve + validate resolved IP (prevents rebinding)
+   * 3. Fetch with redirect:"manual" + 30s timeout
+   * 4. If redirect, repeat steps 1-3 for the Location URL (max 1 hop)
+   */
+  private async safeFetch(url: string): Promise<{ response: Response } | { error: string }> {
+    // Step 1: URL validation
+    const urlError = this.validateAssetUrl(url);
+    if (urlError) return { error: `URL rejected: ${urlError}` };
 
-    // DNS rebinding protection — resolve hostname and check resolved IP
+    // Step 2: DNS resolution + IP validation (prevents TOCTOU rebinding)
     try {
-      const { hostname } = new URL(input.file_or_url);
+      const { hostname } = new URL(url);
       const dns = await import("dns/promises");
       const { address } = await dns.lookup(hostname);
       const ipError = this.validateResolvedIp(address);
-      if (ipError) return { success: false, error: `DNS resolved to blocked IP: ${ipError}` };
-    } catch (err) {
-      // DNS lookup failure — block the request
-      if (err instanceof Error && err.message.includes("blocked IP")) throw err;
-      return { success: false, error: `DNS resolution failed for URL` };
+      if (ipError) return { error: `DNS resolved to blocked IP: ${ipError}` };
+    } catch {
+      return { error: "DNS resolution failed for URL" };
     }
 
-    const MAX_ASSET_SIZE = 100 * 1024 * 1024; // 100MB
+    // Step 3: Fetch with no auto-redirect
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30_000); // 30s timeout
-
-    // Disable automatic redirects to prevent SSRF via 30x to internal addresses
+    const timeout = setTimeout(() => controller.abort(), 30_000);
     let response: Response;
     try {
-      response = await fetch(input.file_or_url, {
-        signal: controller.signal,
-        redirect: "manual",
-      });
+      response = await fetch(url, { signal: controller.signal, redirect: "manual" });
     } catch (err) {
       clearTimeout(timeout);
-      return { success: false, error: `Failed to fetch: ${err instanceof Error ? err.message : String(err)}` };
+      return { error: `Failed to fetch: ${err instanceof Error ? err.message : String(err)}` };
     }
     clearTimeout(timeout);
 
-    // Handle redirects manually — validate each hop
+    // Step 4: Handle redirect — full re-validation of redirect target
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
-      if (!location) {
-        return { success: false, error: "Redirect with no Location header" };
+      if (!location) return { error: "Redirect with no Location header" };
+
+      // Recursion-safe: redirect target goes through the same validation but with redirect:"error"
+      const redirectUrlError = this.validateAssetUrl(location);
+      if (redirectUrlError) return { error: `Redirect blocked: ${redirectUrlError}` };
+
+      try {
+        const { hostname: rHost } = new URL(location);
+        const dns = await import("dns/promises");
+        const { address: rAddr } = await dns.lookup(rHost);
+        const rIpError = this.validateResolvedIp(rAddr);
+        if (rIpError) return { error: `Redirect DNS resolved to blocked IP: ${rIpError}` };
+      } catch {
+        return { error: "DNS resolution failed for redirect URL" };
       }
-      const redirectError = this.validateAssetUrl(location);
-      if (redirectError) {
-        return { success: false, error: `Redirect blocked: ${redirectError}` };
-      }
-      // Follow one validated redirect (no further chaining)
+
       const controller2 = new AbortController();
       const timeout2 = setTimeout(() => controller2.abort(), 30_000);
       try {
         response = await fetch(location, { signal: controller2.signal, redirect: "error" });
       } catch (err) {
         clearTimeout(timeout2);
-        return { success: false, error: `Failed to fetch redirect: ${err instanceof Error ? err.message : String(err)}` };
+        return { error: `Failed to fetch redirect: ${err instanceof Error ? err.message : String(err)}` };
       }
       clearTimeout(timeout2);
     }
 
-    if (!response.ok) {
-      return { success: false, error: `Failed to fetch: ${input.file_or_url} (${response.status})` };
-    }
+    if (!response.ok) return { error: `Failed to fetch: ${url} (${response.status})` };
+    return { response };
+  }
+
+  private async _saveAsset(input: {
+    file_or_url: string;
+    metadata: Record<string, unknown>;
+    tags?: string[];
+  }): Promise<ToolCallResult> {
+    const MAX_ASSET_SIZE = 100 * 1024 * 1024; // 100MB
+
+    // SSRF-safe fetch with DNS validation + redirect protection
+    const fetchResult = await this.safeFetch(input.file_or_url);
+    if ("error" in fetchResult) return { success: false, error: fetchResult.error };
+    const response = fetchResult.response;
 
     // Check content-length before downloading
     const contentLength = parseInt(response.headers.get("content-length") ?? "0", 10);
