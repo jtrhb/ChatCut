@@ -115,7 +115,7 @@ describe("CommandManager", () => {
 			expect(mgr.canRedo()).toBe(false);
 		});
 
-		it("emits command:rollback with taskId and count when it undoes anything", () => {
+		it("emits command:rollback with taskId, count (attempted) and undone (succeeded)", () => {
 			const listener = vi.fn();
 			mgr.on("command:rollback", listener);
 
@@ -124,7 +124,63 @@ describe("CommandManager", () => {
 
 			mgr.undoByTaskId("T");
 
-			expect(listener).toHaveBeenCalledWith({ taskId: "T", count: 2 });
+			expect(listener).toHaveBeenCalledWith({ taskId: "T", count: 2, undone: 2 });
+		});
+
+		it("isolates a failing undo(): other tagged commands still get undone", () => {
+			const c1 = new RecordingCommand("c1");
+			const bad = new RecordingCommand("bad");
+			const c3 = new RecordingCommand("c3");
+			vi.spyOn(bad, "undo").mockImplementation(() => {
+				throw new Error("undo blew up");
+			});
+
+			mgr.execute({ command: c1, options: { source: "agent", agentId: "editor", taskId: "T" } });
+			mgr.execute({ command: bad, options: { source: "agent", agentId: "editor", taskId: "T" } });
+			mgr.execute({ command: c3, options: { source: "agent", agentId: "editor", taskId: "T" } });
+
+			const undone = mgr.undoByTaskId("T");
+
+			// 3 entries attempted, 2 actually undone (bad threw)
+			expect(undone).toBe(2);
+			expect(c1.undone).toBe(1);
+			expect(c3.undone).toBe(1);
+			// All three entries removed from history — leaving the failing one
+			// would corrupt future rollback / redo semantics
+			expect(mgr.canUndo()).toBe(false);
+		});
+
+		it("emits command:rollback-error with the caught errors when any undo() throws", () => {
+			const rollbackListener = vi.fn();
+			const errorListener = vi.fn();
+			mgr.on("command:rollback", rollbackListener);
+			mgr.on("command:rollback-error", errorListener);
+
+			const bad = new RecordingCommand("bad");
+			vi.spyOn(bad, "undo").mockImplementation(() => {
+				throw new Error("kaboom");
+			});
+			mgr.execute({ command: bad, options: { source: "agent", agentId: "editor", taskId: "T" } });
+			mgr.execute({ command: new RecordingCommand("ok"), options: { source: "agent", agentId: "editor", taskId: "T" } });
+
+			mgr.undoByTaskId("T");
+
+			expect(rollbackListener).toHaveBeenCalledWith({ taskId: "T", count: 2, undone: 1 });
+			expect(errorListener).toHaveBeenCalledOnce();
+			const [errorPayload] = errorListener.mock.calls[0];
+			expect(errorPayload.taskId).toBe("T");
+			expect(errorPayload.errors).toHaveLength(1);
+			expect((errorPayload.errors[0] as Error).message).toBe("kaboom");
+		});
+
+		it("does NOT emit command:rollback-error when every undo succeeds", () => {
+			const errorListener = vi.fn();
+			mgr.on("command:rollback-error", errorListener);
+
+			mgr.execute({ command: new RecordingCommand("a"), options: { source: "agent", agentId: "editor", taskId: "T" } });
+			mgr.undoByTaskId("T");
+
+			expect(errorListener).not.toHaveBeenCalled();
 		});
 
 		it("does NOT emit command:rollback when count is 0", () => {
