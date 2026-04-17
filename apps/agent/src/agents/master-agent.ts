@@ -1,3 +1,4 @@
+import { nanoid } from "nanoid";
 import type { AgentRuntime } from "./runtime.js";
 import type {
   AgentConfig,
@@ -23,6 +24,7 @@ import { formatToolsForApi } from "../tools/format-for-api.js";
 import type { ChangesetManager } from "../changeset/changeset-manager.js";
 import type { ExplorationEngine } from "../exploration/exploration-engine.js";
 import type { TaskRegistry } from "../tasks/task-registry.js";
+import type { ServerEditorCore } from "../services/server-editor-core.js";
 import { DeferredRegistry } from "../tools/deferred-registry.js";
 import { createResolveToolsTool } from "../tools/resolve-tools-tool.js";
 import { OverflowStore } from "../tools/overflow-store.js";
@@ -56,6 +58,13 @@ export class MasterAgent {
   private changesetManager?: ChangesetManager;
   private explorationEngine?: ExplorationEngine;
   private taskRegistry?: TaskRegistry;
+  /**
+   * Optional server editor core. When provided, handleDispatch mints a
+   * fresh taskId per dispatch and rolls back all commands tagged with
+   * that taskId if the dispatcher throws. Optional so legacy code paths
+   * and tests that don't need rollback can construct MasterAgent without it.
+   */
+  private serverCore?: ServerEditorCore;
   private currentDeferredRegistry?: DeferredRegistry;
   private overflowStore: OverflowStore;
   /** Identity of the currently-executing user message. Set at handleUserMessage entry,
@@ -73,6 +82,7 @@ export class MasterAgent {
     changesetManager?: ChangesetManager;
     explorationEngine?: ExplorationEngine;
     taskRegistry?: TaskRegistry;
+    serverCore?: ServerEditorCore;
   }) {
     this.runtime = deps.runtime;
     this.contextManager = deps.contextManager;
@@ -82,6 +92,7 @@ export class MasterAgent {
     this.changesetManager = deps.changesetManager;
     this.explorationEngine = deps.explorationEngine;
     this.taskRegistry = deps.taskRegistry;
+    this.serverCore = deps.serverCore;
 
     // Create session-scoped overflow store for result budget control (P2)
     this.overflowStore = new OverflowStore();
@@ -416,31 +427,55 @@ export class MasterAgent {
 
     const accessMode = (rawInput.accessMode as DispatchInput["accessMode"]) ?? route.defaultAccessMode;
 
+    // Mint a fresh taskId per dispatch so every command issued by the
+    // sub-agent is tagged with the same id. On dispatcher throw, Master
+    // asks serverCore to roll back commands sharing this id as a unit.
+    const taskId = `dispatch-${nanoid(10)}`;
+
     const dispatchInput: DispatchInput = {
       task: rawInput.task as string,
       accessMode,
       context: rawInput.context as Record<string, unknown> | undefined,
       constraints: rawInput.constraints as DispatchInput["constraints"],
-      identity: this.currentIdentity
-        ? {
-            userId: this.currentIdentity.userId,
-            sessionId: this.currentIdentity.sessionId,
-            projectId: this.currentIdentity.projectId,
-          }
-        : undefined,
+      identity: {
+        userId: this.currentIdentity?.userId,
+        sessionId: this.currentIdentity?.sessionId,
+        projectId: this.currentIdentity?.projectId,
+        taskId,
+      },
     };
 
     const needsLock = accessMode === "write" || accessMode === "read_write";
 
+    const runDispatcher = async (): Promise<unknown> => {
+      try {
+        return await dispatcher(dispatchInput);
+      } catch (err) {
+        // Best-effort rollback: unwind every command tagged with this
+        // dispatch's taskId. If serverCore isn't wired (tests, legacy),
+        // skip silently — the error still surfaces to the Master loop.
+        if (this.serverCore) {
+          try {
+            this.serverCore.rollbackByTaskId(taskId);
+          } catch {
+            // Swallow rollback errors; the original dispatch error is
+            // the important signal.
+          }
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        return { error: `Sub-agent dispatch failed: ${message}` };
+      }
+    };
+
     if (needsLock) {
       await this.writeLock.acquire();
       try {
-        return await dispatcher(dispatchInput);
+        return await runDispatcher();
       } finally {
         this.writeLock.release();
       }
     }
 
-    return dispatcher(dispatchInput);
+    return runDispatcher();
   }
 }

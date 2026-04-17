@@ -104,6 +104,7 @@ export function createWiredMasterAgent(deps: {
   subAgentDispatchers: Map<string, (input: DispatchInput) => Promise<DispatchOutput>>;
   changesetManager?: ChangesetManager;
   taskRegistry?: TaskRegistry;
+  serverCore?: ServerEditorCore;
 }): MasterAgent {
   const runtime = new NativeAPIRuntime(deps.apiKey);
 
@@ -116,6 +117,7 @@ export function createWiredMasterAgent(deps: {
     skillContracts: deps.skillContracts,
     changesetManager: deps.changesetManager,
     taskRegistry: deps.taskRegistry,
+    serverCore: deps.serverCore,
   });
 }
 

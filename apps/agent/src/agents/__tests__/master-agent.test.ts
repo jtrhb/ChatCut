@@ -351,4 +351,152 @@ describe("MasterAgent", () => {
       expect(hookSpy).toHaveBeenCalled();
     });
   });
+
+  describe("B3: per-dispatch taskId + rollback on throw", () => {
+    it("mints a fresh taskId per dispatch and threads it into DispatchInput.identity", async () => {
+      const editorDispatcher = makeDispatcher("ok");
+      dispatchers.set("editor", editorDispatcher);
+
+      await runtime.callTool("dispatch_editor", { task: "trim", accessMode: "write" });
+
+      expect(editorDispatcher).toHaveBeenCalledOnce();
+      const arg = editorDispatcher.mock.calls[0][0] as DispatchInput;
+      expect(arg.identity?.taskId).toMatch(/^dispatch-[A-Za-z0-9_-]{10}$/);
+    });
+
+    it("mints a DIFFERENT taskId for each dispatch", async () => {
+      const editorDispatcher = makeDispatcher("ok");
+      dispatchers.set("editor", editorDispatcher);
+
+      await runtime.callTool("dispatch_editor", { task: "first", accessMode: "write" });
+      await runtime.callTool("dispatch_editor", { task: "second", accessMode: "write" });
+
+      const id1 = (editorDispatcher.mock.calls[0][0] as DispatchInput).identity?.taskId;
+      const id2 = (editorDispatcher.mock.calls[1][0] as DispatchInput).identity?.taskId;
+      expect(id1).toBeDefined();
+      expect(id2).toBeDefined();
+      expect(id1).not.toBe(id2);
+    });
+
+    it("calls serverCore.rollbackByTaskId when dispatcher throws", async () => {
+      const rollbackSpy = vi.fn().mockReturnValue(2);
+      const serverCoreMock = { rollbackByTaskId: rollbackSpy } as any;
+
+      const throwingAgent = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        serverCore: serverCoreMock,
+      });
+      void throwingAgent; // registers tool executor on runtime
+
+      const editorDispatcher = vi
+        .fn<(input: DispatchInput) => Promise<DispatchOutput>>()
+        .mockRejectedValue(new Error("sub-agent exploded"));
+      dispatchers.set("editor", editorDispatcher);
+
+      const result = (await runtime.callTool("dispatch_editor", {
+        task: "break things",
+        accessMode: "write",
+      })) as { error?: string };
+
+      expect(rollbackSpy).toHaveBeenCalledOnce();
+      const rolledBackId = rollbackSpy.mock.calls[0][0];
+      expect(rolledBackId).toMatch(/^dispatch-[A-Za-z0-9_-]{10}$/);
+      expect(result.error).toContain("Sub-agent dispatch failed");
+      expect(result.error).toContain("sub-agent exploded");
+    });
+
+    it("releases the write lock even when dispatcher throws (lock + rollback compose)", async () => {
+      const rollbackSpy = vi.fn().mockReturnValue(0);
+      const serverCoreMock = { rollbackByTaskId: rollbackSpy } as any;
+
+      const throwingAgent = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        serverCore: serverCoreMock,
+      });
+      void throwingAgent;
+
+      const editorDispatcher = vi
+        .fn<(input: DispatchInput) => Promise<DispatchOutput>>()
+        .mockRejectedValue(new Error("boom"));
+      dispatchers.set("editor", editorDispatcher);
+
+      const releaseSpy = vi.spyOn(writeLock, "release");
+
+      await runtime.callTool("dispatch_editor", { task: "fail", accessMode: "write" });
+
+      expect(releaseSpy).toHaveBeenCalledOnce();
+      expect(rollbackSpy).toHaveBeenCalledOnce();
+    });
+
+    it("does NOT call rollback when dispatcher succeeds", async () => {
+      const rollbackSpy = vi.fn();
+      const serverCoreMock = { rollbackByTaskId: rollbackSpy } as any;
+
+      const okAgent = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        serverCore: serverCoreMock,
+      });
+      void okAgent;
+
+      const editorDispatcher = makeDispatcher("ok");
+      dispatchers.set("editor", editorDispatcher);
+
+      await runtime.callTool("dispatch_editor", { task: "ok", accessMode: "write" });
+
+      expect(rollbackSpy).not.toHaveBeenCalled();
+    });
+
+    it("still surfaces the error if serverCore is not wired (rollback is best-effort)", async () => {
+      const editorDispatcher = vi
+        .fn<(input: DispatchInput) => Promise<DispatchOutput>>()
+        .mockRejectedValue(new Error("no core wired"));
+      dispatchers.set("editor", editorDispatcher);
+
+      const result = (await runtime.callTool("dispatch_editor", {
+        task: "t",
+        accessMode: "write",
+      })) as { error?: string };
+
+      expect(result.error).toContain("no core wired");
+    });
+
+    it("swallows rollback errors so the original dispatch error remains the signal", async () => {
+      const rollbackSpy = vi.fn(() => {
+        throw new Error("rollback itself blew up");
+      });
+      const serverCoreMock = { rollbackByTaskId: rollbackSpy } as any;
+
+      const agentWithBadRollback = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        serverCore: serverCoreMock,
+      });
+      void agentWithBadRollback;
+
+      const editorDispatcher = vi
+        .fn<(input: DispatchInput) => Promise<DispatchOutput>>()
+        .mockRejectedValue(new Error("original error"));
+      dispatchers.set("editor", editorDispatcher);
+
+      const result = (await runtime.callTool("dispatch_editor", {
+        task: "t",
+        accessMode: "write",
+      })) as { error?: string };
+
+      expect(rollbackSpy).toHaveBeenCalledOnce();
+      expect(result.error).toContain("original error");
+      expect(result.error).not.toContain("rollback itself blew up");
+    });
+  });
 });

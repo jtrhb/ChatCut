@@ -160,6 +160,7 @@ async function main() {
     subAgentDispatchers,
     changesetManager,
     taskRegistry,
+    serverCore: serverEditorCore,
   });
 
   const messageHandler = createMessageHandler({

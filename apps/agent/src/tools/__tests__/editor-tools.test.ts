@@ -884,10 +884,10 @@ describe("EditorToolExecutor", () => {
       );
 
       // Confirm mutation applied
-      const afterEl = serverCore.editorCore.timeline
+      const allElements = serverCore.editorCore.timeline
         .getTracks()
-        .flatMap((t) => t.elements)
-        .find((e) => e.id === "video-el-1");
+        .flatMap((t) => t.elements as Array<{ id: string; trimStart?: number }>);
+      const afterEl = allElements.find((e) => e.id === "video-el-1");
       expect(afterEl?.trimStart).toBeCloseTo(1);
 
       const undone = serverCore.rollbackByTaskId("dispatch-A");
