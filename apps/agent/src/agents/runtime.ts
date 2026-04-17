@@ -134,17 +134,37 @@ export class NativeAPIRuntime implements AgentRuntime {
       // Execute tool calls — with order-preserving parallelism when registry is available
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
+      // Execute a single tool_use block, catching any thrown executor error
+      // and converting it into an is_error tool_result. This is critical:
+      // Anthropic's API requires every tool_use in the assistant message to
+      // have a matching tool_result in the next user message. An unhandled
+      // throw leaves an orphan tool_use and 400s the next API call.
+      const runSingle = async (block: Anthropic.ToolUseBlock): Promise<void> => {
+        try {
+          const output = await this.toolExecutor(block.name, block.input);
+          toolCalls.push({ toolName: block.name, input: block.input, output });
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: typeof output === "string" ? output : JSON.stringify(output),
+          });
+        } catch (err) {
+          const errorResult = { error: err instanceof Error ? err.message : String(err) };
+          toolCalls.push({ toolName: block.name, input: block.input, output: errorResult });
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: JSON.stringify(errorResult),
+            is_error: true,
+          });
+        }
+      };
+
       if (this.toolRegistry && toolUseBlocks.length > 1) {
         const batches = buildOrderPreservingBatches(toolUseBlocks, this.toolRegistry);
         for (const batch of batches) {
           if (batch.length === 1) {
-            const output = await this.toolExecutor(batch[0].name, batch[0].input);
-            toolCalls.push({ toolName: batch[0].name, input: batch[0].input, output });
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: batch[0].id,
-              content: typeof output === "string" ? output : JSON.stringify(output),
-            });
+            await runSingle(batch[0]);
           } else {
             const settled = await Promise.allSettled(
               batch.map(async (block) => {
@@ -164,7 +184,7 @@ export class NativeAPIRuntime implements AgentRuntime {
                   content: typeof output === "string" ? output : JSON.stringify(output),
                 });
               } else {
-                const errorResult = { error: String(s.reason) };
+                const errorResult = { error: s.reason instanceof Error ? s.reason.message : String(s.reason) };
                 toolCalls.push({ toolName: block.name, input: block.input, output: errorResult });
                 toolResults.push({
                   type: "tool_result",
@@ -178,13 +198,7 @@ export class NativeAPIRuntime implements AgentRuntime {
         }
       } else {
         for (const toolUse of toolUseBlocks) {
-          const output = await this.toolExecutor(toolUse.name, toolUse.input);
-          toolCalls.push({ toolName: toolUse.name, input: toolUse.input, output });
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: toolUse.id,
-            content: typeof output === "string" ? output : JSON.stringify(output),
-          });
+          await runSingle(toolUse);
         }
       }
 
@@ -225,10 +239,13 @@ export class NativeAPIRuntime implements AgentRuntime {
       }
     }
 
-    // Max iterations reached
+    // Max iterations reached. Messages array is internally consistent — every
+    // appended tool_use has a matching tool_result — but the conversation was
+    // cut short. Report what progress happened so the caller can decide whether
+    // to retry with a higher maxIterations or treat the partial result.
     this.onTurnComplete?.({ input: totalInputTokens, output: totalOutputTokens });
     return {
-      text: "Max iterations reached",
+      text: `Max iterations (${maxIterations}) reached after ${toolCalls.length} tool call(s)`,
       toolCalls,
       tokensUsed: { input: totalInputTokens, output: totalOutputTokens },
     };

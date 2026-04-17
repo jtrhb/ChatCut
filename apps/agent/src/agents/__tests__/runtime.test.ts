@@ -98,7 +98,7 @@ describe("NativeAPIRuntime", () => {
   });
 
   // 3. Stops at maxIterations when model keeps requesting tools
-  it("stops at maxIterations and returns 'Max iterations reached'", async () => {
+  it("stops at maxIterations and reports progress", async () => {
     const toolResponse = makeToolUseResponse([
       { id: "t1", name: "loop_tool", input: {} },
     ]);
@@ -110,8 +110,43 @@ describe("NativeAPIRuntime", () => {
     const config = { ...baseConfig, maxIterations: 3 };
     const result = await runtime.run(config, "Loop forever");
 
-    expect(result.text).toBe("Max iterations reached");
+    // Max-iter message now includes the iteration limit + tool call count
+    // so callers can distinguish "hung on 0 calls" from "made progress".
+    expect(result.text).toContain("Max iterations (3)");
+    expect(result.text).toContain("3 tool call");
     expect(mockCreate).toHaveBeenCalledTimes(3);
+  });
+
+  // 3b. B2 regression: an executor that throws must not leave an orphan
+  // tool_use in the conversation — it must emit an is_error tool_result so
+  // the next Anthropic API call doesn't 400 on unmatched tool_use.
+  it("emits an is_error tool_result when executor throws (single block)", async () => {
+    mockCreate
+      .mockResolvedValueOnce(
+        makeToolUseResponse([{ id: "tx", name: "broken_tool", input: {} }])
+      )
+      .mockResolvedValueOnce(makeEndTurnResponse("recovered"));
+
+    runtime.setToolExecutor(async () => {
+      throw new Error("executor blew up");
+    });
+
+    const result = await runtime.run(baseConfig, "try broken tool");
+
+    // Conversation completes — no propagated throw
+    expect(result.text).toBe("recovered");
+
+    // The 2nd API call must receive a user message with an is_error tool_result
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    const secondCallArgs = mockCreate.mock.calls[1][0];
+    const lastMsg = secondCallArgs.messages[secondCallArgs.messages.length - 1];
+    expect(lastMsg.role).toBe("user");
+    expect(Array.isArray(lastMsg.content)).toBe(true);
+    const toolResult = lastMsg.content.find((b: any) => b.type === "tool_result");
+    expect(toolResult).toBeDefined();
+    expect(toolResult.tool_use_id).toBe("tx");
+    expect(toolResult.is_error).toBe(true);
+    expect(toolResult.content).toContain("executor blew up");
   });
 
   // 4. Records toolCalls in result
