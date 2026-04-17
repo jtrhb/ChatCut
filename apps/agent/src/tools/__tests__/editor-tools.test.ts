@@ -85,7 +85,7 @@ function buildTestProject(): SerializedEditorState {
               opacity: 1,
             },
           ],
-        } as VideoTrack,
+        } as unknown as VideoTrack,
         {
           id: "audio-track-1",
           name: "Audio Track",
@@ -141,7 +141,7 @@ function buildTestProject(): SerializedEditorState {
               opacity: 1,
             },
           ],
-        } as TextTrack,
+        } as unknown as TextTrack,
       ],
     },
   ];
@@ -575,8 +575,8 @@ describe("EditorToolExecutor", () => {
       // Verify state changed
       const tracks = serverCore.editorCore.timeline.getTracks();
       const el = tracks
-        .flatMap((t) => t.elements)
-        .find((e) => e.id === "video-el-1");
+        .flatMap((t) => t.elements as any[])
+        .find((e: any) => e.id === "video-el-1") as any;
       expect(el?.trimStart).toBe(1);
       expect(el?.trimEnd).toBe(0.5);
     });
@@ -586,7 +586,7 @@ describe("EditorToolExecutor", () => {
     it("creates two elements from one", async () => {
       const tracksBefore = serverCore.editorCore.timeline.getTracks();
       const videoTrack = tracksBefore.find((t) => t.id === "video-track-1")!;
-      const countBefore = videoTrack.elements.length;
+      const countBefore = (videoTrack.elements as any[]).length;
 
       const result = await executor.execute(
         "split_element",
@@ -599,7 +599,7 @@ describe("EditorToolExecutor", () => {
       const videoTrackAfter = tracksAfter.find(
         (t) => t.id === "video-track-1"
       )!;
-      expect(videoTrackAfter.elements.length).toBe(countBefore + 1);
+      expect((videoTrackAfter.elements as any[]).length).toBe(countBefore + 1);
 
       const data = result.data as { created_element_ids: string[] };
       expect(data.created_element_ids.length).toBeGreaterThan(0);
@@ -616,7 +616,7 @@ describe("EditorToolExecutor", () => {
       expect(result.success).toBe(true);
 
       const tracks = serverCore.editorCore.timeline.getTracks();
-      const allIds = tracks.flatMap((t) => t.elements).map((e) => e.id);
+      const allIds = tracks.flatMap((t) => t.elements as any[]).map((e: any) => e.id);
       expect(allIds).not.toContain("video-el-2");
     });
 
@@ -642,8 +642,8 @@ describe("EditorToolExecutor", () => {
 
       const tracks = serverCore.editorCore.timeline.getTracks();
       const el = tracks
-        .flatMap((t) => t.elements)
-        .find((e) => e.id === "video-el-2");
+        .flatMap((t) => t.elements as any[])
+        .find((e: any) => e.id === "video-el-2") as any;
       expect(el?.startTime).toBe(8);
     });
   });
@@ -667,7 +667,7 @@ describe("EditorToolExecutor", () => {
 
       const tracks = serverCore.editorCore.timeline.getTracks();
       const videoTrack = tracks.find((t) => t.id === "video-track-1")!;
-      expect(videoTrack.elements.some((e) => e.id === data.element_id)).toBe(
+      expect((videoTrack.elements as any[]).some((e: any) => e.id === data.element_id)).toBe(
         true
       );
     });
@@ -684,8 +684,8 @@ describe("EditorToolExecutor", () => {
 
       const tracks = serverCore.editorCore.timeline.getTracks();
       const el = tracks
-        .flatMap((t) => t.elements)
-        .find((e) => e.id === "video-el-1") as Record<string, unknown>;
+        .flatMap((t) => t.elements as any[])
+        .find((e: any) => e.id === "video-el-1") as Record<string, unknown>;
       expect(el?.speed).toBe(2);
     });
   });
@@ -701,8 +701,8 @@ describe("EditorToolExecutor", () => {
 
       const tracks = serverCore.editorCore.timeline.getTracks();
       const el = tracks
-        .flatMap((t) => t.elements)
-        .find((e) => e.id === "audio-el-1") as Record<string, unknown>;
+        .flatMap((t) => t.elements as any[])
+        .find((e: any) => e.id === "audio-el-1") as Record<string, unknown>;
       expect(el?.volume).toBe(0.5);
     });
   });
@@ -718,8 +718,8 @@ describe("EditorToolExecutor", () => {
 
       const tracks = serverCore.editorCore.timeline.getTracks();
       const el = tracks
-        .flatMap((t) => t.elements)
-        .find((e) => e.id === "video-el-1") as Record<string, unknown>;
+        .flatMap((t) => t.elements as any[])
+        .find((e: any) => e.id === "video-el-1") as Record<string, unknown>;
       expect((el?.transition as { type: string })?.type).toBe("fade");
     });
   });
@@ -735,8 +735,8 @@ describe("EditorToolExecutor", () => {
 
       const tracks = serverCore.editorCore.timeline.getTracks();
       const el = tracks
-        .flatMap((t) => t.elements)
-        .find((e) => e.id === "text-el-1") as Record<string, unknown>;
+        .flatMap((t) => t.elements as any[])
+        .find((e: any) => e.id === "text-el-1") as Record<string, unknown>;
       expect(el?.content).toBe("Updated Title");
     });
   });
@@ -755,8 +755,8 @@ describe("EditorToolExecutor", () => {
 
       const tracks = serverCore.editorCore.timeline.getTracks();
       const videoTrack = tracks.find((t) => t.id === "video-track-1")!;
-      expect(videoTrack.elements[0].id).toBe("video-el-2");
-      expect(videoTrack.elements[1].id).toBe("video-el-1");
+      expect((videoTrack.elements as any[])[0].id).toBe("video-el-2");
+      expect((videoTrack.elements as any[])[1].id).toBe("video-el-1");
     });
   });
 
@@ -783,11 +783,11 @@ describe("EditorToolExecutor", () => {
       // Verify both operations took effect
       const tracks = serverCore.editorCore.timeline.getTracks();
       const audioEl = tracks
-        .flatMap((t) => t.elements)
-        .find((e) => e.id === "audio-el-1") as Record<string, unknown>;
+        .flatMap((t) => t.elements as any[])
+        .find((e: any) => e.id === "audio-el-1") as Record<string, unknown>;
       const videoEl = tracks
-        .flatMap((t) => t.elements)
-        .find((e) => e.id === "video-el-1");
+        .flatMap((t) => t.elements as any[])
+        .find((e: any) => e.id === "video-el-1") as any;
 
       expect(audioEl?.volume).toBe(0.3);
       expect(videoEl?.trimStart).toBe(0.5);

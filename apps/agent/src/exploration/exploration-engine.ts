@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import type { ServerEditorCore } from "../services/server-editor-core.js";
 import type { JobQueue } from "../services/job-queue.js";
 import type { ObjectStorage } from "../services/object-storage.js";
+import { explorationSessions } from "../db/schema.js";
 
 export type ExplorationStatus =
   | "queued"
@@ -63,11 +64,18 @@ export interface ExplorationSession {
   createdAt: number;
 }
 
+/** Minimal DB interface matching Drizzle's insert API for exploration_sessions. */
+export interface ExplorationDB {
+  insert(table: typeof explorationSessions): {
+    values(data: Record<string, unknown>): Promise<unknown>;
+  };
+}
+
 export interface ExplorationEngineDeps {
   serverCore: ServerEditorCore;
   jobQueue: JobQueue;
   objectStorage: ObjectStorage;
-  db: any;
+  db: ExplorationDB;
 }
 
 /**
@@ -90,7 +98,7 @@ export class ExplorationEngine {
   private readonly serverCore: ServerEditorCore;
   private readonly jobQueue: JobQueue;
   private readonly objectStorage: ObjectStorage;
-  private readonly db: any;
+  private readonly db: ExplorationDB;
 
   private readonly sessions = new Map<string, ExplorationSession>();
 
@@ -174,14 +182,16 @@ export class ExplorationEngine {
 
     // 6. Persist exploration session in DB
     await this.db
-      .insert()
+      .insert(explorationSessions)
       .values({
-        explorationId,
-        intent: params.intent,
+        id: explorationId,
+        projectId: "default", // set by caller when real project routing is wired
         baseSnapshotVersion: params.baseSnapshotVersion,
+        userIntent: params.intent,
         candidates: candidateResults,
         status: session.status,
         createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24h TTL
       });
 
     return {

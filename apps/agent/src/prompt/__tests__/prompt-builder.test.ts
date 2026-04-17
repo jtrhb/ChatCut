@@ -3,6 +3,7 @@ import { PromptBuilder } from "../prompt-builder.js";
 import { identitySection, taskSection } from "../sections.js";
 import { delegationContractSection } from "../delegation-contract.js";
 import type { PromptContext, PromptSection } from "../types.js";
+import type { ProjectContext } from "../../context/project-context.js";
 
 function makeContext(overrides: Partial<PromptContext> = {}): PromptContext {
   return {
@@ -56,7 +57,7 @@ describe("PromptBuilder", () => {
             injectedMemoryIds: ["mem-1"],
             injectedSkillIds: [],
           },
-        },
+        } as ProjectContext,
       });
       const result = new PromptBuilder().build(ctx);
       expect(result).toContain("## Memory Context");
@@ -71,7 +72,7 @@ describe("PromptBuilder", () => {
           recentChanges: [
             { id: "c1", source: "human", summary: "Trimmed clip A", timestamp: 1000 },
           ],
-        },
+        } as ProjectContext,
       });
       const result = new PromptBuilder().build(ctx);
       expect(result).toContain("## Recent Changes");

@@ -36,10 +36,12 @@ function makeSkill(overrides: Partial<ParsedMemory> = {}): ParsedMemory {
 
 function makeMockStore(skills: ParsedMemory[] = []) {
   return {
-    listDir: vi.fn<[string], Promise<string[]>>(async () =>
-      skills.map((s) => `${s.skill_id}.md`)
+    listDir: vi.fn<(path: string) => Promise<string[]>>(async (path: string) =>
+      // Return skills only for brand-scoped paths; global/_skills/ returns empty
+      // unless tests explicitly set up global skills
+      path.startsWith("global/") ? [] : skills.map((s) => `${s.skill_id}.md`)
     ),
-    readParsed: vi.fn<[string], Promise<ParsedMemory>>(async () => skills[0]),
+    readParsed: vi.fn<(path: string) => Promise<ParsedMemory>>(async () => skills[0]),
   };
 }
 
@@ -118,7 +120,7 @@ describe("SkillLoader.loadSkills", () => {
     });
 
     const store = {
-      listDir: vi.fn(async () => ["s1.md", "s2.md"]),
+      listDir: vi.fn(async (path: string) => path.startsWith("global/") ? [] : ["s1.md", "s2.md"]),
       readParsed: vi.fn()
         .mockResolvedValueOnce(editorSkill)
         .mockResolvedValueOnce(creatorSkill),
@@ -146,7 +148,7 @@ describe("SkillLoader.loadSkills", () => {
     });
 
     const store = {
-      listDir: vi.fn(async () => ["s-valid.md", "s-dep.md"]),
+      listDir: vi.fn(async (path: string) => path.startsWith("global/") ? [] : ["s-valid.md", "s-dep.md"]),
       readParsed: vi.fn()
         .mockResolvedValueOnce(validSkill)
         .mockResolvedValueOnce(deprecatedSkill),
@@ -169,7 +171,7 @@ describe("SkillLoader.loadSkills", () => {
   // ── 4. queries brand _skills/ path ───────────────────────────────────────
   it("queries brands/<brand>/_skills/ path", async () => {
     const store = {
-      listDir: vi.fn(async () => []),
+      listDir: vi.fn(async (_path: string) => []),
       readParsed: vi.fn(),
     };
 
@@ -189,7 +191,7 @@ describe("SkillLoader.loadSkills", () => {
     });
 
     const store = {
-      listDir: vi.fn(async () => ["s-multi.md"]),
+      listDir: vi.fn(async (path: string) => path.startsWith("global/") ? [] : ["s-multi.md"]),
       readParsed: vi.fn().mockResolvedValueOnce(multiSkill),
     };
 
@@ -208,7 +210,7 @@ describe("SkillLoader.loadSkills", () => {
     });
 
     const store = {
-      listDir: vi.fn(async () => ["s-multi.md"]),
+      listDir: vi.fn(async (path: string) => path.startsWith("global/") ? [] : ["s-multi.md"]),
       readParsed: vi.fn().mockResolvedValueOnce(multiSkill),
     };
 
@@ -226,7 +228,7 @@ describe("SkillLoader.loadSkills", () => {
     });
 
     const store = {
-      listDir: vi.fn(async () => ["s-single.md"]),
+      listDir: vi.fn(async (path: string) => path.startsWith("global/") ? [] : ["s-single.md"]),
       readParsed: vi.fn().mockResolvedValueOnce(singleSkill),
     };
 
@@ -239,7 +241,7 @@ describe("SkillLoader.loadSkills", () => {
   // ── 6. queries series _skills/ path when provided ─────────────────────────
   it("also queries series/_skills/ path when series is provided", async () => {
     const store = {
-      listDir: vi.fn(async () => []),
+      listDir: vi.fn(async (_path: string) => []),
       readParsed: vi.fn(),
     };
 
@@ -271,7 +273,7 @@ describe("SkillLoader.loadSkillsGrouped", () => {
     });
 
     const store = {
-      listDir: vi.fn(async () => ["s-main.md", "s-trial.md"]),
+      listDir: vi.fn(async (path: string) => path.startsWith("global/") ? [] : ["s-main.md", "s-trial.md"]),
       readParsed: vi.fn()
         .mockResolvedValueOnce(validSkill)
         .mockResolvedValueOnce(draftSkill),
@@ -290,7 +292,7 @@ describe("SkillLoader.loadSkillsGrouped", () => {
   // ── 7. both arrays empty when no skills match ─────────────────────────────
   it("returns empty mainSkills and trialSkills when no skills match agentType", async () => {
     const store = {
-      listDir: vi.fn(async () => []),
+      listDir: vi.fn(async (_path: string) => []),
       readParsed: vi.fn(),
     };
 

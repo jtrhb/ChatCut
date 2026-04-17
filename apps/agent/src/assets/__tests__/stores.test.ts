@@ -155,7 +155,7 @@ describe("AssetStore", () => {
       from: vi.fn(() => ({
         where: vi.fn(async () => mockRows),
       })),
-    });
+    } as any);
 
     const results = await store.search({ userId: "user-2", type: "image", query: "viral" });
 
@@ -211,7 +211,7 @@ describe("BrandStore", () => {
       from: vi.fn(() => ({
         where: vi.fn(async () => [brandRecord]),
       })),
-    });
+    } as any);
 
     const result = await store.get("brand-abc");
 
@@ -225,7 +225,7 @@ describe("BrandStore", () => {
       from: vi.fn(() => ({
         where: vi.fn(async () => []),
       })),
-    });
+    } as any);
 
     const result = await store.get("nonexistent-brand");
     expect(result).toBeNull();

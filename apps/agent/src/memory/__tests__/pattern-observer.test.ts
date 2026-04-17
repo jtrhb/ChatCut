@@ -8,9 +8,9 @@ import type { ParsedMemory } from "../types.js";
 
 function makeMockStore() {
   return {
-    readParsed: vi.fn<[string], Promise<ParsedMemory>>(),
-    listDir: vi.fn<[string], Promise<string[]>>(),
-    writeMemory: vi.fn<[string, ParsedMemory], Promise<void>>(),
+    readParsed: vi.fn<(path: string) => Promise<ParsedMemory>>(),
+    listDir: vi.fn<(path: string) => Promise<string[]>>(),
+    writeMemory: vi.fn<(path: string, memory: ParsedMemory) => Promise<void>>(),
   };
 }
 

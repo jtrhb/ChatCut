@@ -71,7 +71,7 @@ function buildTestProject(): SerializedEditorState {
               opacity: 1,
             },
           ],
-        } as VideoTrack,
+        } as unknown as VideoTrack,
         {
           id: "audio-track-1",
           name: "Audio Track",
@@ -619,9 +619,9 @@ describe("ChatCut Agent E2E Flow", () => {
     const serialized = serverCore.serialize();
     const allElements = serialized.scenes
       .flatMap((s) => s.tracks)
-      .flatMap((t) => t.elements);
-    expect(allElements.some((e) => e.id === "el2")).toBe(false);
-    expect(allElements.some((e) => e.id === "el1")).toBe(true);
+      .flatMap((t) => t.elements as any[]);
+    expect(allElements.some((e: any) => e.id === "el2")).toBe(false);
+    expect(allElements.some((e: any) => e.id === "el1")).toBe(true);
   });
 
   // ── Test 10: ChangesetManager boundary cursor from ChangeLog ──────────────

@@ -54,6 +54,6 @@ export class JobQueue {
     options: { teamSize?: number } = {}
   ): void {
     const { teamSize = 1 } = options;
-    this.boss.work<T>(name, { teamSize }, (job) => handler(job));
+    this.boss.work(name, { teamSize } as any, (job: any) => handler(job as Job<T>));
   }
 }

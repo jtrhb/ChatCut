@@ -8,8 +8,8 @@ import type { ParsedMemory, TaskContext } from "../types.js";
 
 function makeMockStore() {
   return {
-    readParsed: vi.fn<[string], Promise<ParsedMemory>>(),
-    listDir: vi.fn<[string], Promise<string[]>>(),
+    readParsed: vi.fn<(path: string) => Promise<ParsedMemory>>(),
+    listDir: vi.fn<(path: string) => Promise<string[]>>(),
   };
 }
 

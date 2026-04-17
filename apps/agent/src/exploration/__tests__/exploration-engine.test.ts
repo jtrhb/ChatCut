@@ -26,7 +26,7 @@ function makeServerCoreMock() {
 }
 
 function makeJobQueueMock() {
-  return { enqueue: vi.fn(async () => "job-id-123") };
+  return { enqueue: vi.fn(async (_name: string, _data: any) => "job-id-123") };
 }
 
 function makeObjectStorageMock() {
@@ -153,7 +153,7 @@ describe("ExplorationEngine", () => {
   it("includes commands in the preview-render job payload", async () => {
     await engine.explore(BASE_PARAMS);
     for (const call of jobQueue.enqueue.mock.calls) {
-      const payload = call[1];
+      const payload = call[1]!;
       expect(payload).toHaveProperty("commands");
       expect(payload.commands).toEqual([{ type: "trim", targetId: "el-1" }]);
     }

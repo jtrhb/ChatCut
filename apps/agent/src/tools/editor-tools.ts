@@ -290,13 +290,9 @@ function buildElement(
         type: "video",
         mediaId: (properties?.mediaId as string) ?? "",
         transform: (properties?.transform as VideoElement["transform"]) ?? {
-          x: 0,
-          y: 0,
-          width: 1920,
-          height: 1080,
-          rotation: 0,
-          scaleX: 1,
-          scaleY: 1,
+          scale: 1,
+          position: { x: 0, y: 0 },
+          rotate: 0,
         },
         opacity: (properties?.opacity as number) ?? 1,
       } as VideoElement;
@@ -324,14 +320,10 @@ function buildElement(
         fontWeight: "normal",
         fontStyle: "normal",
         textDecoration: "none",
-        transform: {
-          x: 0,
-          y: 0,
-          width: 400,
-          height: 100,
-          rotation: 0,
-          scaleX: 1,
-          scaleY: 1,
+        transform: (properties?.transform as TextElement["transform"]) ?? {
+          scale: 1,
+          position: { x: 0, y: 0 },
+          rotate: 0,
         },
         opacity: 1,
       } as TextElement;
@@ -340,14 +332,10 @@ function buildElement(
         ...base,
         type: "sticker",
         stickerId: (properties?.stickerId as string) ?? "",
-        transform: {
-          x: 0,
-          y: 0,
-          width: 200,
-          height: 200,
-          rotation: 0,
-          scaleX: 1,
-          scaleY: 1,
+        transform: (properties?.transform as StickerElement["transform"]) ?? {
+          scale: 1,
+          position: { x: 0, y: 0 },
+          rotate: 0,
         },
         opacity: 1,
       } as StickerElement;
@@ -836,7 +824,7 @@ export class EditorToolExecutor extends ToolExecutor {
     element_id: string;
     property: string;
     time: number;
-    value: unknown;
+    value?: unknown;
     easing?: string;
   }): ToolCallResult {
     const tracks = this._getTracks();
@@ -848,7 +836,7 @@ export class EditorToolExecutor extends ToolExecutor {
     // Store keyframe metadata on the element as a lightweight approach
     // that avoids the singleton-dependent UpsertKeyframeCommand
     const newTracks = updateElementInTracks(tracks, input.element_id, (el) => {
-      const keyframes = ((el as Record<string, unknown>).agentKeyframes as Array<Record<string, unknown>>) ?? [];
+      const keyframes = ((el as unknown as Record<string, unknown>).agentKeyframes as Array<Record<string, unknown>>) ?? [];
       return {
         ...el,
         agentKeyframes: [

@@ -18,6 +18,7 @@ vi.mock("../runtime.js", () => {
   const NativeAPIRuntime = vi.fn().mockImplementation(() => ({
     run: mockRun,
     setToolExecutor: vi.fn(),
+    setToolRegistry: vi.fn(),
   }));
 
   // Expose mockRun on the constructor so tests can access it via

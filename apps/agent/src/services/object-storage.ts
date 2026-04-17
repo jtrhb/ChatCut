@@ -139,7 +139,7 @@ export class ObjectStorage {
     const nodeStream =
       response.Body instanceof Readable
         ? response.Body
-        : Readable.fromWeb(response.Body as ReadableStream);
+        : Readable.fromWeb(response.Body as any);
 
     await pipeline(nodeStream, createWriteStream(tmpPath));
 

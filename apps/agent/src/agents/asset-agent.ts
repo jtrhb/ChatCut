@@ -1,69 +1,27 @@
-import { NativeAPIRuntime } from "./runtime.js";
-import type { AgentConfig, DispatchInput, DispatchOutput } from "./types.js";
-import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
+import { SubAgent, type SubAgentDeps } from "./sub-agent.js";
 import { assetToolDefinitions } from "../tools/asset-tools.js";
-import { PromptBuilder } from "../prompt/prompt-builder.js";
-import { formatToolsForApi } from "../tools/format-for-api.js";
-import { identitySection, taskSection } from "../prompt/sections.js";
-import type { PromptContext } from "../prompt/types.js";
-import { createAgentPipeline } from "./create-agent-pipeline.js";
-import type { ToolHook } from "../tools/hooks.js";
 
-export class AssetAgent {
-  private toolExecutor: (name: string, input: unknown) => Promise<unknown>;
-  private apiKey: string;
-  private hooks: ToolHook[];
-
-  constructor(deps: { toolExecutor: (name: string, input: unknown) => Promise<unknown>; apiKey: string; hooks?: ToolHook[] }) {
-    this.toolExecutor = deps.toolExecutor;
-    this.apiKey = deps.apiKey;
-    this.hooks = deps.hooks ?? [];
-  }
-
-  async dispatch(input: DispatchInput): Promise<DispatchOutput> {
-    const runtime = new NativeAPIRuntime(this.apiKey);
-    const { executor } = createAgentPipeline(this.toolExecutor, assetToolDefinitions, "asset", this.hooks);
-    runtime.setToolExecutor(executor);
-
-    const config: AgentConfig = {
-      agentType: "asset",
-      model: "claude-haiku-4-5",
-      system: this.buildSystemPrompt(input),
-      tools: formatToolsForApi(assetToolDefinitions),
-      tokenBudget: TOKEN_BUDGETS.asset,
-      maxIterations: MAX_ITERATIONS.asset,
-    };
-
-    const result = await runtime.run(config, input.task);
-
-    return {
-      result: result.text,
-      needsAssistance: result.needsAssistance,
-      toolCallCount: result.toolCalls.length,
-      tokensUsed: result.tokensUsed.input + result.tokensUsed.output,
-    };
-  }
-
-  buildSystemPrompt(input: DispatchInput): string {
-    const builder = new PromptBuilder({ builtins: false });
-    builder.register(identitySection);
-    builder.register(taskSection);
-    const promptCtx: PromptContext = {
-      agentIdentity: {
-        role: "Asset Agent",
-        description: "You manage media assets — search, save, tag, and retrieve.",
-        rules: [
-          "Use search_assets to find existing assets before saving new ones.",
-          "Use get_asset_info to retrieve full metadata for a specific asset.",
-          "Use save_asset to persist newly generated or uploaded media.",
-          "Use tag_asset to categorize assets for future retrieval.",
-          "Use find_similar to locate visually or semantically related assets.",
-          "Use get_character and get_brand_assets for identity-consistent content.",
-        ],
+export class AssetAgent extends SubAgent {
+  constructor(deps: SubAgentDeps) {
+    super(
+      {
+        agentType: "asset",
+        model: "claude-haiku-4-5",
+        tools: assetToolDefinitions,
+        identity: {
+          role: "Asset Agent",
+          description: "You manage media assets — search, save, tag, and retrieve.",
+          rules: [
+            "Use search_assets to find existing assets before saving new ones.",
+            "Use get_asset_info to retrieve full metadata for a specific asset.",
+            "Use save_asset to persist newly generated or uploaded media.",
+            "Use tag_asset to categorize assets for future retrieval.",
+            "Use find_similar to locate visually or semantically related assets.",
+            "Use get_character and get_brand_assets for identity-consistent content.",
+          ],
+        },
       },
-      task: input,
-    };
-    return builder.build(promptCtx);
+      deps,
+    );
   }
-
 }
