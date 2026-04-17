@@ -1,12 +1,12 @@
 import { NativeAPIRuntime } from "./runtime.js";
 import type { AgentConfig, AgentType, DispatchInput, DispatchOutput } from "./types.js";
 import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
-import type { ToolDefinition, ToolFormatContext } from "../tools/types.js";
+import type { ToolContext, ToolDefinition, ToolFormatContext } from "../tools/types.js";
 import { PromptBuilder } from "../prompt/prompt-builder.js";
 import { formatToolsForApi } from "../tools/format-for-api.js";
 import { identitySection, taskSection } from "../prompt/sections.js";
 import type { PromptContext } from "../prompt/types.js";
-import { createAgentPipeline } from "./create-agent-pipeline.js";
+import { createAgentPipeline, type RawToolExecutor } from "./create-agent-pipeline.js";
 import type { ToolHook } from "../tools/hooks.js";
 
 export interface SubAgentIdentity {
@@ -23,14 +23,14 @@ export interface SubAgentConfig {
 }
 
 export interface SubAgentDeps {
-  toolExecutor: (name: string, input: unknown) => Promise<unknown>;
+  toolExecutor: RawToolExecutor;
   apiKey: string;
   hooks?: ToolHook[];
   projectContext?: Readonly<Record<string, unknown>>;
 }
 
 export class SubAgent {
-  private toolExecutor: (name: string, input: unknown) => Promise<unknown>;
+  private toolExecutor: RawToolExecutor;
   private apiKey: string;
   private hooks: ToolHook[];
   protected agentConfig: SubAgentConfig;
@@ -51,6 +51,7 @@ export class SubAgent {
       this.agentConfig.tools,
       this.agentConfig.agentType,
       this.hooks,
+      input.identity,
     );
     runtime.setToolExecutor(executor);
 

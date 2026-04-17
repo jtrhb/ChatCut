@@ -2,6 +2,7 @@ import type {
   AgentType,
   ToolCallRecord,
   ToolCallResult,
+  ToolContext,
   ToolDefinition,
 } from "./types.js";
 
@@ -56,7 +57,7 @@ export abstract class ToolExecutor {
   async execute(
     toolName: string,
     input: unknown,
-    context: { agentType: AgentType; taskId: string }
+    context: ToolContext
   ): Promise<ToolCallResult> {
     const tool = this.tools.get(toolName);
     if (!tool) {
@@ -96,7 +97,7 @@ export abstract class ToolExecutor {
   protected abstract executeImpl(
     toolName: string,
     input: unknown,
-    context: { agentType: AgentType; taskId: string }
+    context: ToolContext
   ): Promise<ToolCallResult>;
 
   /** Return all tools available to the given agent type. */
@@ -117,7 +118,7 @@ export abstract class ToolExecutor {
     toolName: string,
     input: unknown,
     output: ToolCallResult,
-    context: { agentType: AgentType; taskId: string }
+    context: ToolContext
   ): void {
     this.callLog.push({
       toolName,

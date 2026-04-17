@@ -46,6 +46,28 @@ describe("AssetToolExecutor", () => {
     expect(deps.assetStore.search).toHaveBeenCalled();
   });
 
+  it("threads ctx.userId into assetStore.search (B1 tenant isolation)", async () => {
+    await executor.execute(
+      "search_assets",
+      { query: "sunset" },
+      { agentType: "asset", taskId: "t1", userId: "user-alice" },
+    );
+    expect(deps.assetStore.search).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "user-alice", query: "sunset" }),
+    );
+  });
+
+  it("falls back to 'unscoped' when ctx.userId is missing (dev/test)", async () => {
+    await executor.execute(
+      "search_assets",
+      { query: "sunset" },
+      { agentType: "asset", taskId: "t1" },
+    );
+    expect(deps.assetStore.search).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "unscoped" }),
+    );
+  });
+
   it("routes get_asset_info to AssetStore.findById + signed URL", async () => {
     deps.assetStore.findById.mockResolvedValue({
       id: "a1", name: "test", storageKey: "key-1",
@@ -69,12 +91,15 @@ describe("AssetToolExecutor", () => {
     const result = await executor.execute(
       "save_asset",
       { file_or_url: "https://example.com/img.png", metadata: { name: "test" }, tags: ["sunset"] },
-      { agentType: "asset", taskId: "t1" },
+      { agentType: "asset", taskId: "t1", userId: "user-bob" },
     );
     expect(result.success).toBe(true);
     expect(deps.objectStorage.upload).toHaveBeenCalled();
     expect(deps.embeddingClient.embed).toHaveBeenCalled();
-    expect(deps.assetStore.saveWithEmbedding).toHaveBeenCalled();
+    expect(deps.assetStore.saveWithEmbedding).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "user-bob" }),
+      expect.any(Array),
+    );
 
     vi.unstubAllGlobals();
   });

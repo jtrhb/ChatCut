@@ -1,6 +1,6 @@
 import { ToolExecutor } from "./executor.js";
 import { assetToolDefinitions } from "./asset-tools.js";
-import type { ToolCallResult, AgentType } from "./types.js";
+import type { ToolCallResult, ToolContext } from "./types.js";
 
 export interface AssetToolDeps {
   assetStore: {
@@ -55,16 +55,16 @@ export class AssetToolExecutor extends ToolExecutor {
   protected async executeImpl(
     toolName: string,
     input: unknown,
-    _context: { agentType: AgentType; taskId: string },
+    context: ToolContext,
   ): Promise<ToolCallResult> {
     try {
       switch (toolName) {
         case "search_assets":
-          return this._searchAssets(input as { query: string; type?: string });
+          return this._searchAssets(input as { query: string; type?: string }, context);
         case "get_asset_info":
           return this._getAssetInfo(input as { asset_id: string });
         case "save_asset":
-          return this._saveAsset(input as { file_or_url: string; metadata: Record<string, unknown>; tags?: string[] });
+          return this._saveAsset(input as { file_or_url: string; metadata: Record<string, unknown>; tags?: string[] }, context);
         case "tag_asset":
           return this._tagAsset(input as { asset_id: string; tags: string[] });
         case "find_similar":
@@ -81,9 +81,22 @@ export class AssetToolExecutor extends ToolExecutor {
     }
   }
 
-  private async _searchAssets(input: { query: string; type?: string }): Promise<ToolCallResult> {
+  /**
+   * Resolve the scoping userId for a tool call. Prefers authenticated
+   * identity from the ToolContext; falls back to "unscoped" only when
+   * identity is missing (dev / test paths). Auth middleware lands in a
+   * later phase — once every request carries userId, remove the fallback.
+   */
+  private resolveUserId(context: ToolContext): string {
+    return context.userId ?? "unscoped";
+  }
+
+  private async _searchAssets(
+    input: { query: string; type?: string },
+    context: ToolContext,
+  ): Promise<ToolCallResult> {
     const results = await this.assetStore.search({
-      userId: "unscoped", // TODO: Thread userId from session context for tenant isolation
+      userId: this.resolveUserId(context),
       query: input.query,
       type: input.type,
     });
@@ -269,11 +282,14 @@ export class AssetToolExecutor extends ToolExecutor {
     return { response };
   }
 
-  private async _saveAsset(input: {
-    file_or_url: string;
-    metadata: Record<string, unknown>;
-    tags?: string[];
-  }): Promise<ToolCallResult> {
+  private async _saveAsset(
+    input: {
+      file_or_url: string;
+      metadata: Record<string, unknown>;
+      tags?: string[];
+    },
+    context: ToolContext,
+  ): Promise<ToolCallResult> {
     const MAX_ASSET_SIZE = 100 * 1024 * 1024; // 100MB
 
     // SSRF-safe fetch with DNS validation + redirect protection
@@ -308,7 +324,7 @@ export class AssetToolExecutor extends ToolExecutor {
     }
 
     const saveParams = {
-      userId: "unscoped", // TODO: Thread userId from session context for tenant isolation
+      userId: this.resolveUserId(context),
       type: contentType.split("/")[0],
       name,
       storageKey,

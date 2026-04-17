@@ -15,6 +15,7 @@ export class SessionManager {
     const session: AgentSession = {
       sessionId: randomUUID(),
       projectId: params.projectId,
+      userId: params.userId,
       status: "active",
       messages: [],
       totalTokens: { input: 0, output: 0 },
@@ -74,6 +75,7 @@ export class SessionManager {
     const forked: AgentSession = {
       sessionId: randomUUID(),
       projectId: parent.projectId,
+      userId: parent.userId,
       status: "active",
       messages: parent.messages.map((m) => ({ ...m })),
       totalTokens: { input: 0, output: 0 },

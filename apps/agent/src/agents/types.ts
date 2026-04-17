@@ -21,6 +21,13 @@ export interface DispatchInput {
   accessMode: "read" | "write" | "read_write";
   context?: Record<string, unknown>;
   constraints?: { maxIterations?: number; timeoutMs?: number };
+  /** Identity propagated from the originating request (B1). Optional during migration. */
+  identity?: {
+    userId?: string;
+    sessionId?: string;
+    projectId?: string;
+    taskId?: string;
+  };
 }
 
 export interface DispatchOutput {

@@ -58,6 +58,10 @@ export class MasterAgent {
   private taskRegistry?: TaskRegistry;
   private currentDeferredRegistry?: DeferredRegistry;
   private overflowStore: OverflowStore;
+  /** Identity of the currently-executing user message. Set at handleUserMessage entry,
+   * read by pipeline ctx builder + handleDispatch. Prevents re-entrancy by being
+   * cleared in a finally block. MasterAgent is single-turn per instance. */
+  private currentIdentity?: { userId?: string; sessionId?: string; projectId?: string };
 
   constructor(deps: {
     runtime: AgentRuntime;
@@ -122,6 +126,8 @@ export class MasterAgent {
       const result = await this.pipeline.execute(name, input, {
         agentType: "master",
         taskId: "master-session",
+        sessionId: this.currentIdentity?.sessionId,
+        userId: this.currentIdentity?.userId,
       });
       if (!result.success) {
         return { error: result.error };
@@ -137,7 +143,23 @@ export class MasterAgent {
 
   // ── Public API ──────────────────────────────────────────────────────────────
 
-  async handleUserMessage(message: string, history?: Array<{ role: string; content: string }>): Promise<{ text: string; tokensUsed: { input: number; output: number } }> {
+  async handleUserMessage(
+    message: string,
+    history?: Array<{ role: string; content: string }>,
+    identity?: { userId?: string; sessionId?: string; projectId?: string },
+  ): Promise<{ text: string; tokensUsed: { input: number; output: number } }> {
+    this.currentIdentity = identity;
+    try {
+      return await this.runTurn(message, history);
+    } finally {
+      this.currentIdentity = undefined;
+    }
+  }
+
+  private async runTurn(
+    message: string,
+    history?: Array<{ role: string; content: string }>,
+  ): Promise<{ text: string; tokensUsed: { input: number; output: number } }> {
     const ctx = this.contextManager.get();
 
     // Match skills to intent and use as active skills for this message
@@ -399,6 +421,13 @@ export class MasterAgent {
       accessMode,
       context: rawInput.context as Record<string, unknown> | undefined,
       constraints: rawInput.constraints as DispatchInput["constraints"],
+      identity: this.currentIdentity
+        ? {
+            userId: this.currentIdentity.userId,
+            sessionId: this.currentIdentity.sessionId,
+            projectId: this.currentIdentity.projectId,
+          }
+        : undefined,
     };
 
     const needsLock = accessMode === "write" || accessMode === "read_write";

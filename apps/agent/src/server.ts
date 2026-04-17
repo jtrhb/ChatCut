@@ -48,12 +48,12 @@ export function createMessageHandler(deps: {
   sessionManager: SessionManager;
   eventBus: EventBus;
 }): MessageHandler {
-  return async (message: string, sessionId: string) => {
+  return async (message, sessionId, identity) => {
     deps.eventBus.emit({
       type: "agent.turn_start",
       timestamp: Date.now(),
       sessionId,
-      data: { message },
+      data: { message, userId: identity?.userId, projectId: identity?.projectId },
     });
 
     // Retrieve conversation history for multi-turn context.
@@ -66,7 +66,13 @@ export function createMessageHandler(deps: {
       .map((m) => ({ role: m.role, content: String(m.content) }))
       ?? [];
 
-    const { text: response, tokensUsed } = await deps.masterAgent.handleUserMessage(message, history);
+    const { text: response, tokensUsed } = await deps.masterAgent.handleUserMessage(
+      message,
+      history,
+      identity
+        ? { userId: identity.userId, sessionId: identity.sessionId, projectId: identity.projectId }
+        : undefined,
+    );
 
     // Track turn on the per-request session (not a fixed default session)
     deps.sessionManager.incrementTurn(sessionId, tokensUsed);

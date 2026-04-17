@@ -3,6 +3,8 @@ export type SessionStatus = "active" | "paused" | "completed" | "failed";
 export interface AgentSession {
   sessionId: string;
   projectId: string;
+  /** Owning user. Optional during B1 incremental migration; required once auth middleware lands. */
+  userId?: string;
   status: SessionStatus;
   messages: SessionMessage[];
   totalTokens: { input: number; output: number };
@@ -21,5 +23,6 @@ export interface SessionMessage {
 
 export interface CreateSessionParams {
   projectId: string;
+  userId?: string;
   metadata?: Record<string, unknown>;
 }

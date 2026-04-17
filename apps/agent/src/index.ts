@@ -109,12 +109,24 @@ async function main() {
   const changesetManager = new ChangesetManager({ changeLog, serverCore: serverEditorCore });
 
   // Tool executor for sub-agents — routes to real implementations when available.
-  const toolExecutor = async (name: string, input: unknown) => {
+  // Accepts optional ToolContext from the pipeline so identity (sessionId/userId)
+  // reaches the underlying executor for tenant-scoped operations.
+  const toolExecutor = async (name: string, input: unknown, context?: { agentType?: string; taskId?: string; sessionId?: string; userId?: string }) => {
     if (editorToolExecutor.hasToolName(name)) {
-      return editorToolExecutor.execute(name, input, { agentType: "editor", taskId: "default" });
+      return editorToolExecutor.execute(name, input, {
+        agentType: (context?.agentType as any) ?? "editor",
+        taskId: context?.taskId ?? "default",
+        sessionId: context?.sessionId,
+        userId: context?.userId,
+      });
     }
     if (assetToolExecutor?.hasToolName(name)) {
-      return assetToolExecutor.execute(name, input, { agentType: "asset", taskId: "default" });
+      return assetToolExecutor.execute(name, input, {
+        agentType: (context?.agentType as any) ?? "asset",
+        taskId: context?.taskId ?? "default",
+        sessionId: context?.sessionId,
+        userId: context?.userId,
+      });
     }
     return { success: false, error: `Tool "${name}" has no registered executor` };
   };

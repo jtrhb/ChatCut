@@ -69,6 +69,19 @@ export interface ToolCallResult {
   visualHints?: ToolVisualHint;
 }
 
+/**
+ * Execution context threaded through ToolPipeline → Executor → Tool impl.
+ * `sessionId` + `userId` enable tenant isolation, per-session overflow store,
+ * and per-dispatch taskId correlation. Added optional for incremental migration.
+ */
+export interface ToolContext {
+  agentType: AgentType;
+  taskId: string;
+  toolCallId?: string;
+  sessionId?: string;
+  userId?: string;
+}
+
 export interface ToolCallRecord {
   toolName: string;
   input: unknown;
