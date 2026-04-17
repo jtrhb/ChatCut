@@ -1,5 +1,5 @@
-import { EditorCore } from "@opencut/core";
-import type { SerializedEditorState } from "@opencut/core";
+import { EditorCore, ServerTracksSnapshotCommand } from "@opencut/core";
+import type { SerializedEditorState, TimelineTrack } from "@opencut/core";
 import type { Command } from "@opencut/core";
 
 /**
@@ -58,10 +58,48 @@ export class ServerEditorCore {
   /**
    * Execute an agent-originated command.
    * Delegates to core.executeAgentCommand() then increments snapshotVersion.
+   *
+   * Optional taskId tags the command so it can be rolled back as part of a
+   * dispatch group via rollbackByTaskId(). The Master mints one taskId per
+   * sub-agent dispatch; every command produced during that dispatch should
+   * share it.
    */
-  executeAgentCommand(command: Command, agentId: string): void {
-    this._core.executeAgentCommand(command, agentId);
+  executeAgentCommand(command: Command, agentId: string, taskId?: string): void {
+    this._core.executeAgentCommand(command, agentId, taskId);
     this._version++;
+  }
+
+  /**
+   * Roll back every command executed under the given taskId, in reverse
+   * history order. Used by the Master agent to unwind a failed sub-agent
+   * dispatch. Bumps snapshotVersion once if anything was undone so callers
+   * see a single post-rollback version (not one bump per undone command).
+   * Returns the number of commands that were undone.
+   */
+  rollbackByTaskId(taskId: string): number {
+    const undone = this._core.rollbackByTaskId(taskId);
+    if (undone > 0) {
+      this._version++;
+    }
+    return undone;
+  }
+
+  /**
+   * Convenience: wrap a tracks-before / tracks-after snapshot as a
+   * ServerTracksSnapshotCommand and execute it. Routes through
+   * CommandManager so it participates in rollbackByTaskId. This is what
+   * agent editor tools should call instead of mutating timeline.updateTracks
+   * directly — the direct path leaves no command history and can't be
+   * rolled back.
+   */
+  applyTracksAsCommand(
+    before: TimelineTrack[],
+    after: TimelineTrack[],
+    agentId: string,
+    taskId?: string,
+  ): void {
+    const cmd = new ServerTracksSnapshotCommand(this._core, before, after);
+    this.executeAgentCommand(cmd, agentId, taskId);
   }
 
   /**

@@ -849,4 +849,96 @@ describe("EditorToolExecutor", () => {
       expect(serverCore.snapshotVersion).toBe(versionBefore);
     });
   });
+
+  describe("B3: taskId tagging + rollback integration", () => {
+    it("trim_element routes through CommandManager and tags history with ctx.taskId", async () => {
+      const historyLenBefore = (
+        serverCore.editorCore.command as unknown as { history: unknown[] }
+      ).history.length;
+
+      await executor.execute(
+        "trim_element",
+        { element_id: "video-el-1", trim_start: 1, trim_end: 0.5 },
+        { agentType: "editor", taskId: "dispatch-A" },
+      );
+
+      const history = (
+        serverCore.editorCore.command as unknown as {
+          history: Array<{ options?: { taskId?: string; source?: string } }>;
+        }
+      ).history;
+      expect(history.length).toBe(historyLenBefore + 1);
+      const last = history[history.length - 1];
+      expect(last.options?.taskId).toBe("dispatch-A");
+      expect(last.options?.source).toBe("agent");
+    });
+
+    it("rollbackByTaskId reverts trim_element mutations", async () => {
+      const beforeTracks = serverCore.editorCore.timeline.getTracks();
+      const beforeSnapshot = JSON.stringify(beforeTracks);
+
+      await executor.execute(
+        "trim_element",
+        { element_id: "video-el-1", trim_start: 1, trim_end: 0.5 },
+        { agentType: "editor", taskId: "dispatch-A" },
+      );
+
+      // Confirm mutation applied
+      const afterEl = serverCore.editorCore.timeline
+        .getTracks()
+        .flatMap((t) => t.elements)
+        .find((e) => e.id === "video-el-1");
+      expect(afterEl?.trimStart).toBeCloseTo(1);
+
+      const undone = serverCore.rollbackByTaskId("dispatch-A");
+      expect(undone).toBe(1);
+
+      const restored = JSON.stringify(serverCore.editorCore.timeline.getTracks());
+      expect(restored).toBe(beforeSnapshot);
+    });
+
+    it("rollbackByTaskId unwinds multiple write tool calls in one dispatch", async () => {
+      const beforeSnapshot = JSON.stringify(serverCore.editorCore.timeline.getTracks());
+
+      await executor.execute(
+        "trim_element",
+        { element_id: "video-el-1", trim_start: 1 },
+        { agentType: "editor", taskId: "T" },
+      );
+      await executor.execute(
+        "trim_element",
+        { element_id: "video-el-2", trim_end: 0.5 },
+        { agentType: "editor", taskId: "T" },
+      );
+      await executor.execute(
+        "delete_element",
+        { element_ids: ["video-el-1"] },
+        { agentType: "editor", taskId: "T" },
+      );
+
+      const undone = serverCore.rollbackByTaskId("T");
+      expect(undone).toBe(3);
+
+      const restored = JSON.stringify(serverCore.editorCore.timeline.getTracks());
+      expect(restored).toBe(beforeSnapshot);
+    });
+
+    it("read-only tools do not create history entries", async () => {
+      const historyLenBefore = (
+        serverCore.editorCore.command as unknown as { history: unknown[] }
+      ).history.length;
+
+      await executor.execute("get_timeline_state", {}, { agentType: "editor", taskId: "T" });
+      await executor.execute(
+        "get_element_info",
+        { element_id: "video-el-1" },
+        { agentType: "editor", taskId: "T" },
+      );
+
+      const historyLenAfter = (
+        serverCore.editorCore.command as unknown as { history: unknown[] }
+      ).history.length;
+      expect(historyLenAfter).toBe(historyLenBefore);
+    });
+  });
 });

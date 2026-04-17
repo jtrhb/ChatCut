@@ -354,10 +354,21 @@ function buildElement(
 /**
  * Executes editor tools by directly computing new track state and applying it
  * via the EditorCore's timeline manager. This avoids the singleton dependency
- * that Command subclasses have, making it safe for server-side use where
- * EditorCore instances are not the global singleton.
+ * that the browser-side TracksSnapshotCommand has by routing through
+ * ServerEditorCore.applyTracksAsCommand — the snapshot command takes the
+ * request-scoped EditorCore explicitly, so every agent edit gets recorded
+ * in CommandManager and participates in taskId-scoped rollback.
  */
 export class EditorToolExecutor extends ToolExecutor {
+  /**
+   * Context for the currently-executing tool call. Set at executeImpl entry
+   * and cleared in finally so _applyTracks can read the active taskId /
+   * agentType without every private write helper having to thread it
+   * through its own signature. Safe under Node's single-threaded execution:
+   * one executeImpl runs to completion before the next starts.
+   */
+  private _currentContext?: { agentType: AgentType; taskId: string };
+
   constructor(private serverCore: ServerEditorCore) {
     super();
     for (const def of EDITOR_TOOL_DEFINITIONS) {
@@ -370,6 +381,7 @@ export class EditorToolExecutor extends ToolExecutor {
     input: unknown,
     context: { agentType: AgentType; taskId: string }
   ): Promise<ToolCallResult> {
+    this._currentContext = context;
     try {
       switch (toolName) {
         case "get_timeline_state":
@@ -415,6 +427,8 @@ export class EditorToolExecutor extends ToolExecutor {
         success: false,
         error: err instanceof Error ? err.message : String(err),
       };
+    } finally {
+      this._currentContext = undefined;
     }
   }
 
@@ -424,14 +438,20 @@ export class EditorToolExecutor extends ToolExecutor {
   }
 
   /**
-   * Apply a new tracks state. This directly updates the scene's tracks
-   * via the TimelineManager, which does not use the EditorCore singleton.
-   * Also bumps the ServerEditorCore snapshot version to track mutations.
+   * Apply a new tracks state by routing through CommandManager: snapshot
+   * the prior tracks, wrap before/after in a ServerTracksSnapshotCommand,
+   * and execute it via ServerEditorCore.applyTracksAsCommand. This tags
+   * the command with the active taskId so the Master can roll back the
+   * entire dispatch on failure. Also bumps snapshotVersion (handled inside
+   * applyTracksAsCommand → executeAgentCommand).
    */
   private _applyTracks(newTracks: TimelineTrack[]): void {
-    this.serverCore.editorCore.timeline.updateTracks(newTracks);
-    // Manually increment version since we bypass executeAgentCommand
-    (this.serverCore as unknown as { _version: number })._version++;
+    const ctx = this._currentContext;
+    if (!ctx) {
+      throw new Error("_applyTracks called outside of an executeImpl call — context is not set");
+    }
+    const before = this._getTracks();
+    this.serverCore.applyTracksAsCommand(before, newTracks, ctx.agentType, ctx.taskId);
   }
 
   // ── Read tools ───────────────────────────────────────────────────────────
