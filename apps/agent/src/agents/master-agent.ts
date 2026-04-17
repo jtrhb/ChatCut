@@ -25,6 +25,9 @@ import type { ChangesetManager } from "../changeset/changeset-manager.js";
 import type { ExplorationEngine } from "../exploration/exploration-engine.js";
 import type { TaskRegistry } from "../tasks/task-registry.js";
 import type { ServerEditorCore } from "../services/server-editor-core.js";
+import type { MemoryStore } from "../memory/memory-store.js";
+import type { MemoryLoader } from "../memory/memory-loader.js";
+import type { ParsedMemory, TaskContext } from "../memory/types.js";
 import { DeferredRegistry } from "../tools/deferred-registry.js";
 import { createResolveToolsTool } from "../tools/resolve-tools-tool.js";
 import { OverflowStore } from "../tools/overflow-store.js";
@@ -65,6 +68,24 @@ export class MasterAgent {
    * and tests that don't need rollback can construct MasterAgent without it.
    */
   private serverCore?: ServerEditorCore;
+  /**
+   * Optional memory store + writer token. Per spec §9.4 MasterAgent is
+   * the sole memory writer. We claim the token at construction so no one
+   * else can grant it — even if a reference to the store leaks. Writes
+   * go through the writeMemory method below.
+   */
+  private memoryStore?: MemoryStore;
+  private memoryWriterToken?: symbol;
+  /**
+   * Optional memory loader. When wired, handleUserMessage calls
+   * loadMemories at entry, injects promptText into the system prompt,
+   * and stashes injectedMemoryIds / injectedSkillIds on the current turn
+   * so a downstream propose_changes can stamp them onto the changeset.
+   */
+  private memoryLoader?: MemoryLoader;
+  /** Per-turn memory injection IDs. Reset at handleUserMessage entry. */
+  private currentInjectedMemoryIds: string[] = [];
+  private currentInjectedSkillIds: string[] = [];
   private currentDeferredRegistry?: DeferredRegistry;
   private overflowStore: OverflowStore;
   /** Identity of the currently-executing user message. Set at handleUserMessage entry,
@@ -83,6 +104,8 @@ export class MasterAgent {
     explorationEngine?: ExplorationEngine;
     taskRegistry?: TaskRegistry;
     serverCore?: ServerEditorCore;
+    memoryStore?: MemoryStore;
+    memoryLoader?: MemoryLoader;
   }) {
     this.runtime = deps.runtime;
     this.contextManager = deps.contextManager;
@@ -93,6 +116,16 @@ export class MasterAgent {
     this.explorationEngine = deps.explorationEngine;
     this.taskRegistry = deps.taskRegistry;
     this.serverCore = deps.serverCore;
+    this.memoryStore = deps.memoryStore;
+    this.memoryLoader = deps.memoryLoader;
+
+    // Claim the sole-writer token at construction. grantWriterToken throws
+    // on repeat invocation so if anything else has already grabbed the
+    // token from this store, this boot fails loudly — which is exactly the
+    // invariant spec §9.4 wants us to preserve.
+    if (this.memoryStore) {
+      this.memoryWriterToken = this.memoryStore.grantWriterToken();
+    }
 
     // Create session-scoped overflow store for result budget control (P2)
     this.overflowStore = new OverflowStore();
@@ -160,11 +193,77 @@ export class MasterAgent {
     identity?: { userId?: string; sessionId?: string; projectId?: string },
   ): Promise<{ text: string; tokensUsed: { input: number; output: number } }> {
     this.currentIdentity = identity;
+    // Reset per-turn memory injection lists; runTurn populates them if
+    // the memory loader is wired and a TaskContext can be resolved.
+    this.currentInjectedMemoryIds = [];
+    this.currentInjectedSkillIds = [];
     try {
       return await this.runTurn(message, history);
     } finally {
       this.currentIdentity = undefined;
+      this.currentInjectedMemoryIds = [];
+      this.currentInjectedSkillIds = [];
     }
+  }
+
+  /**
+   * Write a memory record via the master-owned token. This is the sole
+   * sanctioned write path per spec §9.4 — sub-agents, observers, and
+   * extractors that need to persist memories must call this method
+   * (typically via an injected callback) instead of touching MemoryStore
+   * directly. Throws if no memoryStore was configured at construction.
+   */
+  async writeMemory(path: string, memory: ParsedMemory): Promise<void> {
+    if (!this.memoryStore || !this.memoryWriterToken) {
+      throw new Error(
+        "MasterAgent.writeMemory: memoryStore was not configured at construction. " +
+        "Wire it via the memoryStore constructor dep to enable memory persistence.",
+      );
+    }
+    await this.memoryStore.writeMemory(this.memoryWriterToken, path, memory);
+  }
+
+  /**
+   * Returns a write callback bound to this master's writer token. Pass to
+   * MemoryExtractor / PatternObserver as their `writeMemory` dep so they
+   * can persist through the sanctioned path without holding a store ref.
+   */
+  getMemoryWriter(): (path: string, memory: ParsedMemory) => Promise<void> {
+    return (path, memory) => this.writeMemory(path, memory);
+  }
+
+  /**
+   * Expose the memory IDs injected into the most recent turn. Called by
+   * propose_changes (or anyone that builds a changeset from the current
+   * turn) to stamp injectedMemoryIds / injectedSkillIds per spec §9.4 so
+   * downstream approve / reject can do reinforceRelatedMemories lookups.
+   */
+  getCurrentInjectedMemoryIds(): { memoryIds: string[]; skillIds: string[] } {
+    return {
+      memoryIds: [...this.currentInjectedMemoryIds],
+      skillIds: [...this.currentInjectedSkillIds],
+    };
+  }
+
+  /**
+   * Resolve a TaskContext from the current identity + project context,
+   * if the caller has provided enough information. Returns null when
+   * brand mapping isn't registered — loadMemories requires a brand, so
+   * we skip memory loading in that case rather than feeding a stub.
+   */
+  private resolveTaskContext(): TaskContext | null {
+    const projectId = this.currentIdentity?.projectId;
+    const sessionId = this.currentIdentity?.sessionId;
+    if (!projectId || !sessionId) return null;
+    const brandMapping = this.contextManager.getBrandForProject(projectId);
+    if (!brandMapping) return null;
+    return {
+      brand: brandMapping.brand,
+      series: brandMapping.series,
+      projectId,
+      sessionId,
+      agentType: "master",
+    };
   }
 
   private async runTurn(
@@ -211,6 +310,26 @@ export class MasterAgent {
 
     // Build system prompt with deferred listing appended
     let systemPrompt = this.buildSystemPrompt(ctx, activeSkills);
+
+    // Load relevant memories per spec §9.4 if the loader is wired AND we
+    // have enough context to build a TaskContext (brand is required). The
+    // call is best-effort: storage errors shouldn't fail the user's turn.
+    if (this.memoryLoader) {
+      const taskContext = this.resolveTaskContext();
+      if (taskContext) {
+        try {
+          const memoryContext = await this.memoryLoader.loadMemories(taskContext, "single-edit");
+          this.currentInjectedMemoryIds = memoryContext.injectedMemoryIds;
+          this.currentInjectedSkillIds = memoryContext.injectedSkillIds;
+          if (memoryContext.promptText) {
+            systemPrompt += `\n\n## Memory\n\n${memoryContext.promptText}`;
+          }
+        } catch {
+          // Memory store unavailable — proceed without memory context.
+        }
+      }
+    }
+
     const deferredListing = deferredRegistry.getDeferredListing();
     if (deferredListing) {
       systemPrompt += `\n\n${deferredListing}`;

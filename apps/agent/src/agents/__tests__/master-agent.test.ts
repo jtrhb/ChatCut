@@ -469,6 +469,186 @@ describe("MasterAgent", () => {
       expect(result.error).toContain("no core wired");
     });
 
+    it("B4: writeMemory routes through memoryStore with the master's token", async () => {
+      const grantedToken = Symbol("master-token");
+      const writeMemorySpy = vi.fn().mockResolvedValue(undefined);
+      const grantSpy = vi.fn().mockReturnValue(grantedToken);
+      const memoryStoreMock = {
+        grantWriterToken: grantSpy,
+        writeMemory: writeMemorySpy,
+      } as any;
+
+      const masterWithMemory = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        memoryStore: memoryStoreMock,
+      });
+
+      expect(grantSpy).toHaveBeenCalledOnce();
+
+      const mem = { memory_id: "mem-1", content: "test" } as any;
+      await masterWithMemory.writeMemory("drafts/mem-1.md", mem);
+
+      expect(writeMemorySpy).toHaveBeenCalledWith(grantedToken, "drafts/mem-1.md", mem);
+    });
+
+    it("B4: writeMemory throws when no memoryStore was configured", async () => {
+      const agentNoMemory = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+      });
+
+      await expect(
+        agentNoMemory.writeMemory("x", { memory_id: "m", content: "c" } as any),
+      ).rejects.toThrow(/memoryStore was not configured/);
+    });
+
+    it("B4: getMemoryWriter returns a callback bound to the master token", async () => {
+      const grantedToken = Symbol("master-token");
+      const writeMemorySpy = vi.fn().mockResolvedValue(undefined);
+      const memoryStoreMock = {
+        grantWriterToken: vi.fn().mockReturnValue(grantedToken),
+        writeMemory: writeMemorySpy,
+      } as any;
+
+      const masterWithMemory = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        memoryStore: memoryStoreMock,
+      });
+
+      const writer = masterWithMemory.getMemoryWriter();
+      await writer("drafts/mem-2.md", { memory_id: "mem-2", content: "x" } as any);
+
+      expect(writeMemorySpy).toHaveBeenCalledWith(
+        grantedToken,
+        "drafts/mem-2.md",
+        expect.objectContaining({ memory_id: "mem-2" }),
+      );
+    });
+
+    it("B4: getCurrentInjectedMemoryIds returns injected IDs after loadMemories runs", async () => {
+      const loadMemoriesSpy = vi.fn().mockResolvedValue({
+        promptText: "## Memory: prefer quick cuts",
+        injectedMemoryIds: ["mem-a", "mem-b"],
+        injectedSkillIds: ["skill-1"],
+      });
+      const memoryLoaderMock = { loadMemories: loadMemoriesSpy } as any;
+
+      // Register a brand mapping so resolveTaskContext returns a valid context
+      contextManager.registerBrand("proj-1", { brand: "acme", series: "spring" });
+
+      const masterWithLoader = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        memoryLoader: memoryLoaderMock,
+      });
+
+      await masterWithLoader.handleUserMessage("do a thing", undefined, {
+        projectId: "proj-1",
+        sessionId: "sess-123",
+        userId: "user-1",
+      });
+
+      expect(loadMemoriesSpy).toHaveBeenCalledOnce();
+      const [taskCtx, templateKey] = loadMemoriesSpy.mock.calls[0];
+      expect(taskCtx).toMatchObject({
+        brand: "acme",
+        series: "spring",
+        projectId: "proj-1",
+        sessionId: "sess-123",
+        agentType: "master",
+      });
+      expect(templateKey).toBe("single-edit");
+
+      const injected = masterWithLoader.getCurrentInjectedMemoryIds();
+      // After the turn ends the IDs are cleared (reset in finally).
+      expect(injected.memoryIds).toEqual([]);
+      expect(injected.skillIds).toEqual([]);
+    });
+
+    it("B4: injects memory promptText into the system prompt", async () => {
+      const memoryLoaderMock = {
+        loadMemories: vi.fn().mockResolvedValue({
+          promptText: "User prefers jump cuts on sports edits",
+          injectedMemoryIds: ["mem-a"],
+          injectedSkillIds: [],
+        }),
+      } as any;
+
+      contextManager.registerBrand("proj-1", { brand: "acme" });
+
+      const masterWithLoader = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        memoryLoader: memoryLoaderMock,
+      });
+
+      await masterWithLoader.handleUserMessage("trim clip", undefined, {
+        projectId: "proj-1",
+        sessionId: "sess-abc",
+      });
+
+      expect(runtime.run).toHaveBeenCalledOnce();
+      const runArgs = runtime.run.mock.calls[0][0];
+      expect(runArgs.system).toContain("## Memory");
+      expect(runArgs.system).toContain("User prefers jump cuts on sports edits");
+    });
+
+    it("B4: skips memory load gracefully when no brand mapping exists", async () => {
+      const loadMemoriesSpy = vi.fn();
+      const memoryLoaderMock = { loadMemories: loadMemoriesSpy } as any;
+
+      // No brand registered for this project
+      const masterWithLoader = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        memoryLoader: memoryLoaderMock,
+      });
+
+      await masterWithLoader.handleUserMessage("hello", undefined, {
+        projectId: "unknown-proj",
+        sessionId: "sess-xyz",
+      });
+
+      expect(loadMemoriesSpy).not.toHaveBeenCalled();
+    });
+
+    it("B4: tolerates memory loader throwing (best-effort)", async () => {
+      const memoryLoaderMock = {
+        loadMemories: vi.fn().mockRejectedValue(new Error("r2 unavailable")),
+      } as any;
+      contextManager.registerBrand("proj-1", { brand: "acme" });
+
+      const masterWithLoader = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        memoryLoader: memoryLoaderMock,
+      });
+
+      // Must not reject the user's turn
+      const result = await masterWithLoader.handleUserMessage("hi", undefined, {
+        projectId: "proj-1",
+        sessionId: "sess-1",
+      });
+
+      expect(result.text).toBe("mock response");
+    });
+
     it("swallows rollback errors so the original dispatch error remains the signal", async () => {
       const rollbackSpy = vi.fn(() => {
         throw new Error("rollback itself blew up");
