@@ -2,13 +2,27 @@ import type { RuntimeEvent, RuntimeEventType } from "./types.js";
 
 type EventHandler = (event: RuntimeEvent) => void;
 
+/**
+ * Bounded event bus with a ring-buffer history.
+ *
+ * Replaces the old `history.shift()` path which was O(n) on every emit
+ * once the buffer filled — a hot path during agent dispatch. The ring
+ * buffer keeps O(1) enqueue regardless of history size.
+ */
 export class EventBus {
   private handlers = new Map<string, Set<EventHandler>>();
-  private history: RuntimeEvent[] = [];
-  private historySize: number;
+  /**
+   * Fixed-capacity ring. `nextIndex` is where the next event will land;
+   * `count` tracks how many slots are filled (capped at buffer.length).
+   * Once full, new events overwrite the oldest slot with no shift().
+   */
+  private buffer: Array<RuntimeEvent | undefined>;
+  private nextIndex = 0;
+  private count = 0;
 
   constructor(opts?: { historySize?: number }) {
-    this.historySize = opts?.historySize ?? 100;
+    const historySize = opts?.historySize ?? 100;
+    this.buffer = new Array(historySize);
   }
 
   on(type: RuntimeEventType | "*", handler: EventHandler): void {
@@ -30,11 +44,12 @@ export class EventBus {
   }
 
   emit(event: RuntimeEvent): void {
-    // Ring buffer: evict oldest when full
-    if (this.history.length >= this.historySize) {
-      this.history.shift();
+    // O(1) ring-buffer insert. Overwrites the oldest slot once full.
+    this.buffer[this.nextIndex] = event;
+    this.nextIndex = (this.nextIndex + 1) % this.buffer.length;
+    if (this.count < this.buffer.length) {
+      this.count++;
     }
-    this.history.push(event);
 
     // Deliver to type-specific handlers
     const typeHandlers = this.handlers.get(event.type);
@@ -53,7 +68,23 @@ export class EventBus {
     }
   }
 
+  /**
+   * Return events in chronological order (oldest → newest). Allocates a
+   * fresh array so callers can freely mutate; the ring buffer itself is
+   * not exposed.
+   */
   getHistory(): readonly RuntimeEvent[] {
-    return this.history;
+    if (this.count === 0) return [];
+    const result: RuntimeEvent[] = [];
+    // When count < length, oldest is at index 0. When full, oldest is at
+    // nextIndex (the slot about to be overwritten).
+    const start = this.count < this.buffer.length ? 0 : this.nextIndex;
+    for (let i = 0; i < this.count; i++) {
+      const slot = this.buffer[(start + i) % this.buffer.length];
+      if (slot !== undefined) {
+        result.push(slot);
+      }
+    }
+    return result;
   }
 }

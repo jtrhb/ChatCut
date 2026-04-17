@@ -153,3 +153,43 @@ describe("serializeEvent", () => {
     expect(parsed.type).toBeUndefined();
   });
 });
+
+describe("B6: EventBus ring-buffer history", () => {
+  it("caps history at historySize without O(n) shift", () => {
+    const bus = new EventBus({ historySize: 3 });
+    bus.emit(makeEvent({ type: "task.created", timestamp: 1 }));
+    bus.emit(makeEvent({ type: "task.created", timestamp: 2 }));
+    bus.emit(makeEvent({ type: "task.created", timestamp: 3 }));
+    bus.emit(makeEvent({ type: "task.created", timestamp: 4 }));
+    bus.emit(makeEvent({ type: "task.created", timestamp: 5 }));
+
+    const history = bus.getHistory();
+    expect(history).toHaveLength(3);
+    // Oldest kept is timestamp 3 (1 and 2 overwritten)
+    expect(history.map((e) => e.timestamp)).toEqual([3, 4, 5]);
+  });
+
+  it("returns events in chronological order when underfilled", () => {
+    const bus = new EventBus({ historySize: 10 });
+    bus.emit(makeEvent({ type: "task.created", timestamp: 1 }));
+    bus.emit(makeEvent({ type: "task.created", timestamp: 2 }));
+    expect(bus.getHistory().map((e) => e.timestamp)).toEqual([1, 2]);
+  });
+
+  it("returns empty history when nothing emitted", () => {
+    const bus = new EventBus({ historySize: 5 });
+    expect(bus.getHistory()).toEqual([]);
+  });
+
+  it("does not block emit performance when full (many iterations)", () => {
+    const bus = new EventBus({ historySize: 50 });
+    // Would be O(n^2) under shift-based eviction; O(n) under ring buffer.
+    // Not a perf assertion — just ensures we can emit 10k without choking.
+    for (let i = 0; i < 10_000; i++) {
+      bus.emit(makeEvent({ type: "task.created", timestamp: i }));
+    }
+    expect(bus.getHistory()).toHaveLength(50);
+    expect(bus.getHistory().at(-1)!.timestamp).toBe(9999);
+    expect(bus.getHistory().at(0)!.timestamp).toBe(9950);
+  });
+});
