@@ -1,19 +1,24 @@
 import { nanoid } from "nanoid";
 import type { ChangeLog, ChangeEntry, ChangesetDecisionEvent } from "@opencut/core";
 import type { ParsedMemory } from "./types.js";
-import type { MemoryStore } from "./memory-store.js";
 
 // ---------------------------------------------------------------------------
-// Minimal interface so tests can pass doubles without importing the concrete
-// MemoryStore (which drags in AWS SDK construction side-effects).
+// Minimal read-only interface for the memory store — MemoryExtractor needs
+// to enumerate drafts/explicit directories and read existing memories to
+// reinforce them, but NEVER writes directly. Writes are routed through a
+// Master-owned callback so MasterAgent remains the sole writer (spec §9.4).
 // ---------------------------------------------------------------------------
 
-interface MemoryStoreLike {
-  writeMemory(path: string, memory: ParsedMemory): Promise<void>;
+interface MemoryReader {
   listDir(path: string): Promise<string[]>;
   readParsed(path: string): Promise<ParsedMemory>;
   exists(path: string): Promise<boolean>;
 }
+
+/** Writer callback injected by MasterAgent. The callback internally uses the
+ *  Master's writer token to reach the real MemoryStore. Extractor never sees
+ *  the token or the store directly. */
+type MemoryWriter = (path: string, memory: ParsedMemory) => Promise<void>;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,12 +35,19 @@ interface SignalClassification {
 
 export class MemoryExtractor {
   private readonly changeLog: ChangeLog;
-  private readonly memoryStore: MemoryStoreLike;
+  private readonly reader: MemoryReader;
+  private readonly writeMemory: MemoryWriter;
   private readonly sessionId: string;
 
-  constructor(deps: { changeLog: ChangeLog; memoryStore: MemoryStore | MemoryStoreLike; sessionId?: string }) {
+  constructor(deps: {
+    changeLog: ChangeLog;
+    memoryReader: MemoryReader;
+    writeMemory: MemoryWriter;
+    sessionId?: string;
+  }) {
     this.changeLog = deps.changeLog;
-    this.memoryStore = deps.memoryStore as MemoryStoreLike;
+    this.reader = deps.memoryReader;
+    this.writeMemory = deps.writeMemory;
     this.sessionId = deps.sessionId ?? `session-${nanoid(6)}`;
   }
 
@@ -104,7 +116,7 @@ export class MemoryExtractor {
     }
 
     const path = `drafts/${memory.memory_id}.md`;
-    await this.memoryStore.writeMemory(path, memory);
+    await this.writeMemory(path, memory);
 
     return memory;
   }
@@ -133,7 +145,7 @@ export class MemoryExtractor {
         updated: now,
         used_in_changeset_ids: [...memory.used_in_changeset_ids, changesetId],
       };
-      await this.memoryStore.writeMemory(path, updated);
+      await this.writeMemory(path, updated);
     }
   }
 
@@ -174,7 +186,7 @@ export class MemoryExtractor {
     };
 
     const path = `explicit/${memory.memory_id}.md`;
-    await this.memoryStore.writeMemory(path, memory);
+    await this.writeMemory(path, memory);
 
     return memory;
   }
@@ -276,7 +288,7 @@ export class MemoryExtractor {
     for (const dir of dirs) {
       let filenames: string[];
       try {
-        filenames = await this.memoryStore.listDir(dir);
+        filenames = await this.reader.listDir(dir);
       } catch {
         continue;
       }
@@ -284,7 +296,7 @@ export class MemoryExtractor {
       for (const filename of filenames) {
         const path = `${dir}${filename}`;
         try {
-          const memory = await this.memoryStore.readParsed(path);
+          const memory = await this.reader.readParsed(path);
           // A memory is "related" if it shares the signal type in its tags or semantic_key
           if (
             memory.tags.includes(signalType) ||

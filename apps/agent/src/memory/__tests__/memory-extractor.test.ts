@@ -5,17 +5,22 @@ import type { ParsedMemory } from "../types.js";
 import type { ChangeEntry } from "@opencut/core";
 
 // ---------------------------------------------------------------------------
-// Mock MemoryStore
+// Mock memory deps (post-B4: reader split from writer callback).
+//
+// Post-B4 MemoryExtractor no longer holds a MemoryStore reference — it takes
+// a read-only reader and a writeMemory callback. Tests mimic that split. The
+// `writeMemory` spy and `_written` map are shared so reads see what the
+// Extractor has written, matching the former mock's semantics.
 // ---------------------------------------------------------------------------
 
-function makeMockMemoryStore() {
+function makeMockMemoryDeps() {
   const written = new Map<string, ParsedMemory>();
 
-  return {
-    _written: written,
-    writeMemory: vi.fn(async (path: string, memory: ParsedMemory) => {
-      written.set(path, memory);
-    }),
+  const writeMemory = vi.fn(async (path: string, memory: ParsedMemory) => {
+    written.set(path, memory);
+  });
+
+  const reader = {
     listDir: vi.fn(async (_path: string): Promise<string[]> => []),
     readParsed: vi.fn(async (path: string): Promise<ParsedMemory> => {
       const mem = written.get(path);
@@ -24,6 +29,8 @@ function makeMockMemoryStore() {
     }),
     exists: vi.fn(async (_path: string): Promise<boolean> => false),
   };
+
+  return { _written: written, writeMemory, reader };
 }
 
 // ---------------------------------------------------------------------------
@@ -54,15 +61,20 @@ function makeChangeEntry(overrides: Partial<ChangeEntry> = {}): ChangeEntry {
 
 describe("MemoryExtractor", () => {
   let changeLog: ChangeLog;
-  let memoryStore: ReturnType<typeof makeMockMemoryStore>;
+  let deps: ReturnType<typeof makeMockMemoryDeps>;
   let extractor: MemoryExtractor;
 
   const TEST_SESSION_ID = "test-session-42";
 
   beforeEach(() => {
     changeLog = new ChangeLog();
-    memoryStore = makeMockMemoryStore();
-    extractor = new MemoryExtractor({ changeLog, memoryStore: memoryStore as any, sessionId: TEST_SESSION_ID });
+    deps = makeMockMemoryDeps();
+    extractor = new MemoryExtractor({
+      changeLog,
+      memoryReader: deps.reader,
+      writeMemory: deps.writeMemory,
+      sessionId: TEST_SESSION_ID,
+    });
   });
 
   // ── 1. start() subscribes to changeLog decision events ───────────────────
@@ -92,7 +104,7 @@ describe("MemoryExtractor", () => {
     expect(memory!.created_session_id).toBe(TEST_SESSION_ID);
     expect(memory!.last_reinforced_session_id).toBe(TEST_SESSION_ID);
     expect(memory!.used_in_changeset_ids).toEqual(["cs-reject-1"]);
-    expect(memoryStore.writeMemory).toHaveBeenCalledTimes(1);
+    expect(deps.writeMemory).toHaveBeenCalledTimes(1);
   });
 
   // ── 3. handleRejection with 3+ consecutive rejections sets activation_scope
@@ -130,8 +142,8 @@ describe("MemoryExtractor", () => {
     await extractor.handleRejection("cs-base");
 
     // Verify memory was created
-    expect(memoryStore.writeMemory).toHaveBeenCalledTimes(1);
-    const firstCall = memoryStore.writeMemory.mock.calls[0];
+    expect(deps.writeMemory).toHaveBeenCalledTimes(1);
+    const firstCall = deps.writeMemory.mock.calls[0];
     const draftMemory = firstCall[1] as ParsedMemory;
     expect(draftMemory.reinforced_count).toBe(0);
 
@@ -145,10 +157,10 @@ describe("MemoryExtractor", () => {
 
     // Seed the written store so readParsed finds it
     const path = firstCall[0] as string;
-    memoryStore._written.set(path, draftMemory);
-    memoryStore.listDir.mockResolvedValue([path.split("/").pop()!]);
-    memoryStore.readParsed.mockImplementation(async (p: string) => {
-      const mem = memoryStore._written.get(p);
+    deps._written.set(path, draftMemory);
+    deps.reader.listDir.mockResolvedValue([path.split("/").pop()!]);
+    deps.reader.readParsed.mockImplementation(async (p: string) => {
+      const mem = deps._written.get(p);
       if (!mem) throw new Error(`Not found: ${p}`);
       return mem;
     });
@@ -156,8 +168,8 @@ describe("MemoryExtractor", () => {
     await extractor.handleApproval("cs-approval");
 
     // writeMemory called again with incremented count
-    expect(memoryStore.writeMemory.mock.calls.length).toBeGreaterThanOrEqual(2);
-    const lastCall = memoryStore.writeMemory.mock.calls.at(-1);
+    expect(deps.writeMemory.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const lastCall = deps.writeMemory.mock.calls.at(-1);
     const reinforcedMemory = lastCall![1] as ParsedMemory;
     expect(reinforcedMemory.reinforced_count).toBeGreaterThan(draftMemory.reinforced_count);
   });
@@ -188,10 +200,10 @@ describe("MemoryExtractor", () => {
     };
 
     const memPath = "drafts/mem-existing.md";
-    memoryStore._written.set(memPath, existingMemory);
-    memoryStore.listDir.mockResolvedValue(["mem-existing.md"]);
-    memoryStore.readParsed.mockImplementation(async (p: string) => {
-      const mem = memoryStore._written.get(p);
+    deps._written.set(memPath, existingMemory);
+    deps.reader.listDir.mockResolvedValue(["mem-existing.md"]);
+    deps.reader.readParsed.mockImplementation(async (p: string) => {
+      const mem = deps._written.get(p);
       if (!mem) throw new Error(`Not found: ${p}`);
       return mem;
     });
@@ -206,7 +218,7 @@ describe("MemoryExtractor", () => {
     const beforeApproval = Date.now();
     await extractor.handleApproval("cs-approve-5");
 
-    const lastCall = memoryStore.writeMemory.mock.calls.at(-1);
+    const lastCall = deps.writeMemory.mock.calls.at(-1);
     if (lastCall) {
       const reinforced = lastCall[1] as ParsedMemory;
       const reinforcedTime = new Date(reinforced.last_reinforced_at).getTime();
@@ -226,7 +238,7 @@ describe("MemoryExtractor", () => {
     expect(memory.status).toBe("active");
     expect(memory.confidence).toBe("high");
     expect(memory.content).toBe("Always use jump cuts for sports content");
-    expect(memoryStore.writeMemory).toHaveBeenCalledTimes(1);
+    expect(deps.writeMemory).toHaveBeenCalledTimes(1);
   });
 
   // ── 7. canPromoteDraft returns false when same session ────────────────────
@@ -359,10 +371,10 @@ describe("MemoryExtractor", () => {
     };
 
     const memPath = "drafts/mem-sess-track.md";
-    memoryStore._written.set(memPath, existingMemory);
-    memoryStore.listDir.mockResolvedValue(["mem-sess-track.md"]);
-    memoryStore.readParsed.mockImplementation(async (p: string) => {
-      const mem = memoryStore._written.get(p);
+    deps._written.set(memPath, existingMemory);
+    deps.reader.listDir.mockResolvedValue(["mem-sess-track.md"]);
+    deps.reader.readParsed.mockImplementation(async (p: string) => {
+      const mem = deps._written.get(p);
       if (!mem) throw new Error(`Not found: ${p}`);
       return mem;
     });
@@ -376,7 +388,7 @@ describe("MemoryExtractor", () => {
 
     await extractor.handleApproval("cs-sess-track");
 
-    const lastCall = memoryStore.writeMemory.mock.calls.at(-1);
+    const lastCall = deps.writeMemory.mock.calls.at(-1);
     expect(lastCall).toBeDefined();
     const reinforced = lastCall![1] as ParsedMemory;
     expect(reinforced.last_reinforced_session_id).toBe(TEST_SESSION_ID);
@@ -406,11 +418,11 @@ describe("MemoryExtractor", () => {
     });
 
     // No existing memories
-    memoryStore.listDir.mockResolvedValue([]);
+    deps.reader.listDir.mockResolvedValue([]);
 
     await extractor.handleApproval("cs-only-approval");
 
     // writeMemory should NOT have been called (no memories to reinforce, none created)
-    expect(memoryStore.writeMemory).not.toHaveBeenCalled();
+    expect(deps.writeMemory).not.toHaveBeenCalled();
   });
 });

@@ -53,7 +53,14 @@ describe("PatternObserver", () => {
 
   beforeEach(() => {
     mockStore = makeMockStore();
-    observer = new PatternObserver({ memoryStore: mockStore as any });
+    // Post-B4: PatternObserver takes a read-only reader + writeMemory callback
+    // separately (spec §9.4 sole-writer rule). The mock's fields are passed
+    // through unchanged so existing assertions (mockStore.writeMemory.toHave...)
+    // keep working.
+    observer = new PatternObserver({
+      memoryReader: { listDir: mockStore.listDir, readParsed: mockStore.readParsed },
+      writeMemory: mockStore.writeMemory,
+    });
     mockStore.listDir.mockResolvedValue([]);
     mockStore.readParsed.mockResolvedValue(makeMemory());
     mockStore.writeMemory.mockResolvedValue(undefined);

@@ -114,11 +114,14 @@ User prefers quick cuts with no more than 3 seconds per clip.`;
 describe("MemoryStore", () => {
   let storage: ReturnType<typeof makeMockStorage>;
   let store: MemoryStore;
+  let writerToken: symbol;
   const USER_ID = "user-123";
 
   beforeEach(() => {
     storage = makeMockStorage();
     store = new MemoryStore(storage as any, USER_ID);
+    // Tests act as the sole writer (MasterAgent stand-in).
+    writerToken = store.grantWriterToken();
   });
 
   // ── 1. readFile downloads from correct R2 path ───────────────────────────
@@ -162,7 +165,7 @@ describe("MemoryStore", () => {
 
   // ── 4. writeMemory serializes and uploads correct markdown ───────────────
   it("writeMemory uploads valid markdown with frontmatter to R2", async () => {
-    await store.writeMemory("preferences/mem-001.md", SAMPLE_MEMORY);
+    await store.writeMemory(writerToken, "preferences/mem-001.md", SAMPLE_MEMORY);
 
     const key = `chatcut-memory/${USER_ID}/preferences/mem-001.md`;
     const raw = storage._store.get(key);
@@ -177,7 +180,7 @@ describe("MemoryStore", () => {
 
   // ── 5. writeMemory roundtrips ────────────────────────────────────────────
   it("writeMemory roundtrip: write then readParsed returns same data", async () => {
-    await store.writeMemory("preferences/mem-001.md", SAMPLE_MEMORY);
+    await store.writeMemory(writerToken, "preferences/mem-001.md", SAMPLE_MEMORY);
     const mem = await store.readParsed("preferences/mem-001.md");
 
     expect(mem.memory_id).toBe(SAMPLE_MEMORY.memory_id);
@@ -254,7 +257,7 @@ Rule content here.`;
 
   // ── 10. serializeToMarkdown produces valid frontmatter format ────────────
   it("serializeToMarkdown produces --- delimited frontmatter followed by content", async () => {
-    await store.writeMemory("preferences/mem-001.md", SAMPLE_MEMORY);
+    await store.writeMemory(writerToken, "preferences/mem-001.md", SAMPLE_MEMORY);
 
     const key = `chatcut-memory/${USER_ID}/preferences/mem-001.md`;
     const raw = storage._store.get(key)!;
@@ -276,5 +279,38 @@ Rule content here.`;
     expect(contentPart).toBe(
       "User prefers quick cuts with no more than 3 seconds per clip."
     );
+  });
+
+  describe("B4: writer token gate", () => {
+    it("writeMemory throws when called with an unrelated symbol", async () => {
+      const bogus = Symbol("not-the-real-token");
+      await expect(
+        store.writeMemory(bogus, "preferences/x.md", SAMPLE_MEMORY),
+      ).rejects.toThrow(/writer token is required/);
+    });
+
+    it("writeMemory throws when called with no matching per-instance token", async () => {
+      // A fresh store has its own token — the writerToken from beforeEach is
+      // for a different store instance and must not be accepted here.
+      const otherStorage = makeMockStorage();
+      const otherStore = new MemoryStore(otherStorage as any, "user-other");
+      await expect(
+        otherStore.writeMemory(writerToken, "preferences/x.md", SAMPLE_MEMORY),
+      ).rejects.toThrow(/writer token is required/);
+    });
+
+    it("grantWriterToken throws if called twice on the same store", () => {
+      // beforeEach already granted once; a second grant must be refused.
+      expect(() => store.grantWriterToken()).toThrow(/already granted/);
+    });
+
+    it("read methods do NOT require the token", async () => {
+      const key = `chatcut-memory/${USER_ID}/preferences/read-only.md`;
+      storage._store.set(key, "raw content");
+      // No token here — reads are open
+      await expect(store.readFile("preferences/read-only.md")).resolves.toBe("raw content");
+      await expect(store.exists("preferences/read-only.md")).resolves.toBe(true);
+      await expect(store.listDir("preferences/")).resolves.toContain("read-only.md");
+    });
   });
 });

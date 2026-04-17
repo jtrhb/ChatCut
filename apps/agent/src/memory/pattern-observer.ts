@@ -1,6 +1,14 @@
 import { randomUUID } from "crypto";
-import type { MemoryStore } from "./memory-store.js";
 import type { ParsedMemory } from "./types.js";
+
+/** Read-only surface PatternObserver needs. Writes go through the injected
+ *  writer callback so MasterAgent remains the sole memory writer (spec §9.4). */
+interface MemoryReader {
+  listDir(path: string): Promise<string[]>;
+  readParsed(path: string): Promise<ParsedMemory>;
+}
+
+type MemoryWriter = (path: string, memory: ParsedMemory) => Promise<void>;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -29,10 +37,12 @@ export interface CrystallizeSkillParams {
 // ---------------------------------------------------------------------------
 
 export class PatternObserver {
-  private readonly memoryStore: MemoryStore;
+  private readonly reader: MemoryReader;
+  private readonly writeMemory: MemoryWriter;
 
-  constructor(deps: { memoryStore: MemoryStore }) {
-    this.memoryStore = deps.memoryStore;
+  constructor(deps: { memoryReader: MemoryReader; writeMemory: MemoryWriter }) {
+    this.reader = deps.memoryReader;
+    this.writeMemory = deps.writeMemory;
   }
 
   // ── analyzePatterns ──────────────────────────────────────────────────────
@@ -221,7 +231,7 @@ export class PatternObserver {
       ? `brands/${scopeRef.replace("series:", "").split(":")[0] ?? "unknown"}/_skills/${name}.md`
       : `brands/${scopeRef.replace("brand:", "")}/_skills/${name}.md`;
 
-    await this.memoryStore.writeMemory(basePath, skill);
+    await this.writeMemory(basePath, skill);
 
     return skill;
   }
@@ -239,13 +249,13 @@ export class PatternObserver {
       ? `brands/${brand}/series/${series}/`
       : `brands/${brand}/`;
 
-    const filenames = await this.memoryStore.listDir(dirPath);
+    const filenames = await this.reader.listDir(dirPath);
     const memories: ParsedMemory[] = [];
 
     for (const filename of filenames) {
       if (!filename.endsWith(".md")) continue;
       try {
-        const mem = await this.memoryStore.readParsed(`${dirPath}${filename}`);
+        const mem = await this.reader.readParsed(`${dirPath}${filename}`);
         memories.push(mem);
       } catch {
         // Skip unreadable files

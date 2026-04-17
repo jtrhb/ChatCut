@@ -22,10 +22,36 @@ interface ObjectStorageLike {
 export class MemoryStore {
   private readonly storage: ObjectStorageLike;
   private readonly userPrefix: string;
+  /**
+   * Per-instance writer token. Held privately on construction and handed to
+   * MasterAgent exactly once via grantWriterToken(). writeMemory checks this
+   * token so writes can only originate from whoever holds it. Per spec §9.4,
+   * that is MasterAgent — the sole memory writer.
+   */
+  private readonly writerToken = Symbol("memory-writer");
+  private tokenGranted = false;
 
   constructor(storage: ObjectStorageLike, userId: string) {
     this.storage = storage;
     this.userPrefix = `chatcut-memory/${userId}`;
+  }
+
+  /**
+   * Hand out the writer token. MUST only be called from MasterAgent
+   * construction. Throws on repeat issuance so the token cannot be
+   * re-granted to another holder. If a test needs a write-capable handle,
+   * it should instantiate MasterAgent (or call this once and use the
+   * returned symbol as a "master stand-in").
+   */
+  grantWriterToken(): symbol {
+    if (this.tokenGranted) {
+      throw new Error(
+        "MemoryStore writer token already granted; MasterAgent is the sole writer " +
+        "and only one grant is permitted per store instance.",
+      );
+    }
+    this.tokenGranted = true;
+    return this.writerToken;
   }
 
   // ---------------------------------------------------------------------------
@@ -53,8 +79,21 @@ export class MemoryStore {
     return parseFrontmatter(raw);
   }
 
-  /** Serialize a ParsedMemory to markdown and upload to R2. */
-  async writeMemory(path: string, memory: ParsedMemory): Promise<void> {
+  /**
+   * Serialize a ParsedMemory to markdown and upload to R2.
+   *
+   * Gated on the writer token: only the holder (MasterAgent, per spec §9.4)
+   * may call this. Non-Master code paths should invoke MasterAgent.writeMemory
+   * which internally supplies the correct token.
+   */
+  async writeMemory(token: symbol, path: string, memory: ParsedMemory): Promise<void> {
+    if (token !== this.writerToken) {
+      throw new Error(
+        "MemoryStore.writeMemory denied: a valid writer token is required. " +
+        "All writes must be routed through MasterAgent (spec §9.4 — sole memory writer).",
+      );
+    }
+
     const key = `${this.userPrefix}/${path}`;
     const markdown = this.serializeToMarkdown(memory);
 
