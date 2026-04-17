@@ -492,7 +492,15 @@ export class MasterAgent {
       case "propose_changes": {
         if (this.changesetManager) {
           const params = input as { summary: string; affectedElements: string[]; projectId?: string };
-          return this.changesetManager.propose(params);
+          // Thread the current turn's userId so ChangesetManager can stamp
+          // the owner on the pending changeset (B5 IDOR closure). Falls back
+          // to "unscoped" when identity isn't wired (dev paths); the store
+          // preserves that value so only an "unscoped" caller can decide it.
+          return this.changesetManager.propose({
+            ...params,
+            userId: this.currentIdentity?.userId ?? "unscoped",
+            projectId: params.projectId ?? this.currentIdentity?.projectId ?? "default",
+          });
         }
         return { error: "propose_changes unavailable: ChangesetManager not configured for this session" };
       }
