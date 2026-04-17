@@ -408,6 +408,33 @@ describe("MasterAgent", () => {
       expect(result.error).toContain("sub-agent exploded");
     });
 
+    it("review D2: releases the write lock even without serverCore on dispatcher throw", async () => {
+      // Regression for a silent lock-leak path: dispatcher throws, no
+      // serverCore wired (so rollback path is the `if (this.serverCore)` no-op),
+      // but the writeLock.release() in the finally block MUST still fire.
+      const editorDispatcher = vi
+        .fn<(input: DispatchInput) => Promise<DispatchOutput>>()
+        .mockRejectedValue(new Error("boom-no-core"));
+      dispatchers.set("editor", editorDispatcher);
+
+      const masterNoCore = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        // No serverCore wired on purpose
+      });
+      void masterNoCore;
+
+      const releaseSpy = vi.spyOn(writeLock, "release");
+      const acquireSpy = vi.spyOn(writeLock, "acquire");
+
+      await runtime.callTool("dispatch_editor", { task: "x", accessMode: "write" });
+
+      expect(acquireSpy).toHaveBeenCalledOnce();
+      expect(releaseSpy).toHaveBeenCalledOnce();
+    });
+
     it("releases the write lock even when dispatcher throws (lock + rollback compose)", async () => {
       const rollbackSpy = vi.fn().mockReturnValue(0);
       const serverCoreMock = { rollbackByTaskId: rollbackSpy } as any;

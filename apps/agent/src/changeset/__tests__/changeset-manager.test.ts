@@ -320,6 +320,30 @@ describe("ChangesetManager", () => {
       // No actor — owner check skipped
       await expect(manager.approve(cs.changesetId)).resolves.toBeUndefined();
     });
+
+    it("review D4: no-actor approve STILL enforces staleness (the check is unconditional)", async () => {
+      // Review flagged: owner check is gated on `if (actor)`, but staleness
+      // must run regardless so a legacy caller can't bypass it by dropping
+      // the actor arg. Pin this invariant.
+      const { manager, serverCore } = makeManager();
+      const cs = await manager.propose({ summary: "s", affectedElements: [] });
+      // Simulate concurrent state change
+      (serverCore as unknown as { _version: number })._version++;
+
+      await expect(manager.approve(cs.changesetId)).rejects.toThrowError(StaleStateError);
+    });
+
+    it("review D4: no-actor reject also enforces staleness", async () => {
+      const { manager, changeLog } = makeManager();
+      const cs = await manager.propose({ summary: "s", affectedElements: [] });
+      changeLog.record({
+        source: "human",
+        action: { type: "update", targetType: "element", targetId: "e1", details: {} },
+        summary: "h",
+      });
+
+      await expect(manager.reject(cs.changesetId)).rejects.toThrowError(StaleStateError);
+    });
   });
 
   describe("B5: staleness / StaleStateError", () => {
@@ -453,6 +477,39 @@ describe("ChangesetManager", () => {
       // No mods recorded
       expect(changeLog.length).toBe(entriesBefore);
       expect(manager.getChangeset(cs.changesetId)!.status).toBe("pending");
+    });
+
+    it("review D3: approveWithMods with N>0 human mods succeeds (no re-entry StaleState trap)", async () => {
+      // Pins the bugfix: approveWithMods records human mods then calls
+      // finalizeDecision directly instead of re-entering approve. Prior to
+      // that fix, the just-recorded mods would count as "intervening human
+      // entries" and the second staleness check would throw StaleStateError.
+      const { changeLog, manager } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "p1",
+      });
+
+      await expect(
+        manager.approveWithMods(
+          cs.changesetId,
+          [
+            { type: "trim", targetId: "e1", details: { start: 0 } },
+            { type: "trim", targetId: "e2", details: { start: 1 } },
+            { type: "delete", targetId: "e3", details: {} },
+          ],
+          { userId: "alice", projectId: "p1" },
+        ),
+      ).resolves.toBeUndefined();
+
+      const after = manager.getChangeset(cs.changesetId)!;
+      expect(after.status).toBe("approved");
+      // All 3 human mods landed in the ChangeLog tagged with this changesetId
+      const entries = changeLog.getAll().filter((e) => e.changesetId === cs.changesetId);
+      expect(entries).toHaveLength(3);
+      entries.forEach((e) => expect(e.source).toBe("human"));
     });
 
     it("approveWithMods throws owner-mismatch when actor doesn't match", async () => {

@@ -112,6 +112,36 @@ describe("SessionStore", () => {
       expect(store.size()).toBe(0);
     });
 
+    it("review D5: EXACTLY at maxIdleMs does NOT evict (uses `>`, not `>=`)", async () => {
+      const store = new SessionStore({ maxIdleMs: 10_000 });
+      store.set(makeSession({ sessionId: "s1" }));
+
+      // Advance exactly to the boundary: idle === maxIdleMs.
+      // Implementation uses `> maxIdleMs` so equality must still survive.
+      vi.advanceTimersByTime(10_000);
+      expect(store.get("s1")?.sessionId).toBe("s1");
+
+      // One more ms → evict.
+      vi.advanceTimersByTime(1);
+      expect(store.get("s1")).toBeUndefined();
+    });
+
+    it("review D5: listByProject and countByStatus INCLUDE fresh entries (mixed with expired)", () => {
+      const store = new SessionStore({ maxIdleMs: 10_000 });
+      store.set(makeSession({ sessionId: "stale", status: "active", projectId: "p1" }));
+
+      vi.advanceTimersByTime(8_000);
+      store.set(makeSession({ sessionId: "fresh", status: "active", projectId: "p1" }));
+
+      vi.advanceTimersByTime(3_000);
+      // `stale` now 11s idle (expired); `fresh` 3s (alive).
+
+      expect(store.countByStatus("active")).toBe(1);
+      const projectSessions = store.listByProject("p1");
+      expect(projectSessions).toHaveLength(1);
+      expect(projectSessions[0].sessionId).toBe("fresh");
+    });
+
     it("does not evict recently-touched entries when other entries expire", () => {
       const store = new SessionStore({ maxIdleMs: 10_000 });
       store.set(makeSession({ sessionId: "old" }));
