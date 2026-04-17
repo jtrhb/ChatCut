@@ -121,10 +121,23 @@ describe("HTTP Routes", () => {
     });
   });
 
-  // 7. GET /events — SSE stub
+  // 7. GET /events — SSE (B7: requires sessionId for cross-tenant isolation)
   describe("GET /events", () => {
-    it("responds with 200 and text/event-stream content type", async () => {
+    it("rejects request without sessionId (400)", async () => {
       const res = await app.request("/events");
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error?: string };
+      expect(body.error).toMatch(/sessionId/i);
+    });
+
+    it("responds with 200 and text/event-stream when sessionId provided", async () => {
+      const res = await app.request("/events?sessionId=sess-1");
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/event-stream");
+    });
+
+    it("also accepts sessionId via x-session-id header", async () => {
+      const res = await app.request("/events", { headers: { "x-session-id": "sess-h" } });
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toContain("text/event-stream");
     });
