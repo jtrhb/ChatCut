@@ -201,6 +201,41 @@ describe("TaskRegistry", () => {
       }
     });
 
+    it("review design-flag fix: getTask lazily evicts expired terminal tasks (mirrors SessionStore.get)", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      try {
+        const r = new TaskRegistry({ terminalRetentionMs: 10_000 });
+        const t = r.createTask({ type: "export", description: "old" });
+        r.completeTask(t.taskId, "ok");
+        expect(r.size()).toBe(1);
+
+        // No new createTask fires. Previously, getTask would keep returning
+        // the expired terminal task forever. Now it evicts on read.
+        vi.advanceTimersByTime(10_001);
+
+        expect(r.getTask(t.taskId)).toBeUndefined();
+        expect(r.size()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("review design-flag fix: getTask does NOT evict running/queued tasks regardless of age", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      try {
+        const r = new TaskRegistry({ terminalRetentionMs: 10_000 });
+        const t = r.createTask({ type: "export", description: "long-lived" });
+        vi.advanceTimersByTime(60_000);
+
+        expect(r.getTask(t.taskId)).toBeDefined();
+        expect(r.size()).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("evicts failed and cancelled tasks too", () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));

@@ -155,11 +155,17 @@ export class ChangesetManager {
   async approve(changesetId: string, actor?: ChangesetActor): Promise<void> {
     const changeset = this.requireDecidable(changesetId, "approve", actor);
     this.finalizeDecision(changeset, "changeset_committed", "approved");
+    // Review design-flag fix: sweep on terminal transitions too, not only
+    // on propose. A system that enters an approve/reject-only quiet phase
+    // (no new proposals) would otherwise retain terminal changesets past
+    // the retention window.
+    this.sweepTerminal();
   }
 
   async reject(changesetId: string, actor?: ChangesetActor): Promise<void> {
     const changeset = this.requireDecidable(changesetId, "reject", actor);
     this.finalizeDecision(changeset, "changeset_rejected", "rejected");
+    this.sweepTerminal();
   }
 
   async approveWithMods(

@@ -62,6 +62,21 @@ export class TaskRegistry {
   getTask(taskId: string): AgentTask | undefined {
     const task = this.tasks.get(taskId);
     if (!task) return undefined;
+    // Review design-flag fix: lazily evict expired terminal tasks on read
+    // as well as write, so callers don't receive a task that's past the
+    // retention window just because no new createTask has fired recently.
+    // Mirrors SessionStore.get's lazy expiration pattern.
+    const terminal =
+      task.status === "completed" ||
+      task.status === "failed" ||
+      task.status === "cancelled";
+    if (
+      terminal &&
+      Date.now() - task.updatedAt > this.terminalRetentionMs
+    ) {
+      this.tasks.delete(taskId);
+      return undefined;
+    }
     return { ...task };
   }
 

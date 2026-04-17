@@ -110,6 +110,29 @@ describe("B5: Changeset routes (wired ChangesetManager)", () => {
     expect(res.status).toBe(401);
   });
 
+  it("review design-flag fix: 401 gates BEFORE body validation (don't leak schema to unauth callers)", async () => {
+    // Missing header AND invalid body. Prior behavior: Zod-first → 400,
+    // which leaked the body schema (via `issues`) to unauthenticated
+    // callers. Fix: auth-first → 401, no schema hints.
+    const res = await app.request("/changeset/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ /* no changesetId, no projectId */ }),
+    });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error?: string; issues?: unknown };
+    expect(body.issues).toBeUndefined();
+  });
+
+  it("review design-flag fix: reject path also gates auth BEFORE body validation", async () => {
+    const res = await app.request("/changeset/reject", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(401);
+  });
+
   it("approves successfully when actor matches owner", async () => {
     const cs = await manager.propose({
       summary: "s",

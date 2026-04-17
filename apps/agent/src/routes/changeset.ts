@@ -48,6 +48,14 @@ export function createChangesetRouter(deps: {
   };
 
   router.post("/approve", async (c) => {
+    // Review design-flag fix: auth gate runs BEFORE body parsing so an
+    // unauthenticated caller can't learn the body schema (issues list) by
+    // sending malformed bodies. 401 wins over 400.
+    const userId = c.req.header("x-user-id");
+    if (!userId) {
+      return c.json({ error: "Missing x-user-id header" }, 401);
+    }
+
     let body: unknown;
     try {
       body = await c.req.json();
@@ -62,11 +70,6 @@ export function createChangesetRouter(deps: {
 
     if (!changesetManager) {
       return c.json({ error: "ChangesetManager not configured" }, 503);
-    }
-
-    const userId = c.req.header("x-user-id");
-    if (!userId) {
-      return c.json({ error: "Missing x-user-id header" }, 401);
     }
 
     try {
@@ -83,6 +86,12 @@ export function createChangesetRouter(deps: {
   });
 
   router.post("/reject", async (c) => {
+    // Same auth-first ordering as /approve.
+    const userId = c.req.header("x-user-id");
+    if (!userId) {
+      return c.json({ error: "Missing x-user-id header" }, 401);
+    }
+
     let body: unknown;
     try {
       body = await c.req.json();
@@ -97,11 +106,6 @@ export function createChangesetRouter(deps: {
 
     if (!changesetManager) {
       return c.json({ error: "ChangesetManager not configured" }, 503);
-    }
-
-    const userId = c.req.header("x-user-id");
-    if (!userId) {
-      return c.json({ error: "Missing x-user-id header" }, 401);
     }
 
     try {

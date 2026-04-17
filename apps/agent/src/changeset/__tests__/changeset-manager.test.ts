@@ -578,6 +578,83 @@ describe("ChangesetManager", () => {
       }
     });
 
+    it("review design-flag fix: sweeps on approve (terminal transition), not only on propose", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      try {
+        const changeLog = new ChangeLog();
+        const serverCore = ServerEditorCore.fromSnapshot(emptyState);
+        const manager = new ChangesetManager({
+          changeLog,
+          serverCore,
+          terminalRetentionMs: 10_000,
+        });
+
+        // Seed + terminate an old approved changeset.
+        const old = await manager.propose({
+          summary: "old",
+          affectedElements: [],
+          userId: "alice",
+          projectId: "p1",
+        });
+        await manager.approve(old.changesetId, { userId: "alice", projectId: "p1" });
+
+        // Sit in the approve/reject-only pattern past the retention window.
+        vi.advanceTimersByTime(10_001);
+
+        // A NEW decide (approve) on a fresh changeset should sweep `old`.
+        const fresh = await manager.propose({
+          summary: "fresh",
+          affectedElements: [],
+          userId: "alice",
+          projectId: "p1",
+        });
+        await manager.approve(fresh.changesetId, { userId: "alice", projectId: "p1" });
+
+        expect(manager.getChangeset(old.changesetId)).toBeUndefined();
+        // `fresh` just transitioned; its decidedAt ≈ now, so it survives.
+        expect(manager.getChangeset(fresh.changesetId)).toBeDefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("review design-flag fix: sweeps on reject too", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      try {
+        const changeLog = new ChangeLog();
+        const serverCore = ServerEditorCore.fromSnapshot(emptyState);
+        const manager = new ChangesetManager({
+          changeLog,
+          serverCore,
+          terminalRetentionMs: 10_000,
+        });
+
+        const old = await manager.propose({
+          summary: "old",
+          affectedElements: [],
+          userId: "alice",
+          projectId: "p1",
+        });
+        await manager.reject(old.changesetId, { userId: "alice", projectId: "p1" });
+
+        vi.advanceTimersByTime(10_001);
+
+        const fresh = await manager.propose({
+          summary: "fresh",
+          affectedElements: [],
+          userId: "alice",
+          projectId: "p1",
+        });
+        await manager.reject(fresh.changesetId, { userId: "alice", projectId: "p1" });
+
+        expect(manager.getChangeset(old.changesetId)).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("keeps pending changesets regardless of age", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
