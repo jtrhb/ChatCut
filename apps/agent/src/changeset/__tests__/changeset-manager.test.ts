@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { ChangeLog } from "@opencut/core";
 import { ServerEditorCore } from "../../services/server-editor-core.js";
 import {
@@ -451,6 +451,88 @@ describe("ChangesetManager", () => {
           { userId: "eve", projectId: "proj-1" },
         ),
       ).rejects.toThrowError(ChangesetOwnerMismatchError);
+    });
+  });
+
+  describe("B6: terminal-state retention", () => {
+    it("evicts approved/rejected changesets past terminalRetentionMs on next propose", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      try {
+        const changeLog = new ChangeLog();
+        const serverCore = ServerEditorCore.fromSnapshot(emptyState);
+        const manager = new ChangesetManager({
+          changeLog,
+          serverCore,
+          terminalRetentionMs: 10_000,
+        });
+
+        const approved = await manager.propose({
+          summary: "a",
+          affectedElements: [],
+          userId: "alice",
+          projectId: "p1",
+        });
+        await manager.approve(approved.changesetId, { userId: "alice", projectId: "p1" });
+
+        const rejected = await manager.propose({
+          summary: "r",
+          affectedElements: [],
+          userId: "alice",
+          projectId: "p1",
+        });
+        await manager.reject(rejected.changesetId, { userId: "alice", projectId: "p1" });
+
+        // Both are terminal; wait past retention window
+        vi.advanceTimersByTime(10_001);
+
+        // Triggering propose should sweep them
+        await manager.propose({
+          summary: "fresh",
+          affectedElements: [],
+          userId: "alice",
+          projectId: "p1",
+        });
+
+        expect(manager.getChangeset(approved.changesetId)).toBeUndefined();
+        expect(manager.getChangeset(rejected.changesetId)).toBeUndefined();
+        expect(manager.size()).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps pending changesets regardless of age", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      try {
+        const changeLog = new ChangeLog();
+        const serverCore = ServerEditorCore.fromSnapshot(emptyState);
+        const manager = new ChangesetManager({
+          changeLog,
+          serverCore,
+          terminalRetentionMs: 10_000,
+        });
+
+        const pending = await manager.propose({
+          summary: "stays",
+          affectedElements: [],
+          userId: "alice",
+          projectId: "p1",
+        });
+
+        vi.advanceTimersByTime(60_000);
+        await manager.propose({
+          summary: "trigger",
+          affectedElements: [],
+          userId: "alice",
+          projectId: "p1",
+        });
+
+        expect(manager.getChangeset(pending.changesetId)).toBeDefined();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

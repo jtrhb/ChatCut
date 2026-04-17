@@ -66,13 +66,54 @@ export class ChangesetManager {
   private readonly serverCore: ServerEditorCore;
   private readonly changesets = new Map<string, PendingChangeset>();
   private currentPendingId: string | null = null;
+  /**
+   * How long to retain terminal (approved / rejected) changesets after
+   * their decidedAt timestamp. Pending changesets are never evicted —
+   * they require an explicit decide. Default 7 days.
+   */
+  private readonly terminalRetentionMs: number;
 
-  constructor(deps: { changeLog: ChangeLog; serverCore: ServerEditorCore }) {
+  constructor(deps: {
+    changeLog: ChangeLog;
+    serverCore: ServerEditorCore;
+    terminalRetentionMs?: number;
+  }) {
     this.changeLog = deps.changeLog;
     this.serverCore = deps.serverCore;
+    this.terminalRetentionMs = deps.terminalRetentionMs ?? 7 * 24 * 60 * 60 * 1000;
+  }
+
+  /**
+   * Opportunistic sweep: drop approved / rejected changesets whose
+   * decidedAt is older than the retention window. Called from propose
+   * so the map can't grow unbounded over the life of a long-running
+   * agent process. Pending entries are always preserved.
+   */
+  private sweepTerminal(): number {
+    const now = Date.now();
+    let removed = 0;
+    for (const [id, cs] of this.changesets) {
+      if (
+        (cs.status === "approved" || cs.status === "rejected") &&
+        cs.decidedAt !== undefined &&
+        now - cs.decidedAt > this.terminalRetentionMs
+      ) {
+        this.changesets.delete(id);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  /** Exposed for tests + health endpoints. */
+  size(): number {
+    return this.changesets.size;
   }
 
   async propose(params: ProposeParams): Promise<PendingChangeset> {
+    // Opportunistic retention sweep — bounds the map without a timer.
+    this.sweepTerminal();
+
     // Record boundary cursor (length - 1, or -1 if empty)
     const boundaryCursor = this.changeLog.length - 1;
 

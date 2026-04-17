@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { TaskRegistry } from "../task-registry.js";
 
 describe("TaskRegistry", () => {
@@ -164,5 +164,61 @@ describe("TaskRegistry", () => {
     const childIds = children.map((c) => c.taskId);
     expect(childIds).toContain(child1.taskId);
     expect(childIds).toContain(child2.taskId);
+  });
+
+  describe("B6: terminal-state retention", () => {
+    it("evicts completed tasks past terminalRetentionMs on next createTask", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      try {
+        const r = new TaskRegistry({ terminalRetentionMs: 10_000 });
+        const t1 = r.createTask({ type: "export", description: "old" });
+        r.completeTask(t1.taskId, "ok");
+
+        vi.advanceTimersByTime(10_001);
+        r.createTask({ type: "export", description: "fresh" });
+
+        expect(r.getTask(t1.taskId)).toBeUndefined();
+        expect(r.size()).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps running/queued tasks regardless of age", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      try {
+        const r = new TaskRegistry({ terminalRetentionMs: 10_000 });
+        const running = r.createTask({ type: "export", description: "long-lived" });
+
+        vi.advanceTimersByTime(60_000);
+        r.createTask({ type: "export", description: "trigger sweep" });
+
+        expect(r.getTask(running.taskId)).toBeDefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("evicts failed and cancelled tasks too", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      try {
+        const r = new TaskRegistry({ terminalRetentionMs: 1_000 });
+        const f = r.createTask({ type: "export", description: "fail" });
+        const c = r.createTask({ type: "export", description: "cancel" });
+        r.failTask(f.taskId, "boom");
+        r.cancelTask(c.taskId);
+
+        vi.advanceTimersByTime(2_000);
+        r.createTask({ type: "export", description: "new" });
+
+        expect(r.getTask(f.taskId)).toBeUndefined();
+        expect(r.getTask(c.taskId)).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

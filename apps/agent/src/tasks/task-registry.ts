@@ -2,8 +2,24 @@ import type { AgentTask, CreateTaskParams, TaskStatus } from "./types.js";
 
 export class TaskRegistry {
   private tasks = new Map<string, AgentTask>();
+  /**
+   * How long to retain terminal tasks (completed / failed / cancelled)
+   * after their last updatedAt. Running/queued tasks are never evicted
+   * — they require a terminal transition. Default 7 days, same as
+   * ChangesetManager.
+   */
+  private readonly terminalRetentionMs: number;
+
+  constructor(opts?: { terminalRetentionMs?: number }) {
+    this.terminalRetentionMs = opts?.terminalRetentionMs ?? 7 * 24 * 60 * 60 * 1000;
+  }
 
   createTask(params: CreateTaskParams): AgentTask {
+    // Opportunistic retention sweep — bounds the map without a background
+    // timer. Running tasks are untouched; only terminal-state tasks past
+    // the retention window get evicted.
+    this.sweepTerminal();
+
     const now = Date.now();
     const task: AgentTask = {
       taskId: crypto.randomUUID(),
@@ -19,6 +35,28 @@ export class TaskRegistry {
     };
     this.tasks.set(task.taskId, task);
     return { ...task };
+  }
+
+  /** Drop terminal tasks whose updatedAt is older than the retention window. */
+  private sweepTerminal(): number {
+    const now = Date.now();
+    let removed = 0;
+    for (const [id, task] of this.tasks) {
+      const terminal =
+        task.status === "completed" ||
+        task.status === "failed" ||
+        task.status === "cancelled";
+      if (terminal && now - task.updatedAt > this.terminalRetentionMs) {
+        this.tasks.delete(id);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  /** Exposed for tests + health endpoints. */
+  size(): number {
+    return this.tasks.size;
   }
 
   getTask(taskId: string): AgentTask | undefined {
