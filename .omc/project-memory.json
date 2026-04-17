@@ -1,0 +1,427 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775197846393,
+  "projectRoot": "/Users/bitpravda/Documents/OpenCut",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "next",
+        "version": "16.1.3",
+        "category": "fullstack"
+      }
+    ],
+    "packageManager": "npm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "bun test",
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {
+      "dev:web": "turbo run dev --filter=@opencut/web",
+      "build:web": "turbo run build --filter=@opencut/web",
+      "dev:tools": "turbo run dev --filter=@opencut/tools",
+      "build:tools": "turbo run build --filter=@opencut/tools",
+      "start:tools": "turbo run start --filter=@opencut/tools",
+      "lint:web": "biome lint apps/web/src --max-diagnostics=1000",
+      "lint:web:fix": "biome lint apps/web/src --write --max-diagnostics=1000",
+      "format:web": "biome format apps/web/src/services/renderer --write --max-diagnostics=1000",
+      "test": "bun test",
+      "generate:fonts": "npx tsx apps/web/scripts/generate-font-sprites.ts"
+    }
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": true,
+    "workspaces": [
+      "apps/*",
+      "packages/*"
+    ],
+    "mainDirectories": [
+      "docs"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "advanced agent": {
+      "path": "advanced agent",
+      "purpose": null,
+      "fileCount": 19,
+      "lastAccessed": 1775197846381,
+      "keyFiles": [
+        "QueryEngine.ts",
+        "Task.ts",
+        "Tool.ts",
+        "commands.ts",
+        "context.ts"
+      ]
+    },
+    "apps": {
+      "path": "apps",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1775197846384,
+      "keyFiles": []
+    },
+    "codex-review-workspace": {
+      "path": "codex-review-workspace",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1775197846385,
+      "keyFiles": [
+        "review-summary.md"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 15,
+      "lastAccessed": 1775197846386,
+      "keyFiles": [
+        "actions.md",
+        "advanced-agent-borrowing-review.md",
+        "chatcut-agent-advanced-agent-borrowing.md",
+        "chatcut-agent-advanced-agent-borrowings.md",
+        "chatcut-agent-system.md"
+      ]
+    },
+    "packages": {
+      "path": "packages",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775197846386,
+      "keyFiles": []
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "",
+      "accessCount": 36,
+      "lastAccessed": 1775208208011,
+      "type": "directory"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-03-31-chatcut-implementation.md",
+      "accessCount": 22,
+      "lastAccessed": 1775051314693,
+      "type": "file"
+    },
+    {
+      "path": "packages/core/src/index.ts",
+      "accessCount": 14,
+      "lastAccessed": 1775109922621,
+      "type": "file"
+    },
+    {
+      "path": "apps/agent/src/index.ts",
+      "accessCount": 12,
+      "lastAccessed": 1775112712836,
+      "type": "file"
+    },
+    {
+      "path": "docs/chatcut-plan.md",
+      "accessCount": 11,
+      "lastAccessed": 1775051311093,
+      "type": "file"
+    },
+    {
+      "path": "tsconfig.json",
+      "accessCount": 11,
+      "lastAccessed": 1776396787790,
+      "type": "file"
+    },
+    {
+      "path": "docs/chatcut-agent-system.md",
+      "accessCount": 9,
+      "lastAccessed": 1775051311594,
+      "type": "file"
+    },
+    {
+      "path": "docs/chatcut-fanout-exploration.md",
+      "accessCount": 9,
+      "lastAccessed": 1775103889358,
+      "type": "file"
+    },
+    {
+      "path": "packages/core/package.json",
+      "accessCount": 9,
+      "lastAccessed": 1775103904444,
+      "type": "file"
+    },
+    {
+      "path": "apps/agent/package.json",
+      "accessCount": 9,
+      "lastAccessed": 1775112713273,
+      "type": "file"
+    },
+    {
+      "path": "docs/chatcut-memory-layer.md",
+      "accessCount": 8,
+      "lastAccessed": 1775051312824,
+      "type": "file"
+    },
+    {
+      "path": "apps/agent/tsconfig.json",
+      "accessCount": 8,
+      "lastAccessed": 1775203877849,
+      "type": "file"
+    },
+    {
+      "path": "docs/chatcut-architecture.md",
+      "accessCount": 7,
+      "lastAccessed": 1775051311954,
+      "type": "file"
+    },
+    {
+      "path": "package.json",
+      "accessCount": 7,
+      "lastAccessed": 1776396660966,
+      "type": "file"
+    },
+    {
+      "path": "packages/core/tsconfig.json",
+      "accessCount": 6,
+      "lastAccessed": 1775050912873,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/next.config.ts",
+      "accessCount": 6,
+      "lastAccessed": 1776396779375,
+      "type": "file"
+    },
+    {
+      "path": "docs/chatcut-research.md",
+      "accessCount": 5,
+      "lastAccessed": 1774941987420,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/package.json",
+      "accessCount": 5,
+      "lastAccessed": 1775109672185,
+      "type": "file"
+    },
+    {
+      "path": "turbo.json",
+      "accessCount": 4,
+      "lastAccessed": 1774946726287,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/types/timeline.ts",
+      "accessCount": 4,
+      "lastAccessed": 1775109879090,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/types/project.ts",
+      "accessCount": 3,
+      "lastAccessed": 1774946921577,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/core/managers/timeline-manager.ts",
+      "accessCount": 3,
+      "lastAccessed": 1774946989429,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/core/index.ts",
+      "accessCount": 3,
+      "lastAccessed": 1774946995391,
+      "type": "file"
+    },
+    {
+      "path": "AGENTS.md",
+      "accessCount": 3,
+      "lastAccessed": 1775009437398,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/core/managers/scenes-manager.ts",
+      "accessCount": 3,
+      "lastAccessed": 1775109648916,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/lib/commands/base-command.ts",
+      "accessCount": 2,
+      "lastAccessed": 1774946926940,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/lib/commands/batch-command.ts",
+      "accessCount": 2,
+      "lastAccessed": 1774946927325,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/lib/commands/timeline/element/insert-element.ts",
+      "accessCount": 2,
+      "lastAccessed": 1774946936177,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/lib/commands/timeline/element/delete-elements.ts",
+      "accessCount": 2,
+      "lastAccessed": 1774946936475,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/lib/commands/timeline/track/add-track.ts",
+      "accessCount": 2,
+      "lastAccessed": 1774946971359,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/core/managers/commands.ts",
+      "accessCount": 2,
+      "lastAccessed": 1774946988674,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/core/managers/selection-manager.ts",
+      "accessCount": 2,
+      "lastAccessed": 1774946994326,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/core/managers/save-manager.ts",
+      "accessCount": 2,
+      "lastAccessed": 1774946994755,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/types/assets.ts",
+      "accessCount": 2,
+      "lastAccessed": 1774947004325,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/drizzle.config.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774941996172,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/lib/db/schema.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774942006362,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/lib/actions/definitions.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774942009209,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1774942015828,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/app/editor/[project_id]/page.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1774942018516,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/types/editor.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774942021157,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/lib/db/index.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774942021496,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/services/storage/service.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774942023523,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/app/api/auth/[...all]/route.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774942024012,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/app/api/sounds/search/route.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774942024100,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/hooks/use-editor.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774942027053,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/core/managers/project-manager.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774946834298,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/core/managers/playback-manager.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774946834633,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/core/managers/audio-manager.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774946835150,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/core/managers/renderer-manager.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774946837518,
+      "type": "file"
+    },
+    {
+      "path": "apps/web/src/core/managers/media-manager.ts",
+      "accessCount": 1,
+      "lastAccessed": 1774946837717,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

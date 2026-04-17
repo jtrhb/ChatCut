@@ -27,3 +27,16 @@ target/
 
 # Reference codebases
 advanced agent/
+
+# OS files
+.DS_Store
+
+# Local tooling
+.claude/
+
+# Build artifacts
+apps/agent/dist/
+
+# Temp workspaces
+codex-review-workspace/
+state/
