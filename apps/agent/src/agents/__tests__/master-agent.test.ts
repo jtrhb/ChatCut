@@ -594,6 +594,115 @@ describe("MasterAgent", () => {
       expect(master.getCurrentInjectedMemoryIds()).toEqual({ memoryIds: [], skillIds: [] });
     });
 
+    it("B4 [C2 fix]: each dispatch calls loadMemories with its own agentType and appends IDs", async () => {
+      const loadMemoriesSpy = vi.fn(async (ctx: any, templateKey: string) => {
+        // Return agentType-specific IDs so we can tell the calls apart.
+        return {
+          promptText: `memory for ${ctx.agentType}`,
+          injectedMemoryIds: [`mem-${ctx.agentType}-1`],
+          injectedSkillIds: [`skill-${ctx.agentType}`],
+        };
+      });
+      const memoryLoaderMock = { loadMemories: loadMemoriesSpy } as any;
+
+      contextManager.registerBrand("proj-disp", { brand: "acme" });
+
+      const editorDispatcher = makeDispatcher("editor result");
+      dispatchers.set("editor", editorDispatcher);
+
+      const master = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        memoryLoader: memoryLoaderMock,
+      });
+
+      runtime.run.mockImplementationOnce(async () => {
+        // Dispatch a sub-agent mid-turn.
+        await runtime.callTool("dispatch_editor", {
+          task: "trim clip",
+          accessMode: "write",
+        });
+        return { text: "ok", toolCalls: [], tokensUsed: { input: 1, output: 1 } };
+      });
+
+      await master.handleUserMessage("trim something", undefined, {
+        projectId: "proj-disp",
+        sessionId: "sess-disp",
+        userId: "alice",
+      });
+
+      // loadMemories called ≥ 2 times: once for master, once for editor dispatch.
+      expect(loadMemoriesSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+      const agentTypesLoaded = loadMemoriesSpy.mock.calls.map((c) => (c[0] as any).agentType);
+      expect(agentTypesLoaded).toContain("master");
+      expect(agentTypesLoaded).toContain("editor");
+
+      // Dispatcher received the per-dispatch memory promptText in its context.
+      expect(editorDispatcher).toHaveBeenCalledOnce();
+      const dispatchArg = editorDispatcher.mock.calls[0][0] as DispatchInput;
+      expect((dispatchArg.context as any)?.memoryPromptText).toBe("memory for editor");
+    });
+
+    it("B4 [C2 fix]: propose_changes after a dispatch stamps BOTH master and sub-agent memory IDs", async () => {
+      const loadMemoriesSpy = vi.fn(async (ctx: any) => ({
+        promptText: `m-${ctx.agentType}`,
+        injectedMemoryIds: [`mem-${ctx.agentType}`],
+        injectedSkillIds: [`skill-${ctx.agentType}`],
+      }));
+      const memoryLoaderMock = { loadMemories: loadMemoriesSpy } as any;
+
+      const { ChangeLog } = await import("@opencut/core");
+      const { ServerEditorCore } = await import("../../services/server-editor-core.js");
+      const { ChangesetManager } = await import("../../changeset/changeset-manager.js");
+      const emptyState = { project: null, scenes: [], activeSceneId: null } as any;
+      const serverCore = ServerEditorCore.fromSnapshot(emptyState);
+      const changeLog = new ChangeLog();
+      const changesetManager = new ChangesetManager({ changeLog, serverCore });
+
+      contextManager.registerBrand("proj-combo", { brand: "acme" });
+
+      const editorDispatcher = makeDispatcher("ok");
+      dispatchers.set("editor", editorDispatcher);
+
+      const master = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        memoryLoader: memoryLoaderMock,
+        changesetManager,
+      });
+
+      let stampedChangeset: any;
+      runtime.run.mockImplementationOnce(async () => {
+        // First dispatch the editor (appends editor memory IDs).
+        await runtime.callTool("dispatch_editor", { task: "t", accessMode: "write" });
+        // Then propose (stamps both master + editor IDs).
+        stampedChangeset = await runtime.callTool("propose_changes", {
+          summary: "combined",
+          affectedElements: [],
+          projectId: "proj-combo",
+        });
+        return { text: "ok", toolCalls: [], tokensUsed: { input: 1, output: 1 } };
+      });
+
+      await master.handleUserMessage("go", undefined, {
+        projectId: "proj-combo",
+        sessionId: "s",
+        userId: "alice",
+      });
+
+      expect(stampedChangeset.injectedMemoryIds).toEqual(
+        expect.arrayContaining(["mem-master", "mem-editor"]),
+      );
+      expect(stampedChangeset.injectedSkillIds).toEqual(
+        expect.arrayContaining(["skill-master", "skill-editor"]),
+      );
+    });
+
     it("B4 [C1 fix]: propose_changes during the turn stamps loaded memory IDs onto the changeset", async () => {
       // End-to-end proof of spec §9.4: load memories → propose_changes →
       // the resulting PendingChangeset carries injectedMemoryIds / SkillIds.

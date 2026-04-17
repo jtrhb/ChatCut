@@ -2,6 +2,7 @@ import { nanoid } from "nanoid";
 import type { AgentRuntime } from "./runtime.js";
 import type {
   AgentConfig,
+  AgentType,
   DispatchInput,
   DispatchOutput,
 } from "./types.js";
@@ -251,7 +252,7 @@ export class MasterAgent {
    * brand mapping isn't registered — loadMemories requires a brand, so
    * we skip memory loading in that case rather than feeding a stub.
    */
-  private resolveTaskContext(): TaskContext | null {
+  private resolveTaskContext(agentType: AgentType): TaskContext | null {
     const projectId = this.currentIdentity?.projectId;
     const sessionId = this.currentIdentity?.sessionId;
     if (!projectId || !sessionId) return null;
@@ -262,8 +263,39 @@ export class MasterAgent {
       series: brandMapping.series,
       projectId,
       sessionId,
-      agentType: "master",
+      agentType,
     };
+  }
+
+  /**
+   * Shared memory-load path used by the master turn AND each sub-agent
+   * dispatch (spec §9.4 requires both). Calls memoryLoader.loadMemories
+   * with the agentType-specific TaskContext, appends the resulting
+   * injectedMemoryIds / injectedSkillIds onto the current turn so a
+   * downstream propose_changes can stamp them, and returns the MemoryContext
+   * so the caller can inject promptText where appropriate. Returns null
+   * when memory is not wired or the TaskContext can't be resolved. Loader
+   * errors are swallowed — memory is best-effort; it must not fail the
+   * user's turn.
+   */
+  private async loadMemoriesFor(
+    agentType: AgentType,
+    templateKey = "single-edit",
+  ): Promise<{ promptText: string; injectedMemoryIds: string[]; injectedSkillIds: string[] } | null> {
+    if (!this.memoryLoader) return null;
+    const taskContext = this.resolveTaskContext(agentType);
+    if (!taskContext) return null;
+    try {
+      const memoryContext = await this.memoryLoader.loadMemories(taskContext, templateKey);
+      // Append (not replace) so master-injected IDs + per-dispatch IDs
+      // both land on the eventual changeset.
+      this.currentInjectedMemoryIds.push(...memoryContext.injectedMemoryIds);
+      this.currentInjectedSkillIds.push(...memoryContext.injectedSkillIds);
+      return memoryContext;
+    } catch {
+      // Memory store unavailable — proceed without memory context.
+      return null;
+    }
   }
 
   private async runTurn(
@@ -311,23 +343,12 @@ export class MasterAgent {
     // Build system prompt with deferred listing appended
     let systemPrompt = this.buildSystemPrompt(ctx, activeSkills);
 
-    // Load relevant memories per spec §9.4 if the loader is wired AND we
-    // have enough context to build a TaskContext (brand is required). The
-    // call is best-effort: storage errors shouldn't fail the user's turn.
-    if (this.memoryLoader) {
-      const taskContext = this.resolveTaskContext();
-      if (taskContext) {
-        try {
-          const memoryContext = await this.memoryLoader.loadMemories(taskContext, "single-edit");
-          this.currentInjectedMemoryIds = memoryContext.injectedMemoryIds;
-          this.currentInjectedSkillIds = memoryContext.injectedSkillIds;
-          if (memoryContext.promptText) {
-            systemPrompt += `\n\n## Memory\n\n${memoryContext.promptText}`;
-          }
-        } catch {
-          // Memory store unavailable — proceed without memory context.
-        }
-      }
+    // Load relevant memories per spec §9.4. loadMemoriesFor handles the
+    // wired-or-not / best-effort concerns and mutates the per-turn injected
+    // IDs; we just need to inject promptText when available.
+    const masterMemory = await this.loadMemoriesFor("master");
+    if (masterMemory?.promptText) {
+      systemPrompt += `\n\n## Memory\n\n${masterMemory.promptText}`;
     }
 
     const deferredListing = deferredRegistry.getDeferredListing();
@@ -568,10 +589,28 @@ export class MasterAgent {
     // asks serverCore to roll back commands sharing this id as a unit.
     const taskId = `dispatch-${nanoid(10)}`;
 
+    // Spec §9.4: each sub-agent dispatch independently loads memories
+    // scoped to its agentType. The resulting IDs are appended to the
+    // current-turn injection list so propose_changes stamps them all.
+    // Only DispatchInput.context receives the promptText so the sub-agent
+    // can include it in its own system prompt if desired.
+    const subAgentMemory = await this.loadMemoriesFor(route.agentKey as AgentType);
+
+    // Merge the caller-supplied context with the per-dispatch memory
+    // promptText (if any) so the sub-agent dispatcher can prepend it to
+    // its system prompt without the sub-agent having to reach for the
+    // memory loader directly.
+    const mergedContext = subAgentMemory?.promptText
+      ? {
+          ...(rawInput.context as Record<string, unknown> | undefined),
+          memoryPromptText: subAgentMemory.promptText,
+        }
+      : (rawInput.context as Record<string, unknown> | undefined);
+
     const dispatchInput: DispatchInput = {
       task: rawInput.task as string,
       accessMode,
-      context: rawInput.context as Record<string, unknown> | undefined,
+      context: mergedContext,
       constraints: rawInput.constraints as DispatchInput["constraints"],
       identity: {
         userId: this.currentIdentity?.userId,
