@@ -41,6 +41,15 @@ interface ProposeParams {
   affectedElements: string[];
   projectId?: string;
   userId?: string;
+  /**
+   * Memory IDs loaded into the agent prompt during the turn that
+   * produced this changeset. Stamped per spec §9.4 so approve /
+   * reject can run reinforceRelatedMemories / analyze-bad-decisions
+   * later. Optional — absent for legacy or unscoped callers.
+   */
+  injectedMemoryIds?: string[];
+  /** Skill IDs injected during the same turn. Same rationale as above. */
+  injectedSkillIds?: string[];
 }
 
 interface Modification {
@@ -133,8 +142,8 @@ export class ChangesetManager {
         trackIds: [],
         timeRanges: [],
       },
-      injectedMemoryIds: [],
-      injectedSkillIds: [],
+      injectedMemoryIds: params.injectedMemoryIds ?? [],
+      injectedSkillIds: params.injectedSkillIds ?? [],
       createdAt: Date.now(),
     };
 

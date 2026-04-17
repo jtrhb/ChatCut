@@ -533,7 +533,7 @@ describe("MasterAgent", () => {
       );
     });
 
-    it("B4: getCurrentInjectedMemoryIds returns injected IDs after loadMemories runs", async () => {
+    it("B4: loadMemories is called with resolved TaskContext (brand, series, projectId, sessionId, agentType)", async () => {
       const loadMemoriesSpy = vi.fn().mockResolvedValue({
         promptText: "## Memory: prefer quick cuts",
         injectedMemoryIds: ["mem-a", "mem-b"],
@@ -541,7 +541,6 @@ describe("MasterAgent", () => {
       });
       const memoryLoaderMock = { loadMemories: loadMemoriesSpy } as any;
 
-      // Register a brand mapping so resolveTaskContext returns a valid context
       contextManager.registerBrand("proj-1", { brand: "acme", series: "spring" });
 
       const masterWithLoader = new MasterAgent({
@@ -568,11 +567,91 @@ describe("MasterAgent", () => {
         agentType: "master",
       });
       expect(templateKey).toBe("single-edit");
+    });
 
-      const injected = masterWithLoader.getCurrentInjectedMemoryIds();
-      // After the turn ends the IDs are cleared (reset in finally).
-      expect(injected.memoryIds).toEqual([]);
-      expect(injected.skillIds).toEqual([]);
+    it("B4: getCurrentInjectedMemoryIds is cleared in the finally block after a turn", async () => {
+      const memoryLoaderMock = {
+        loadMemories: vi.fn().mockResolvedValue({
+          promptText: "...",
+          injectedMemoryIds: ["mem-a", "mem-b"],
+          injectedSkillIds: ["skill-1"],
+        }),
+      } as any;
+      contextManager.registerBrand("proj-1", { brand: "acme" });
+
+      const master = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        memoryLoader: memoryLoaderMock,
+      });
+
+      await master.handleUserMessage("x", undefined, { projectId: "proj-1", sessionId: "s" });
+
+      // Post-turn reset invariant (so a subsequent turn with no loader doesn't
+      // accidentally stamp stale IDs onto a fresh changeset).
+      expect(master.getCurrentInjectedMemoryIds()).toEqual({ memoryIds: [], skillIds: [] });
+    });
+
+    it("B4 [C1 fix]: propose_changes during the turn stamps loaded memory IDs onto the changeset", async () => {
+      // End-to-end proof of spec §9.4: load memories → propose_changes →
+      // the resulting PendingChangeset carries injectedMemoryIds / SkillIds.
+      const { ChangeLog } = await import("@opencut/core");
+      const { ServerEditorCore } = await import("../../services/server-editor-core.js");
+      const { ChangesetManager } = await import("../../changeset/changeset-manager.js");
+
+      const emptyState = { project: null, scenes: [], activeSceneId: null } as any;
+      const serverCore = ServerEditorCore.fromSnapshot(emptyState);
+      const changeLog = new ChangeLog();
+      const changesetManager = new ChangesetManager({ changeLog, serverCore });
+
+      const memoryLoaderMock = {
+        loadMemories: vi.fn().mockResolvedValue({
+          promptText: "## Memory: relevant rules",
+          injectedMemoryIds: ["mem-loaded-A", "mem-loaded-B"],
+          injectedSkillIds: ["skill-loaded-X"],
+        }),
+      } as any;
+
+      contextManager.registerBrand("proj-stamp", { brand: "acme" });
+
+      const master = new MasterAgent({
+        runtime: runtime as any,
+        contextManager,
+        writeLock,
+        subAgentDispatchers: dispatchers,
+        memoryLoader: memoryLoaderMock,
+        changesetManager,
+      });
+
+      // Drive a turn that, mid-flight, calls propose_changes via the tool pipeline.
+      runtime.run.mockImplementationOnce(async () => {
+        const cs = (await runtime.callTool("propose_changes", {
+          summary: "test stamping",
+          affectedElements: ["el-1"],
+          projectId: "proj-stamp",
+        })) as { changesetId: string; injectedMemoryIds: string[]; injectedSkillIds: string[] };
+
+        // The returned PendingChangeset should carry the loaded IDs.
+        expect(cs.injectedMemoryIds).toEqual(["mem-loaded-A", "mem-loaded-B"]);
+        expect(cs.injectedSkillIds).toEqual(["skill-loaded-X"]);
+
+        // And the manager's stored copy should match (defensive slice worked).
+        const stored = changesetManager.getChangeset(cs.changesetId)!;
+        expect(stored.injectedMemoryIds).toEqual(["mem-loaded-A", "mem-loaded-B"]);
+        expect(stored.injectedSkillIds).toEqual(["skill-loaded-X"]);
+
+        return { text: "ok", toolCalls: [], tokensUsed: { input: 1, output: 1 } };
+      });
+
+      await master.handleUserMessage("propose something", undefined, {
+        projectId: "proj-stamp",
+        sessionId: "sess-stamp",
+        userId: "alice",
+      });
+
+      expect(memoryLoaderMock.loadMemories).toHaveBeenCalledOnce();
     });
 
     it("B4: injects memory promptText into the system prompt", async () => {

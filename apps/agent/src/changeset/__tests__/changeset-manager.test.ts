@@ -249,6 +249,25 @@ describe("ChangesetManager", () => {
       });
       expect(cs2.userId).toBe("alice");
     });
+
+    it("C1: stores injectedMemoryIds / injectedSkillIds when provided", async () => {
+      const { manager } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        injectedMemoryIds: ["mem-a", "mem-b"],
+        injectedSkillIds: ["skill-1"],
+      });
+      expect(cs.injectedMemoryIds).toEqual(["mem-a", "mem-b"]);
+      expect(cs.injectedSkillIds).toEqual(["skill-1"]);
+    });
+
+    it("C1: defaults injected IDs to empty arrays when omitted", async () => {
+      const { manager } = makeManager();
+      const cs = await manager.propose({ summary: "s", affectedElements: [] });
+      expect(cs.injectedMemoryIds).toEqual([]);
+      expect(cs.injectedSkillIds).toEqual([]);
+    });
   });
 
   describe("B5: owner (IDOR) check", () => {
