@@ -101,53 +101,75 @@ Shipped in 3 phases (+ 1 B1 follow-up `976138a4` fixing a `ToolPipeline` ctx typ
 
 ---
 
-## Pending (ordered by original priority)
+### B4 — Master sole memory writer (5f21b160, 7d945637)
 
-### B4 — Master sole memory writer (est. 1 day)
+Shipped in 2 phases. Phase 1 splits MemoryExtractor / PatternObserver from
+MemoryStore via a reader/writer DI split and adds a per-instance writer
+token to MemoryStore (grantWriterToken throws on repeat issuance).
+Phase 2 wires MasterAgent to claim the token at construction and exposes
+writeMemory + getMemoryWriter + getCurrentInjectedMemoryIds. At
+handleUserMessage entry, if memoryLoader is wired and a TaskContext can
+be resolved (projectId + sessionId + registered brand mapping), Master
+calls loadMemories("single-edit") and appends "## Memory\n\n<prompt>"
+to the system prompt. Loader errors are swallowed (best-effort).
 
-- `agents/master-agent.ts:handleUserMessage` — call `loadMemories(taskContext, "master")` at entry; inject `promptText` into system prompt; stamp `injectedMemoryIds/SkillIds` onto any created changeset
-- `memory/memory-store.ts:writeMemory` — gate on a Master-owned writer token (or move the method onto Master)
-- `memory/memory-extractor.ts:47` — current `changeLog.on("decision", ...)` writes directly; route through Master instead
-- Spec ref: `docs/chatcut-memory-layer.md §9.4`
+### B5 — Changeset review-lock + StaleStateError + owner check (f7ee5e03, fb1146d0)
 
-### B5 — Changeset review-lock + StaleStateError + owner check (est. 0.5 day)
+Shipped in 2 phases. Phase 1 extends PendingChangeset with userId,
+baseSnapshotVersion, reviewLock. approve / reject / approveWithMods
+accept an optional ChangesetActor; on mismatch throws
+ChangesetOwnerMismatchError. Staleness is detected via snapshotVersion
+drift OR any source==="human" ChangeLog entry after the boundary cursor
+— StaleStateError carries full diagnostics. approveWithMods was
+restructured to avoid its own human mods tripping the staleness check
+on a re-entry pass.
 
-- `changeset/changeset-manager.ts:propose` — record `baseSnapshotVersion` + `reviewLock=true`
-- `approve/reject` — compare current `serverCore.snapshotVersion` to stored base; check `ChangeLog.getCommittedAfter(boundaryCursor)` for any `source==="human"` entries
-- `routes/changeset.ts` — return 409 on stale; verify `(projectId, userId)` matches stored changeset owner before action
-- `ChangesetManager.changesets` must persist `{userId, projectId}` per changeset (closes security C3 IDOR)
+Phase 2 maps domain errors to HTTP: 409 (stale), 403 (owner mismatch),
+404, 401 (missing x-user-id). MasterAgent.propose_changes threads the
+current turn's userId from currentIdentity so the changeset is stamped
+with owner at propose time.
 
-### B6 — LRU/TTL on unbounded Maps (est. 0.5 day)
+### B6 — LRU/TTL on unbounded Maps (942c794c, 938f735b)
 
-- `session/session-store.ts:sessions` Map — add TTL eviction (30-min idle per overflow pattern)
-- `changeset/changeset-manager.ts:changesets` — evict committed/rejected after N days
-- `tasks/task-registry.ts:tasks` — retention policy
-- `index.ts:26 lastAnalysisAt` — move inside a class with LRU
-- `events/event-bus.ts:34-36` — ring buffer instead of `shift()` O(n)
-- `tools/overflow-store.ts` — add `dispose()` and call from master-agent shutdown
+Shipped in 2 phases. Phase 1: EventBus history switched to a fixed-cap
+ring buffer (O(1) emit regardless of capacity, was O(n) shift).
+SessionStore gets maxIdleMs (default 30 min) + maxEntries ceiling with
+lazy expiration on get + opportunistic sweep on set. Phase 2:
+ChangesetManager + TaskRegistry gain terminalRetentionMs (default 7
+days) — approved/rejected changesets and completed/failed/cancelled
+tasks are opportunistically swept on the next write. Not addressed:
+index.ts lastAnalysisAt (per-brand timestamp map, low-impact, single
+number per key); OverflowStore.dispose already existed with an
+unref'd idle timer.
 
-### B7 — SSE event filter by session (est. 1 hour)
+### B7 — SSE event filter by session (cf2b3c3a)
 
-- `routes/events.ts:9-28` — replace `eventBus.onAll(...)` with per-session filter keyed on `sessionId` (or `userId`/`projectId`). Drops security C4 cross-tenant leak.
-- Needs: caller to provide sessionId in SSE subscription URL or header.
+Closes security C4. GET /events requires sessionId via query param
+or x-session-id header (400 if absent), filters bus events by top-level
+event.sessionId, never leaks events without a sessionId to session
+subscribers.
 
-### B8 — Replace `{} as any` stubs (est. 30 min)
+### B8 — Replace `{} as any` stubs (7ffcc653)
 
-- `index.ts:99-105` — `AssetToolExecutor` constructed with `{} as any` for `assetStore`/`brandStore`/`objectStorage`. Decide:
-  - (a) Fail-fast at boot when deps missing (skip constructing the executor — current code does this conditionally on `EMBEDDING_API_URL`, but stub-deps path still NPEs on first call)
-  - (b) Wire real `AssetStore`/`BrandStore`/`ObjectStorage` instances (requires DB + R2 creds at boot)
-- Also `index.ts:162-163` — `skillsRouter` deps have same stub
+AssetToolExecutor now only constructs when embeddingClient +
+DATABASE_URL + R2_BUCKET are all configured (dynamic import keeps the
+db module off the import graph for unconfigured boots). skillsRouter
+same deal. Disabled paths log a boot warning. Both features are now
+either fully wired or absent — never a half-stub that NPEs on first
+call.
 
 ---
 
 ## How to resume
 
+All 8 ultrareview B-items (B1-B8) landed in this session. For any new
+work on the repo:
+
 1. `export PATH="$HOME/.bun/bin:$PATH"` (bun not in default PATH)
-2. `cd /Users/bing/Documents/ChatCut && git status` — confirm on main at 2dc6317b
-3. `cd apps/agent && bun run test` — confirm 941 pass
-4. Pick next task from pending list above
-5. Follow phased execution rule from `CLAUDE.md`: ≤5 files per phase, verify tests between phases, commit at natural boundaries
-6. Update this file when closing each B-item
+2. `cd /Users/bing/Documents/ChatCut && git status` — confirm on main
+3. `cd apps/agent && bun run test` — baseline **1012 pass**
+4. `cd packages/core && bun run test` — baseline **32 pass**
+5. Follow phased execution rule from `CLAUDE.md`: ≤5 files per phase, verify tests between phases, commit at natural boundaries.
 
 ## Reference
 
