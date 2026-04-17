@@ -1,4 +1,4 @@
-import type { AgentType, ToolCallResult, ToolDefinition, ToolProgressEvent } from "./types.js";
+import type { AgentType, ToolCallResult, ToolContext, ToolDefinition, ToolProgressEvent } from "./types.js";
 import type { ToolHook, ToolHookContext } from "./hooks.js";
 import { classifyFailure, type ClassifiedFailure } from "./failure-classifier.js";
 import type { OverflowStore } from "./overflow-store.js";
@@ -29,7 +29,7 @@ export interface TraceEntry {
 type ExecutorFn = (
   name: string,
   input: unknown,
-  ctx: { agentType: AgentType; taskId: string; toolCallId?: string },
+  ctx: ToolContext,
   onProgress?: (event: ToolProgressEvent) => void,
 ) => Promise<ToolCallResult>;
 
@@ -193,7 +193,7 @@ export class ToolPipeline {
   async execute(
     toolName: string,
     input: unknown,
-    ctx: { agentType: AgentType; taskId: string; toolCallId?: string },
+    ctx: ToolContext,
     idempotencyKey?: string,
     onProgress?: (event: ToolProgressEvent) => void,
   ): Promise<PipelineResult> {
