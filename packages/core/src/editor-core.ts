@@ -61,12 +61,23 @@ export class EditorCore extends EventEmitter {
 
 	/**
 	 * Convenience method for agent-originated commands.
+	 * Optional taskId tags the command so it can be rolled back as part of a
+	 * dispatch group via rollbackByTaskId().
 	 */
-	executeAgentCommand(command: Command, agentId: string): Command {
+	executeAgentCommand(command: Command, agentId: string, taskId?: string): Command {
 		return this.command.execute({
 			command,
-			options: { source: "agent", agentId },
+			options: { source: "agent", agentId, taskId },
 		});
+	}
+
+	/**
+	 * Roll back every command executed under the given taskId. Used by the
+	 * Master agent to unwind a failed sub-agent dispatch. Returns the number
+	 * of commands that were undone.
+	 */
+	rollbackByTaskId(taskId: string): number {
+		return this.command.undoByTaskId(taskId);
 	}
 
 	/**

@@ -4,6 +4,7 @@ export interface ChangeEntry {
   source: "human" | "agent" | "system";
   agentId?: string;
   changesetId?: string;
+  taskId?: string;
   action: {
     type:
       | "insert"
