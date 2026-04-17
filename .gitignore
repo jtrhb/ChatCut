@@ -24,3 +24,6 @@ bun.lockb
 target/
 
 .cargo-tools/
+
+# Reference codebases
+advanced agent/
