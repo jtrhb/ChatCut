@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { ChangeLog } from "@opencut/core";
 import { ServerEditorCore } from "../../services/server-editor-core.js";
-import { ChangesetManager } from "../changeset-manager.js";
+import {
+  ChangesetManager,
+  StaleStateError,
+  ChangesetOwnerMismatchError,
+} from "../changeset-manager.js";
 import type { SerializedEditorState } from "@opencut/core";
 
 const emptyState: SerializedEditorState = {
@@ -192,6 +196,261 @@ describe("ChangesetManager", () => {
       await expect(manager.reject(cs.changesetId)).rejects.toThrow(
         'Cannot reject changeset with status "approved"'
       );
+    });
+  });
+
+  describe("B5: propose stores review-lock metadata", () => {
+    it("records baseSnapshotVersion from serverCore at propose time", async () => {
+      const { manager, serverCore } = makeManager();
+      const versionAtPropose = serverCore.snapshotVersion;
+
+      const cs = await manager.propose({ summary: "test", affectedElements: [] });
+
+      expect(cs.baseSnapshotVersion).toBe(versionAtPropose);
+    });
+
+    it("reviewLock starts true; flips to false after approve", async () => {
+      const { manager } = makeManager();
+      const cs = await manager.propose({
+        summary: "r",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+      expect(cs.reviewLock).toBe(true);
+
+      await manager.approve(cs.changesetId, { userId: "alice", projectId: "proj-1" });
+
+      const after = manager.getChangeset(cs.changesetId)!;
+      expect(after.reviewLock).toBe(false);
+    });
+
+    it("reviewLock flips to false after reject too", async () => {
+      const { manager } = makeManager();
+      const cs = await manager.propose({
+        summary: "r",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+      await manager.reject(cs.changesetId, { userId: "alice", projectId: "proj-1" });
+      expect(manager.getChangeset(cs.changesetId)!.reviewLock).toBe(false);
+    });
+
+    it("records owner userId (defaults to 'unscoped' when not provided)", async () => {
+      const { manager } = makeManager();
+      const cs1 = await manager.propose({ summary: "a", affectedElements: [] });
+      expect(cs1.userId).toBe("unscoped");
+
+      const cs2 = await manager.propose({
+        summary: "b",
+        affectedElements: [],
+        userId: "alice",
+      });
+      expect(cs2.userId).toBe("alice");
+    });
+  });
+
+  describe("B5: owner (IDOR) check", () => {
+    it("approve rejects an actor whose userId doesn't match the owner", async () => {
+      const { manager } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+
+      await expect(
+        manager.approve(cs.changesetId, { userId: "eve", projectId: "proj-1" }),
+      ).rejects.toThrowError(ChangesetOwnerMismatchError);
+      // And didn't terminate the changeset
+      expect(manager.getChangeset(cs.changesetId)!.status).toBe("pending");
+    });
+
+    it("approve rejects an actor whose projectId doesn't match", async () => {
+      const { manager } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+
+      await expect(
+        manager.approve(cs.changesetId, { userId: "alice", projectId: "proj-2" }),
+      ).rejects.toThrowError(ChangesetOwnerMismatchError);
+    });
+
+    it("reject also enforces owner check", async () => {
+      const { manager } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+      await expect(
+        manager.reject(cs.changesetId, { userId: "eve", projectId: "proj-1" }),
+      ).rejects.toThrowError(ChangesetOwnerMismatchError);
+    });
+
+    it("approve allowed without actor for legacy callers (backward compat)", async () => {
+      const { manager } = makeManager();
+      const cs = await manager.propose({ summary: "s", affectedElements: [] });
+      // No actor — owner check skipped
+      await expect(manager.approve(cs.changesetId)).resolves.toBeUndefined();
+    });
+  });
+
+  describe("B5: staleness / StaleStateError", () => {
+    it("throws StaleStateError when snapshotVersion has advanced during review", async () => {
+      const { manager, serverCore } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+
+      // Simulate a concurrent mutation bumping snapshotVersion
+      (serverCore as unknown as { _version: number })._version++;
+
+      await expect(
+        manager.approve(cs.changesetId, { userId: "alice", projectId: "proj-1" }),
+      ).rejects.toThrowError(StaleStateError);
+    });
+
+    it("StaleStateError carries baseSnapshotVersion / currentSnapshotVersion details", async () => {
+      const { manager, serverCore } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+      (serverCore as unknown as { _version: number })._version = 42;
+
+      try {
+        await manager.approve(cs.changesetId, { userId: "alice", projectId: "proj-1" });
+        expect.fail("should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(StaleStateError);
+        const e = err as StaleStateError;
+        expect(e.details.baseSnapshotVersion).toBe(0);
+        expect(e.details.currentSnapshotVersion).toBe(42);
+      }
+    });
+
+    it("throws StaleStateError when a human ChangeLog entry lands after boundary", async () => {
+      const { manager, changeLog } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+
+      changeLog.record({
+        source: "human",
+        action: { type: "update", targetType: "element", targetId: "e1", details: {} },
+        summary: "human edit during review",
+      });
+
+      await expect(
+        manager.approve(cs.changesetId, { userId: "alice", projectId: "proj-1" }),
+      ).rejects.toThrowError(StaleStateError);
+    });
+
+    it("tolerates agent ChangeLog entries after boundary (only human entries count)", async () => {
+      const { manager, changeLog } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+
+      changeLog.record({
+        source: "agent",
+        agentId: "editor",
+        action: { type: "update", targetType: "element", targetId: "e1", details: {} },
+        summary: "agent edit within the changeset",
+      });
+
+      await expect(
+        manager.approve(cs.changesetId, { userId: "alice", projectId: "proj-1" }),
+      ).resolves.toBeUndefined();
+    });
+
+    it("rejects the StaleStateError shape: changesetId + snapshot versions + count", async () => {
+      const { manager, serverCore, changeLog } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+      (serverCore as unknown as { _version: number })._version++;
+      changeLog.record({
+        source: "human",
+        action: { type: "update", targetType: "element", targetId: "e1", details: {} },
+        summary: "h",
+      });
+
+      try {
+        await manager.reject(cs.changesetId, { userId: "alice", projectId: "proj-1" });
+        expect.fail("should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(StaleStateError);
+        const e = err as StaleStateError;
+        expect(e.details.changesetId).toBe(cs.changesetId);
+        expect(e.details.interveningHumanEntries).toBe(1);
+        expect(e.kind).toBe("stale-state");
+      }
+    });
+  });
+
+  describe("B5: approveWithMods enforces gates", () => {
+    it("approveWithMods throws StaleStateError without recording human mods when stale", async () => {
+      const { manager, serverCore, changeLog } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+      const entriesBefore = changeLog.length;
+      (serverCore as unknown as { _version: number })._version++;
+
+      await expect(
+        manager.approveWithMods(
+          cs.changesetId,
+          [{ type: "trim", targetId: "e1", details: {} }],
+          { userId: "alice", projectId: "proj-1" },
+        ),
+      ).rejects.toThrowError(StaleStateError);
+
+      // No mods recorded
+      expect(changeLog.length).toBe(entriesBefore);
+      expect(manager.getChangeset(cs.changesetId)!.status).toBe("pending");
+    });
+
+    it("approveWithMods throws owner-mismatch when actor doesn't match", async () => {
+      const { manager } = makeManager();
+      const cs = await manager.propose({
+        summary: "s",
+        affectedElements: [],
+        userId: "alice",
+        projectId: "proj-1",
+      });
+      await expect(
+        manager.approveWithMods(
+          cs.changesetId,
+          [{ type: "trim", targetId: "e1", details: {} }],
+          { userId: "eve", projectId: "proj-1" },
+        ),
+      ).rejects.toThrowError(ChangesetOwnerMismatchError);
     });
   });
 });
