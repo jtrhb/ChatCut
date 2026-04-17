@@ -211,7 +211,7 @@ describe("ServerEditorCore", () => {
       expect(sec.editorCore.timeline.getTracks().map((t) => t.id)).toEqual(["t1"]);
     });
 
-    it("rollbackByTaskId leaves commands tagged with other taskIds in place", () => {
+    it("rollbackByTaskId leaves commands tagged with other taskIds in place (documents LIFO limitation)", () => {
       const v0 = [makeTrack("t1")];
       const v1 = [makeTrack("t1"), makeTrack("t2", "audio")];
       const v2 = [makeTrack("t1"), makeTrack("t2", "audio"), makeTrack("t3")];
@@ -222,14 +222,17 @@ describe("ServerEditorCore", () => {
 
       const undone = sec.rollbackByTaskId("task-A");
 
-      // Only 1 command was tagged with task-A
+      // Exactly 1 command tagged with task-A was undone.
       expect(undone).toBe(1);
-      // task-B command survives — but its 'before' snapshot is v1 (i.e. the
-      // world in which task-A had already been applied). Undoing task-A
-      // after task-B is out of order; this exposes the expected limitation
-      // that rollback is LIFO-safe only when the rolled-back taskId is the
-      // most recent group. We still assert rollback fired for task-A.
-      expect(sec.editorCore.timeline.getTracks()).not.toEqual(v2);
+
+      // Concrete post-state: task-A's recorded `before` was v0, so undoing it
+      // restores the tracks to v0. task-B's command is removed from history
+      // as well (LIFO limitation) — its earlier "before" ref held v1, which
+      // is now lost from the live state. This test pins the documented
+      // behavior as an executable contract rather than a prose comment.
+      const postRollback = sec.editorCore.timeline.getTracks();
+      expect(postRollback.map((t) => t.id)).toEqual(["t1"]);
+      expect(postRollback).not.toEqual(v2);
     });
 
     it("rollbackByTaskId returns 0 and does not bump version when nothing matches", () => {

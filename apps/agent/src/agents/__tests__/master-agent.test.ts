@@ -496,29 +496,62 @@ describe("MasterAgent", () => {
       expect(result.error).toContain("no core wired");
     });
 
-    it("B4: writeMemory routes through memoryStore with the master's token", async () => {
-      const grantedToken = Symbol("master-token");
-      const writeMemorySpy = vi.fn().mockResolvedValue(undefined);
-      const grantSpy = vi.fn().mockReturnValue(grantedToken);
-      const memoryStoreMock = {
-        grantWriterToken: grantSpy,
-        writeMemory: writeMemorySpy,
-      } as any;
+    it("B4: writeMemory routes through a REAL MemoryStore with the master's token (integration)", async () => {
+      // Replaces the earlier mock-only test where both sides were vi.fn() —
+      // that version passed even if MasterAgent.writeMemory forgot to
+      // forward the token. This one uses a real MemoryStore + captures
+      // the actual R2 PutObjectCommand to prove the write lands end-to-end.
+      const { MemoryStore } = await import("../../memory/memory-store.js");
+      const puts: Array<{ Key: string; Body: string }> = [];
+      const storageStub = {
+        client: {
+          send: async (cmd: any) => {
+            if (cmd?.input?.Body !== undefined) {
+              puts.push({ Key: cmd.input.Key, Body: cmd.input.Body });
+            }
+            return {};
+          },
+        },
+      };
+      const realStore = new MemoryStore(storageStub as any, "user-test");
 
       const masterWithMemory = new MasterAgent({
         runtime: runtime as any,
         contextManager,
         writeLock,
         subAgentDispatchers: dispatchers,
-        memoryStore: memoryStoreMock,
+        memoryStore: realStore,
       });
 
-      expect(grantSpy).toHaveBeenCalledOnce();
+      const mem = {
+        memory_id: "mem-real",
+        type: "preference",
+        status: "active",
+        confidence: "high",
+        source: "explicit",
+        created: "2026-01-01",
+        updated: "2026-01-01",
+        reinforced_count: 0,
+        last_reinforced_at: "2026-01-01",
+        source_change_ids: [],
+        used_in_changeset_ids: [],
+        created_session_id: "s",
+        scope: "global",
+        scope_level: "global",
+        semantic_key: "k",
+        tags: [],
+        content: "real memory content",
+      } as any;
 
-      const mem = { memory_id: "mem-1", content: "test" } as any;
-      await masterWithMemory.writeMemory("drafts/mem-1.md", mem);
+      await masterWithMemory.writeMemory("explicit/mem-real.md", mem);
 
-      expect(writeMemorySpy).toHaveBeenCalledWith(grantedToken, "drafts/mem-1.md", mem);
+      expect(puts).toHaveLength(1);
+      expect(puts[0].Key).toBe("chatcut-memory/user-test/explicit/mem-real.md");
+      expect(puts[0].Body).toContain("memory_id: mem-real");
+      expect(puts[0].Body).toContain("real memory content");
+
+      // The token gate is still structurally enforced: a second grant throws.
+      expect(() => realStore.grantWriterToken()).toThrow(/already granted/);
     });
 
     it("B4: writeMemory throws when no memoryStore was configured", async () => {

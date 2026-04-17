@@ -851,10 +851,14 @@ describe("EditorToolExecutor", () => {
   });
 
   describe("B3: taskId tagging + rollback integration", () => {
-    it("trim_element routes through CommandManager and tags history with ctx.taskId", async () => {
-      const historyLenBefore = (
-        serverCore.editorCore.command as unknown as { history: unknown[] }
-      ).history.length;
+    it("trim_element routes through CommandManager and can be rolled back via taskId", async () => {
+      // Replaces an earlier version that poked private `history` via
+      // `as unknown as { history: ... }`. Instead, we prove "routed through
+      // CommandManager" by using CommandManager's PUBLIC API: snapshotVersion
+      // bumps on execute, canUndo becomes true, and rollbackByTaskId actually
+      // reverts the mutation. No implementation-detail coupling.
+      const versionBefore = serverCore.snapshotVersion;
+      expect(serverCore.editorCore.command.canUndo()).toBe(false);
 
       await executor.execute(
         "trim_element",
@@ -862,15 +866,14 @@ describe("EditorToolExecutor", () => {
         { agentType: "editor", taskId: "dispatch-A" },
       );
 
-      const history = (
-        serverCore.editorCore.command as unknown as {
-          history: Array<{ options?: { taskId?: string; source?: string } }>;
-        }
-      ).history;
-      expect(history.length).toBe(historyLenBefore + 1);
-      const last = history[history.length - 1];
-      expect(last.options?.taskId).toBe("dispatch-A");
-      expect(last.options?.source).toBe("agent");
+      // Version bumped exactly once → went through CommandManager.execute
+      expect(serverCore.snapshotVersion).toBe(versionBefore + 1);
+      expect(serverCore.editorCore.command.canUndo()).toBe(true);
+
+      // Tag proof: rollbackByTaskId with the matching id undoes exactly 1 command
+      const undone = serverCore.rollbackByTaskId("dispatch-A");
+      expect(undone).toBe(1);
+      expect(serverCore.editorCore.command.canUndo()).toBe(false);
     });
 
     it("rollbackByTaskId reverts trim_element mutations", async () => {
@@ -923,10 +926,11 @@ describe("EditorToolExecutor", () => {
       expect(restored).toBe(beforeSnapshot);
     });
 
-    it("read-only tools do not create history entries", async () => {
-      const historyLenBefore = (
-        serverCore.editorCore.command as unknown as { history: unknown[] }
-      ).history.length;
+    it("read-only tools do not create undoable history (observable via canUndo + snapshotVersion)", async () => {
+      // Public-API proof: read-only tools must not bump snapshotVersion and
+      // must not make the command manager undoable.
+      const versionBefore = serverCore.snapshotVersion;
+      const canUndoBefore = serverCore.editorCore.command.canUndo();
 
       await executor.execute("get_timeline_state", {}, { agentType: "editor", taskId: "T" });
       await executor.execute(
@@ -935,10 +939,8 @@ describe("EditorToolExecutor", () => {
         { agentType: "editor", taskId: "T" },
       );
 
-      const historyLenAfter = (
-        serverCore.editorCore.command as unknown as { history: unknown[] }
-      ).history.length;
-      expect(historyLenAfter).toBe(historyLenBefore);
+      expect(serverCore.snapshotVersion).toBe(versionBefore);
+      expect(serverCore.editorCore.command.canUndo()).toBe(canUndoBefore);
     });
   });
 });

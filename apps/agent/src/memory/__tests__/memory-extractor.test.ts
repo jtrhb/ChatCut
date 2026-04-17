@@ -323,26 +323,31 @@ describe("MemoryExtractor", () => {
   });
 
   // ── 10. classifySignal identifies rejection patterns ─────────────────────
-  it("classifySignal identifies the type and severity from ChangeEntry array", () => {
-    const entries: ChangeEntry[] = [
-      makeChangeEntry({ action: { type: "delete", targetType: "element", targetId: "e1", details: {} }, summary: "Deleted clip" }),
-      makeChangeEntry({ action: { type: "delete", targetType: "element", targetId: "e2", details: {} }, summary: "Deleted clip" }),
-    ];
-
-    // Access via casting since classifySignal is private — test indirectly through handleRejection
-    // We verify its output affects the draft memory's content/tags
+  it("classifySignal propagates type and severity into the draft memory", async () => {
+    // Record a rejected changeset dominated by 'delete' actions (high-severity
+    // per classifySignal's highSeverityTypes set). Verify the produced memory
+    // carries the dominant type + severity in its tags + semantic_key.
     changeLog.record({
       source: "agent",
       changesetId: "cs-classify",
       action: { type: "delete", targetType: "element", targetId: "e1", details: {} },
       summary: "Deleted clip",
     });
-
-    return extractor.handleRejection("cs-classify").then((memory) => {
-      expect(memory).not.toBeNull();
-      // The signal classification should produce a meaningful semantic_key or tag
-      expect(memory!.tags.length).toBeGreaterThan(0);
+    changeLog.record({
+      source: "agent",
+      changesetId: "cs-classify",
+      action: { type: "delete", targetType: "element", targetId: "e2", details: {} },
+      summary: "Deleted clip",
     });
+
+    const memory = await extractor.handleRejection("cs-classify");
+
+    expect(memory).not.toBeNull();
+    expect(memory!.tags).toContain("delete");
+    expect(memory!.tags).toContain("high"); // severity for delete
+    expect(memory!.semantic_key).toContain("delete");
+    expect(memory!.content).toContain("delete");
+    expect(memory!.content).toContain("high");
   });
 
   // ── 11a. handleApproval updates last_reinforced_session_id ────────────────

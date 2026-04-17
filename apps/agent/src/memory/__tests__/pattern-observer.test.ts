@@ -49,21 +49,30 @@ function makeMemory(overrides: Partial<ParsedMemory> = {}): ParsedMemory {
 
 describe("PatternObserver", () => {
   let mockStore: MockStore;
+  let reader: { listDir: typeof mockStore.listDir; readParsed: typeof mockStore.readParsed };
   let observer: PatternObserver;
 
   beforeEach(() => {
     mockStore = makeMockStore();
-    // Post-B4: PatternObserver takes a read-only reader + writeMemory callback
-    // separately (spec §9.4 sole-writer rule). The mock's fields are passed
-    // through unchanged so existing assertions (mockStore.writeMemory.toHave...)
-    // keep working.
+    // Post-B4 (review fix): hand the observer a read-only object that
+    // structurally CANNOT expose writeMemory. Previously we passed
+    // mockStore's fields through — which left mockStore.writeMemory
+    // reachable if PatternObserver ever re-established a store reference.
+    // Now the reader is a fresh object with only the two read methods,
+    // so any such drift would fail in production AND in tests.
+    reader = { listDir: mockStore.listDir, readParsed: mockStore.readParsed };
     observer = new PatternObserver({
-      memoryReader: { listDir: mockStore.listDir, readParsed: mockStore.readParsed },
+      memoryReader: reader,
       writeMemory: mockStore.writeMemory,
     });
     mockStore.listDir.mockResolvedValue([]);
     mockStore.readParsed.mockResolvedValue(makeMemory());
     mockStore.writeMemory.mockResolvedValue(undefined);
+  });
+
+  it("review fix: injected reader is read-only — no writeMemory surface leaks through", () => {
+    expect((reader as any).writeMemory).toBeUndefined();
+    expect(Object.keys(reader).sort()).toEqual(["listDir", "readParsed"]);
   });
 
   // ── 1. analyzePatterns groups memories by shared tags ────────────────────
