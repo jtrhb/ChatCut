@@ -89,20 +89,51 @@ async function main() {
   // Create EditorToolExecutor backed by real ServerEditorCore
   const editorToolExecutor = new EditorToolExecutor(serverEditorCore);
 
-  // Create AssetToolExecutor when embedding credentials are available
+  // B8: Construct AssetToolExecutor only when ALL of its required infrastructure
+  // deps are available. Previously we constructed it whenever EMBEDDING_API_URL
+  // was set but passed `{} as any` for assetStore / brandStore / objectStorage
+  // — which NPE'd on the first real call. Now we fail-fast at boot: if DB or
+  // R2 aren't configured, the executor stays null and its tools are simply
+  // unavailable (the tool dispatcher returns "no registered executor") instead
+  // of crashing mid-request.
   const embeddingClient = process.env.EMBEDDING_API_URL
     ? new EmbeddingClient(process.env.EMBEDDING_API_URL, process.env.EMBEDDING_API_KEY ?? "")
     : null;
 
-  const assetToolExecutor = embeddingClient
-    ? new AssetToolExecutor({
-        assetStore: {} as any,    // DB placeholder — wired when connection is available
-        brandStore: {} as any,
-        characterStore: new CharacterStore(null as any),
-        objectStorage: {} as any,
-        embeddingClient,
-      })
-    : null;
+  const hasAssetInfra =
+    embeddingClient !== null &&
+    !!process.env.DATABASE_URL &&
+    !!process.env.R2_BUCKET;
+
+  let assetToolExecutor: AssetToolExecutor | null = null;
+  if (hasAssetInfra) {
+    // All deps are present — wire the real stores. Dynamic imports keep the
+    // db module (which throws on missing DATABASE_URL) off the import graph
+    // for dev / test boots that don't have that env set.
+    const [{ db }, { AssetStore }, { BrandStore }, { ObjectStorage }] = await Promise.all([
+      import("./db/index.js"),
+      import("./assets/asset-store.js"),
+      import("./assets/brand-store.js"),
+      import("./services/object-storage.js"),
+    ]);
+    assetToolExecutor = new AssetToolExecutor({
+      assetStore: new AssetStore(db),
+      brandStore: new BrandStore(db),
+      characterStore: new CharacterStore(db as any),
+      objectStorage: new ObjectStorage({
+        accountId: process.env.R2_ACCOUNT_ID ?? "",
+        accessKeyId: process.env.R2_ACCESS_KEY_ID ?? "",
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY ?? "",
+        bucket: process.env.R2_BUCKET!,
+      } as any),
+      embeddingClient: embeddingClient!,
+    });
+  } else if (embeddingClient) {
+    console.warn(
+      "[boot] AssetToolExecutor disabled: DATABASE_URL and R2_BUCKET must both be set " +
+      "alongside EMBEDDING_API_URL for asset tools to load.",
+    );
+  }
 
   // Create ChangesetManager for propose/approve/reject workflow
   const changeLog = new ChangeLog();
@@ -169,12 +200,36 @@ async function main() {
     eventBus,
   });
 
-  // Create /skills route for Phase 5a
-  const { createSkillsRouter } = await import("./routes/skills.js");
-  const skillsRouter = createSkillsRouter({
-    skillStore: {} as any, // DB placeholder — will be wired when DB connection is available
-    memoryStore: {} as any,
-  });
+  // B8: Construct skillsRouter only when DB + R2 are configured. Previously
+  // we passed `{} as any` for skillStore / memoryStore, which NPE'd on the
+  // first /skills request. Now the route is either fully wired or not
+  // mounted at all; createApp handles `skillsRouter: undefined` by skipping
+  // the mount so /skills simply returns 404 in unconfigured deployments.
+  let skillsRouter: import("hono").Hono | undefined = undefined;
+  if (process.env.DATABASE_URL && process.env.R2_BUCKET) {
+    const [{ createSkillsRouter }, { SkillStore }, { MemoryStore }, { ObjectStorage }, { db }] =
+      await Promise.all([
+        import("./routes/skills.js"),
+        import("./assets/skill-store.js"),
+        import("./memory/memory-store.js"),
+        import("./services/object-storage.js"),
+        import("./db/index.js"),
+      ]);
+    const r2 = new ObjectStorage({
+      accountId: process.env.R2_ACCOUNT_ID ?? "",
+      accessKeyId: process.env.R2_ACCESS_KEY_ID ?? "",
+      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY ?? "",
+      bucket: process.env.R2_BUCKET!,
+    } as any);
+    skillsRouter = createSkillsRouter({
+      skillStore: new SkillStore(db),
+      memoryStore: new MemoryStore(r2 as any, "default"),
+    });
+  } else {
+    console.warn(
+      "[boot] /skills route disabled: DATABASE_URL and R2_BUCKET must both be set to mount it.",
+    );
+  }
 
   // Create changeset router wired to real ChangesetManager
   const { createChangesetRouter } = await import("./routes/changeset.js");
