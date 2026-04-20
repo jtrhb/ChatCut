@@ -1,5 +1,10 @@
 import { serve } from "@hono/node-server";
-import { createApp, createServices, createWiredMasterAgent, createMessageHandler } from "./server.js";
+import {
+	createApp,
+	createServices,
+	createWiredMasterAgent,
+	createMessageHandler,
+} from "./server.js";
 import { SkillLoader } from "./skills/loader.js";
 import { ProjectContextManager } from "./context/project-context.js";
 import { ProjectWriteLock } from "./context/write-lock.js";
@@ -19,6 +24,8 @@ import { CharacterStore } from "./assets/character-store.js";
 import { ChangesetManager } from "./changeset/changeset-manager.js";
 import { ChangeLog } from "@opencut/core";
 import { PatternObserver } from "./memory/pattern-observer.js";
+import { MemoryExtractor } from "./memory/memory-extractor.js";
+import { ContextSynchronizer } from "./context/context-sync.js";
 import type { SkillValidator } from "./skills/skill-validator.js";
 
 // Debounce window for pattern analysis triggers (10 minutes)
@@ -30,229 +37,319 @@ const lastAnalysisAt = new Map<string, number>();
  * since the last analysis for this brand/series.
  */
 export function maybeTriggerAnalysis(
-  patternObserver: PatternObserver,
-  brand: string,
-  series?: string,
+	patternObserver: PatternObserver,
+	brand: string,
+	series?: string,
 ): void {
-  const key = `${brand}:${series ?? ""}`;
-  const lastAt = lastAnalysisAt.get(key) ?? 0;
-  if (Date.now() - lastAt > ANALYSIS_DEBOUNCE_MS) {
-    lastAnalysisAt.set(key, Date.now());
-    patternObserver.runAnalysis({ brand, series }).catch(() => {
-      // Analysis failure is non-fatal — log and continue
-    });
-  }
+	const key = `${brand}:${series ?? ""}`;
+	const lastAt = lastAnalysisAt.get(key) ?? 0;
+	if (Date.now() - lastAt > ANALYSIS_DEBOUNCE_MS) {
+		lastAnalysisAt.set(key, Date.now());
+		patternObserver.runAnalysis({ brand, series }).catch(() => {
+			// Analysis failure is non-fatal — log and continue
+		});
+	}
 }
 
 async function main() {
-  // Validate API key at startup — fail fast instead of opaque 401s per dispatch
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error("ANTHROPIC_API_KEY environment variable is required");
-  }
+	// Validate API key at startup — fail fast instead of opaque 401s per dispatch
+	const apiKey = process.env.ANTHROPIC_API_KEY;
+	if (!apiKey) {
+		throw new Error("ANTHROPIC_API_KEY environment variable is required");
+	}
 
-  // Collect available tool names for skill resolution
-  const availableToolNames = masterToolDefinitions.map((t) => t.name);
+	// Collect available tool names for skill resolution
+	const availableToolNames = masterToolDefinitions.map((t) => t.name);
 
-  // Load skill contracts before creating the app (requires async I/O)
-  const skillLoader = new SkillLoader(null); // null = preset-only mode for now
-  const skillContracts = await skillLoader.loadAllSkillContracts(
-    "master",
-    {},
-    { availableTools: availableToolNames, defaultModel: "claude-opus-4-6" },
-  );
+	// Load skill contracts before creating the app (requires async I/O)
+	const skillLoader = new SkillLoader(null); // null = preset-only mode for now
+	const skillContracts = await skillLoader.loadAllSkillContracts(
+		"master",
+		{},
+		{ availableTools: availableToolNames, defaultModel: "claude-opus-4-6" },
+	);
 
-  // Create shared services ONCE — avoids split-brain duplicates (B2 fix)
-  const services = createServices(skillContracts);
-  const { sessionManager, eventBus, eventBusHook } = services;
+	// Create shared services ONCE — avoids split-brain duplicates (B2 fix)
+	const services = createServices(skillContracts);
+	const { sessionManager, eventBus, eventBusHook } = services;
 
-  // Create shared project infrastructure
-  const contextManager = new ProjectContextManager();
-  const writeLock = new ProjectWriteLock();
+	// Create shared project infrastructure
+	const contextManager = new ProjectContextManager();
+	const writeLock = new ProjectWriteLock();
 
-  // Create a default ServerEditorCore with empty timeline.
-  // Multi-project support will create per-project cores later.
-  const serverEditorCore = ServerEditorCore.fromSnapshot({
-    project: null,
-    scenes: [{
-      id: "default",
-      name: "Scene 1",
-      isMain: true,
-      tracks: [],
-      bookmarks: [],
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    }],
-    activeSceneId: "default",
-  });
+	// Create a default ServerEditorCore with empty timeline.
+	// Multi-project support will create per-project cores later.
+	const serverEditorCore = ServerEditorCore.fromSnapshot({
+		project: null,
+		scenes: [
+			{
+				id: "default",
+				name: "Scene 1",
+				isMain: true,
+				tracks: [],
+				bookmarks: [],
+				createdAt: new Date(),
+				updatedAt: new Date(),
+			},
+		],
+		activeSceneId: "default",
+	});
 
-  // Create EditorToolExecutor backed by real ServerEditorCore
-  const editorToolExecutor = new EditorToolExecutor(serverEditorCore);
+	// Create EditorToolExecutor backed by real ServerEditorCore
+	const editorToolExecutor = new EditorToolExecutor(serverEditorCore);
 
-  // B8: Construct AssetToolExecutor only when ALL of its required infrastructure
-  // deps are available. Previously we constructed it whenever EMBEDDING_API_URL
-  // was set but passed `{} as any` for assetStore / brandStore / objectStorage
-  // — which NPE'd on the first real call. Now we fail-fast at boot: if DB or
-  // R2 aren't configured, the executor stays null and its tools are simply
-  // unavailable (the tool dispatcher returns "no registered executor") instead
-  // of crashing mid-request.
-  const embeddingClient = process.env.EMBEDDING_API_URL
-    ? new EmbeddingClient(process.env.EMBEDDING_API_URL, process.env.EMBEDDING_API_KEY ?? "")
-    : null;
+	// B8: Construct AssetToolExecutor only when ALL of its required infrastructure
+	// deps are available. Previously we constructed it whenever EMBEDDING_API_URL
+	// was set but passed `{} as any` for assetStore / brandStore / objectStorage
+	// — which NPE'd on the first real call. Now we fail-fast at boot: if DB or
+	// R2 aren't configured, the executor stays null and its tools are simply
+	// unavailable (the tool dispatcher returns "no registered executor") instead
+	// of crashing mid-request.
+	const embeddingClient = process.env.EMBEDDING_API_URL
+		? new EmbeddingClient(
+				process.env.EMBEDDING_API_URL,
+				process.env.EMBEDDING_API_KEY ?? "",
+			)
+		: null;
 
-  const hasAssetInfra =
-    embeddingClient !== null &&
-    !!process.env.DATABASE_URL &&
-    !!process.env.R2_BUCKET;
+	const hasAssetInfra =
+		embeddingClient !== null &&
+		!!process.env.DATABASE_URL &&
+		!!process.env.R2_BUCKET;
 
-  let assetToolExecutor: AssetToolExecutor | null = null;
-  if (hasAssetInfra) {
-    // All deps are present — wire the real stores. Dynamic imports keep the
-    // db module (which throws on missing DATABASE_URL) off the import graph
-    // for dev / test boots that don't have that env set.
-    const [{ db }, { AssetStore }, { BrandStore }, { ObjectStorage }] = await Promise.all([
-      import("./db/index.js"),
-      import("./assets/asset-store.js"),
-      import("./assets/brand-store.js"),
-      import("./services/object-storage.js"),
-    ]);
-    assetToolExecutor = new AssetToolExecutor({
-      assetStore: new AssetStore(db),
-      brandStore: new BrandStore(db),
-      characterStore: new CharacterStore(db as any),
-      objectStorage: new ObjectStorage({
-        accountId: process.env.R2_ACCOUNT_ID ?? "",
-        accessKeyId: process.env.R2_ACCESS_KEY_ID ?? "",
-        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY ?? "",
-        bucket: process.env.R2_BUCKET!,
-      } as any),
-      embeddingClient: embeddingClient!,
-    });
-  } else if (embeddingClient) {
-    console.warn(
-      "[boot] AssetToolExecutor disabled: DATABASE_URL and R2_BUCKET must both be set " +
-      "alongside EMBEDDING_API_URL for asset tools to load.",
-    );
-  }
+	let assetToolExecutor: AssetToolExecutor | null = null;
+	if (hasAssetInfra) {
+		// All deps are present — wire the real stores. Dynamic imports keep the
+		// db module (which throws on missing DATABASE_URL) off the import graph
+		// for dev / test boots that don't have that env set.
+		const [{ db }, { AssetStore }, { BrandStore }, { ObjectStorage }] =
+			await Promise.all([
+				import("./db/index.js"),
+				import("./assets/asset-store.js"),
+				import("./assets/brand-store.js"),
+				import("./services/object-storage.js"),
+			]);
+		assetToolExecutor = new AssetToolExecutor({
+			assetStore: new AssetStore(db),
+			brandStore: new BrandStore(db),
+			characterStore: new CharacterStore(db as any),
+			objectStorage: new ObjectStorage({
+				accountId: process.env.R2_ACCOUNT_ID ?? "",
+				accessKeyId: process.env.R2_ACCESS_KEY_ID ?? "",
+				secretAccessKey: process.env.R2_SECRET_ACCESS_KEY ?? "",
+				bucket: process.env.R2_BUCKET!,
+			} as any),
+			embeddingClient: embeddingClient!,
+		});
+	} else if (embeddingClient) {
+		console.warn(
+			"[boot] AssetToolExecutor disabled: DATABASE_URL and R2_BUCKET must both be set " +
+				"alongside EMBEDDING_API_URL for asset tools to load.",
+		);
+	}
 
-  // Create ChangesetManager for propose/approve/reject workflow
-  const changeLog = new ChangeLog();
-  const changesetManager = new ChangesetManager({ changeLog, serverCore: serverEditorCore });
+	// Create ChangesetManager for propose/approve/reject workflow
+	const changeLog = new ChangeLog();
+	const changesetManager = new ChangesetManager({
+		changeLog,
+		serverCore: serverEditorCore,
+	});
 
-  // Tool executor for sub-agents — routes to real implementations when available.
-  // Accepts optional ToolContext from the pipeline so identity (sessionId/userId)
-  // reaches the underlying executor for tenant-scoped operations.
-  const toolExecutor = async (name: string, input: unknown, context?: { agentType?: string; taskId?: string; sessionId?: string; userId?: string }) => {
-    if (editorToolExecutor.hasToolName(name)) {
-      return editorToolExecutor.execute(name, input, {
-        agentType: (context?.agentType as any) ?? "editor",
-        taskId: context?.taskId ?? "default",
-        sessionId: context?.sessionId,
-        userId: context?.userId,
-      });
-    }
-    if (assetToolExecutor?.hasToolName(name)) {
-      return assetToolExecutor.execute(name, input, {
-        agentType: (context?.agentType as any) ?? "asset",
-        taskId: context?.taskId ?? "default",
-        sessionId: context?.sessionId,
-        userId: context?.userId,
-      });
-    }
-    return { success: false, error: `Tool "${name}" has no registered executor` };
-  };
+	// ── Memory infrastructure (audit §B.MemoryStore/Loader/Extractor/PatternObserver) ──
+	// The MemoryStore is the single backing R2 client used by both the
+	// MasterAgent (writer-token claim + per-turn memory injection) AND the
+	// /skills route. Previously the skillsRouter block built its own
+	// MemoryStore which was never visible to MasterAgent — that left
+	// memoryLoader / memoryExtractor / patternObserver dormant. Hoisting
+	// here gives both consumers the same instance.
+	//
+	// ContextSynchronizer is unconditional (it only needs the in-process
+	// ChangeLog) so wiring works even without R2.
+	const contextSynchronizer = new ContextSynchronizer(changeLog);
 
-  // Build sub-agent dispatchers
-  const sharedAgentDeps = { apiKey, toolExecutor, hooks: [eventBusHook] };
-  const editorAgent = new EditorAgent(sharedAgentDeps);
-  const creatorAgent = new CreatorAgent(sharedAgentDeps);
-  const audioAgent = new AudioAgent(sharedAgentDeps);
-  const visionAgent = new VisionAgent(sharedAgentDeps);
-  const assetAgent = new AssetAgent(sharedAgentDeps);
-  const verificationAgent = new VerificationAgent({ toolExecutor, apiKey });
+	let r2: import("./services/object-storage.js").ObjectStorage | null = null;
+	let memoryStore: import("./memory/memory-store.js").MemoryStore | null = null;
+	let memoryLoader: import("./memory/memory-loader.js").MemoryLoader | null =
+		null;
+	if (process.env.R2_BUCKET) {
+		const [{ ObjectStorage }, { MemoryStore }, { MemoryLoader }] =
+			await Promise.all([
+				import("./services/object-storage.js"),
+				import("./memory/memory-store.js"),
+				import("./memory/memory-loader.js"),
+			]);
+		r2 = new ObjectStorage({
+			accountId: process.env.R2_ACCOUNT_ID ?? "",
+			accessKeyId: process.env.R2_ACCESS_KEY_ID ?? "",
+			secretAccessKey: process.env.R2_SECRET_ACCESS_KEY ?? "",
+			bucket: process.env.R2_BUCKET!,
+		} as any);
+		// The user-id scope here matches the skill-store fallback ("default").
+		// Replace with per-request user scoping when the auth middleware lands.
+		memoryStore = new MemoryStore(r2 as any, "default");
+		memoryLoader = new MemoryLoader(memoryStore);
+	} else {
+		console.warn(
+			"[boot] Memory layer disabled: R2_BUCKET not set. MasterAgent will run without memory injection.",
+		);
+	}
 
-  const subAgentDispatchers = new Map<string, (input: DispatchInput) => Promise<DispatchOutput>>([
-    ["editor", (input) => editorAgent.dispatch(input)],
-    ["creator", (input) => creatorAgent.dispatch(input)],
-    ["audio", (input) => audioAgent.dispatch(input)],
-    ["vision", (input) => visionAgent.dispatch(input)],
-    ["asset", (input) => assetAgent.dispatch(input)],
-    ["verification", (input) => verificationAgent.dispatch(input)],
-  ]);
+	// Tool executor for sub-agents — routes to real implementations when available.
+	// Accepts optional ToolContext from the pipeline so identity (sessionId/userId)
+	// reaches the underlying executor for tenant-scoped operations.
+	const toolExecutor = async (
+		name: string,
+		input: unknown,
+		context?: {
+			agentType?: string;
+			taskId?: string;
+			sessionId?: string;
+			userId?: string;
+		},
+	) => {
+		if (editorToolExecutor.hasToolName(name)) {
+			return editorToolExecutor.execute(name, input, {
+				agentType: (context?.agentType as any) ?? "editor",
+				taskId: context?.taskId ?? "default",
+				sessionId: context?.sessionId,
+				userId: context?.userId,
+			});
+		}
+		if (assetToolExecutor?.hasToolName(name)) {
+			return assetToolExecutor.execute(name, input, {
+				agentType: (context?.agentType as any) ?? "asset",
+				taskId: context?.taskId ?? "default",
+				sessionId: context?.sessionId,
+				userId: context?.userId,
+			});
+		}
+		return {
+			success: false,
+			error: `Tool "${name}" has no registered executor`,
+		};
+	};
 
-  // Wire MasterAgent — turn tracking is per-request in messageHandler (B3 fix)
-  const { taskRegistry } = services;
-  const masterAgent = createWiredMasterAgent({
-    apiKey,
-    contextManager,
-    writeLock,
-    eventBusHook,
-    skillContracts,
-    subAgentDispatchers,
-    changesetManager,
-    taskRegistry,
-    serverCore: serverEditorCore,
-  });
+	// Build sub-agent dispatchers
+	const sharedAgentDeps = { apiKey, toolExecutor, hooks: [eventBusHook] };
+	const editorAgent = new EditorAgent(sharedAgentDeps);
+	const creatorAgent = new CreatorAgent(sharedAgentDeps);
+	const audioAgent = new AudioAgent(sharedAgentDeps);
+	const visionAgent = new VisionAgent(sharedAgentDeps);
+	const assetAgent = new AssetAgent(sharedAgentDeps);
+	const verificationAgent = new VerificationAgent({ toolExecutor, apiKey });
 
-  const messageHandler = createMessageHandler({
-    masterAgent,
-    sessionManager,
-    eventBus,
-  });
+	const subAgentDispatchers = new Map<
+		string,
+		(input: DispatchInput) => Promise<DispatchOutput>
+	>([
+		["editor", (input) => editorAgent.dispatch(input)],
+		["creator", (input) => creatorAgent.dispatch(input)],
+		["audio", (input) => audioAgent.dispatch(input)],
+		["vision", (input) => visionAgent.dispatch(input)],
+		["asset", (input) => assetAgent.dispatch(input)],
+		["verification", (input) => verificationAgent.dispatch(input)],
+	]);
 
-  // B8: Construct skillsRouter only when DB + R2 are configured. Previously
-  // we passed `{} as any` for skillStore / memoryStore, which NPE'd on the
-  // first /skills request. Now the route is either fully wired or not
-  // mounted at all; createApp handles `skillsRouter: undefined` by skipping
-  // the mount so /skills simply returns 404 in unconfigured deployments.
-  let skillsRouter: import("hono").Hono | undefined = undefined;
-  if (process.env.DATABASE_URL && process.env.R2_BUCKET) {
-    const [{ createSkillsRouter }, { SkillStore }, { MemoryStore }, { ObjectStorage }, { db }] =
-      await Promise.all([
-        import("./routes/skills.js"),
-        import("./assets/skill-store.js"),
-        import("./memory/memory-store.js"),
-        import("./services/object-storage.js"),
-        import("./db/index.js"),
-      ]);
-    const r2 = new ObjectStorage({
-      accountId: process.env.R2_ACCOUNT_ID ?? "",
-      accessKeyId: process.env.R2_ACCESS_KEY_ID ?? "",
-      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY ?? "",
-      bucket: process.env.R2_BUCKET!,
-    } as any);
-    skillsRouter = createSkillsRouter({
-      skillStore: new SkillStore(db),
-      memoryStore: new MemoryStore(r2 as any, "default"),
-    });
-  } else {
-    console.warn(
-      "[boot] /skills route disabled: DATABASE_URL and R2_BUCKET must both be set to mount it.",
-    );
-  }
+	// Wire MasterAgent — turn tracking is per-request in messageHandler (B3 fix)
+	const { taskRegistry } = services;
+	const masterAgent = createWiredMasterAgent({
+		apiKey,
+		contextManager,
+		writeLock,
+		eventBusHook,
+		skillContracts,
+		subAgentDispatchers,
+		changesetManager,
+		taskRegistry,
+		serverCore: serverEditorCore,
+		memoryStore: memoryStore ?? undefined,
+		memoryLoader: memoryLoader ?? undefined,
+		contextSynchronizer,
+	});
 
-  // Create changeset router wired to real ChangesetManager
-  const { createChangesetRouter } = await import("./routes/changeset.js");
-  const changesetRouter = createChangesetRouter({ changesetManager });
+	// ── Memory consumers wired AFTER MasterAgent (writer token sequencing) ──
+	// MasterAgent claims the sole writer token on construction. Extractor /
+	// PatternObserver receive the writer callback via masterAgent.getMemoryWriter()
+	// so they don't need to see the store directly (spec §9.4).
+	let patternObserver: PatternObserver | null = null;
+	if (memoryStore) {
+		const writeMemory = masterAgent.getMemoryWriter();
+		const extractor = new MemoryExtractor({
+			changeLog,
+			memoryReader: memoryStore,
+			writeMemory,
+		});
+		extractor.start();
+		patternObserver = new PatternObserver({
+			memoryReader: memoryStore,
+			writeMemory,
+		});
+	}
 
-  // Create app ONCE with shared services, messageHandler, and available infrastructure
-  const app = createApp({
-    services,
-    messageHandler,
-    infrastructure: { serverEditorCore, contextManager },
-    skillsRouter,
-    changesetRouter,
-  });
-  const port = parseInt(process.env.PORT || "4000");
+	const messageHandler = createMessageHandler({
+		masterAgent,
+		sessionManager,
+		eventBus,
+		afterTurn: patternObserver
+			? async (identity) => {
+					const mapping = contextManager.getBrandForProject(identity.projectId);
+					if (!mapping) return;
+					maybeTriggerAnalysis(patternObserver!, mapping.brand, mapping.series);
+				}
+			: undefined,
+	});
 
-  serve({ fetch: app.fetch, port }, (info) => {
-    console.log(`ChatCut Agent Service running on http://localhost:${info.port}`);
-    console.log(`  ${subAgentDispatchers.size} sub-agents registered`);
-    if (skillContracts.length > 0) {
-      console.log(`  ${skillContracts.length} skill contract(s) loaded`);
-    }
-    console.log(`  ${availableToolNames.length} master tools available`);
-  });
+	// B8: Construct skillsRouter only when DB + R2 are configured. Previously
+	// we passed `{} as any` for skillStore / memoryStore, which NPE'd on the
+	// first /skills request. Now the route is either fully wired or not
+	// mounted at all; createApp handles `skillsRouter: undefined` by skipping
+	// the mount so /skills simply returns 404 in unconfigured deployments.
+	//
+	// Audit §B.MemoryStore fix: reuse the hoisted memoryStore (built above
+	// before MasterAgent construction) instead of creating a second instance
+	// — that split-brain was why MasterAgent's memoryStore was always
+	// undefined even when /skills had its own.
+	let skillsRouter: import("hono").Hono | undefined;
+	if (process.env.DATABASE_URL && memoryStore) {
+		const [{ createSkillsRouter }, { SkillStore }, { db }] = await Promise.all([
+			import("./routes/skills.js"),
+			import("./assets/skill-store.js"),
+			import("./db/index.js"),
+		]);
+		skillsRouter = createSkillsRouter({
+			skillStore: new SkillStore(db),
+			memoryStore,
+		});
+	} else {
+		console.warn(
+			"[boot] /skills route disabled: DATABASE_URL and R2_BUCKET must both be set to mount it.",
+		);
+	}
+
+	// Create changeset router wired to real ChangesetManager
+	const { createChangesetRouter } = await import("./routes/changeset.js");
+	const changesetRouter = createChangesetRouter({ changesetManager });
+
+	// Create app ONCE with shared services, messageHandler, and available infrastructure
+	const app = createApp({
+		services,
+		messageHandler,
+		infrastructure: { serverEditorCore, contextManager },
+		skillsRouter,
+		changesetRouter,
+	});
+	const port = parseInt(process.env.PORT || "4000");
+
+	serve({ fetch: app.fetch, port }, (info) => {
+		console.log(
+			`ChatCut Agent Service running on http://localhost:${info.port}`,
+		);
+		console.log(`  ${subAgentDispatchers.size} sub-agents registered`);
+		if (skillContracts.length > 0) {
+			console.log(`  ${skillContracts.length} skill contract(s) loaded`);
+		}
+		console.log(`  ${availableToolNames.length} master tools available`);
+	});
 }
 
 main();

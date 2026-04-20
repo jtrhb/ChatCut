@@ -23,69 +23,106 @@ import type { DispatchInput, DispatchOutput } from "./agents/types.js";
 import type { ServerEditorCore } from "./services/server-editor-core.js";
 import type { ObjectStorage } from "./services/object-storage.js";
 import type { ChangesetManager } from "./changeset/changeset-manager.js";
+import type { MemoryStore } from "./memory/memory-store.js";
+import type { MemoryLoader } from "./memory/memory-loader.js";
+import type { ContextSynchronizer } from "./context/context-sync.js";
+import type { ExplorationEngine } from "./exploration/exploration-engine.js";
 
 /** Optional infrastructure deps — wired when real backends are available. */
 export interface InfrastructureDeps {
-  serverEditorCore?: ServerEditorCore;
-  contextManager?: ProjectContextManager;
-  objectStorage?: ObjectStorage;
+	serverEditorCore?: ServerEditorCore;
+	contextManager?: ProjectContextManager;
+	objectStorage?: ObjectStorage;
 }
 
 export interface AppServices {
-  sessionManager: SessionManager;
-  taskRegistry: TaskRegistry;
-  eventBus: EventBus;
-  eventBusHook: ToolHook;
-  skillContracts: SkillContract[];
+	sessionManager: SessionManager;
+	taskRegistry: TaskRegistry;
+	eventBus: EventBus;
+	eventBusHook: ToolHook;
+	skillContracts: SkillContract[];
 }
 
 /**
  * Create a session-aware MessageHandler that wires MasterAgent execution
  * with per-request session turn tracking and event emission.
+ *
+ * @param deps.afterTurn  Optional callback invoked after every successful
+ *   handler completion. Used by the boot wiring to trigger
+ *   PatternObserver runs (audit §B.PatternObserver). Errors are
+ *   swallowed so post-turn telemetry can never fail a user turn.
  */
 export function createMessageHandler(deps: {
-  masterAgent: MasterAgent;
-  sessionManager: SessionManager;
-  eventBus: EventBus;
+	masterAgent: MasterAgent;
+	sessionManager: SessionManager;
+	eventBus: EventBus;
+	afterTurn?: (identity: {
+		sessionId: string;
+		projectId: string;
+		userId?: string;
+	}) => Promise<void> | void;
 }): MessageHandler {
-  return async (message, sessionId, identity) => {
-    deps.eventBus.emit({
-      type: "agent.turn_start",
-      timestamp: Date.now(),
-      sessionId,
-      data: { message, userId: identity?.userId, projectId: identity?.projectId },
-    });
+	return async (message, sessionId, identity) => {
+		deps.eventBus.emit({
+			type: "agent.turn_start",
+			timestamp: Date.now(),
+			sessionId,
+			data: {
+				message,
+				userId: identity?.userId,
+				projectId: identity?.projectId,
+			},
+		});
 
-    // Retrieve conversation history for multi-turn context.
-    // Cap at 50 messages to avoid exceeding model context window.
-    const MAX_HISTORY_MESSAGES = 50;
-    const session = deps.sessionManager.getSession(sessionId);
-    const history = session?.messages
-      ?.filter((m) => m.role === "user" || m.role === "assistant")
-      .slice(-MAX_HISTORY_MESSAGES)
-      .map((m) => ({ role: m.role, content: String(m.content) }))
-      ?? [];
+		// Retrieve conversation history for multi-turn context.
+		// Cap at 50 messages to avoid exceeding model context window.
+		const MAX_HISTORY_MESSAGES = 50;
+		const session = deps.sessionManager.getSession(sessionId);
+		const history =
+			session?.messages
+				?.filter((m) => m.role === "user" || m.role === "assistant")
+				.slice(-MAX_HISTORY_MESSAGES)
+				.map((m) => ({ role: m.role, content: String(m.content) })) ?? [];
 
-    const { text: response, tokensUsed } = await deps.masterAgent.handleUserMessage(
-      message,
-      history,
-      identity
-        ? { userId: identity.userId, sessionId: identity.sessionId, projectId: identity.projectId }
-        : undefined,
-    );
+		const { text: response, tokensUsed } =
+			await deps.masterAgent.handleUserMessage(
+				message,
+				history,
+				identity
+					? {
+							userId: identity.userId,
+							sessionId: identity.sessionId,
+							projectId: identity.projectId,
+						}
+					: undefined,
+			);
 
-    // Track turn on the per-request session (not a fixed default session)
-    deps.sessionManager.incrementTurn(sessionId, tokensUsed);
+		// Track turn on the per-request session (not a fixed default session)
+		deps.sessionManager.incrementTurn(sessionId, tokensUsed);
 
-    deps.eventBus.emit({
-      type: "agent.turn_end",
-      timestamp: Date.now(),
-      sessionId,
-      data: { responseLength: response.length },
-    });
+		deps.eventBus.emit({
+			type: "agent.turn_end",
+			timestamp: Date.now(),
+			sessionId,
+			data: { responseLength: response.length },
+		});
 
-    return response;
-  };
+		// Best-effort post-turn callback (PatternObserver scheduling, etc.).
+		// Errors here MUST NOT propagate — the user's turn already succeeded.
+		if (deps.afterTurn && identity?.projectId) {
+			try {
+				await deps.afterTurn({
+					sessionId,
+					projectId: identity.projectId,
+					userId: identity.userId,
+				});
+			} catch {
+				// swallow — telemetry / observers are not load-bearing
+			}
+		}
+
+		return response;
+	};
 }
 
 /**
@@ -96,29 +133,47 @@ export function createMessageHandler(deps: {
  * not bound to a fixed session here.
  */
 export function createWiredMasterAgent(deps: {
-  apiKey: string;
-  contextManager: ProjectContextManager;
-  writeLock: ProjectWriteLock;
-  eventBusHook: ToolHook;
-  skillContracts: SkillContract[];
-  subAgentDispatchers: Map<string, (input: DispatchInput) => Promise<DispatchOutput>>;
-  changesetManager?: ChangesetManager;
-  taskRegistry?: TaskRegistry;
-  serverCore?: ServerEditorCore;
+	apiKey: string;
+	contextManager: ProjectContextManager;
+	writeLock: ProjectWriteLock;
+	eventBusHook: ToolHook;
+	skillContracts: SkillContract[];
+	subAgentDispatchers: Map<
+		string,
+		(input: DispatchInput) => Promise<DispatchOutput>
+	>;
+	changesetManager?: ChangesetManager;
+	taskRegistry?: TaskRegistry;
+	serverCore?: ServerEditorCore;
+	/** Optional memory infrastructure — when provided, MasterAgent claims
+	 *  the writer token and loadMemoriesFor injects per-turn memory into
+	 *  the system prompt. */
+	memoryStore?: MemoryStore;
+	memoryLoader?: MemoryLoader;
+	/** Optional context synchronizer — when provided, runTurn prepends
+	 *  Change Log deltas to the user message (audit §A.8). */
+	contextSynchronizer?: ContextSynchronizer;
+	/** Optional fan-out engine — when provided, the explore_options master
+	 *  tool is functional instead of returning "not configured". */
+	explorationEngine?: ExplorationEngine;
 }): MasterAgent {
-  const runtime = new NativeAPIRuntime(deps.apiKey);
+	const runtime = new NativeAPIRuntime(deps.apiKey);
 
-  return new MasterAgent({
-    runtime,
-    contextManager: deps.contextManager,
-    writeLock: deps.writeLock,
-    subAgentDispatchers: deps.subAgentDispatchers,
-    hooks: [deps.eventBusHook],
-    skillContracts: deps.skillContracts,
-    changesetManager: deps.changesetManager,
-    taskRegistry: deps.taskRegistry,
-    serverCore: deps.serverCore,
-  });
+	return new MasterAgent({
+		runtime,
+		contextManager: deps.contextManager,
+		writeLock: deps.writeLock,
+		subAgentDispatchers: deps.subAgentDispatchers,
+		hooks: [deps.eventBusHook],
+		skillContracts: deps.skillContracts,
+		changesetManager: deps.changesetManager,
+		taskRegistry: deps.taskRegistry,
+		serverCore: deps.serverCore,
+		memoryStore: deps.memoryStore,
+		memoryLoader: deps.memoryLoader,
+		contextSynchronizer: deps.contextSynchronizer,
+		explorationEngine: deps.explorationEngine,
+	});
 }
 
 /**
@@ -126,53 +181,77 @@ export function createWiredMasterAgent(deps: {
  * and createWiredMasterAgent to avoid split-brain duplicates.
  */
 export function createServices(skillContracts?: SkillContract[]): AppServices {
-  const sessionStore = new SessionStore();
-  const sessionManager = new SessionManager(sessionStore);
-  const taskRegistry = new TaskRegistry();
-  const eventBus = new EventBus();
-  const eventBusHook = createEventBusHook(eventBus);
-  return { sessionManager, taskRegistry, eventBus, eventBusHook, skillContracts: skillContracts ?? [] };
+	const sessionStore = new SessionStore();
+	const sessionManager = new SessionManager(sessionStore);
+	const taskRegistry = new TaskRegistry();
+	const eventBus = new EventBus();
+	const eventBusHook = createEventBusHook(eventBus);
+	return {
+		sessionManager,
+		taskRegistry,
+		eventBus,
+		eventBusHook,
+		skillContracts: skillContracts ?? [],
+	};
 }
 
 export function createApp(opts?: {
-  services?: AppServices;
-  infrastructure?: InfrastructureDeps;
-  skillContracts?: SkillContract[];
-  messageHandler?: MessageHandler;
-  skillsRouter?: Hono;
-  changesetRouter?: Hono;
+	services?: AppServices;
+	infrastructure?: InfrastructureDeps;
+	skillContracts?: SkillContract[];
+	messageHandler?: MessageHandler;
+	skillsRouter?: Hono;
+	changesetRouter?: Hono;
 }) {
-  const app = new Hono();
+	const app = new Hono();
 
-  // Use provided services or create new ones (tests may omit services)
-  const services = opts?.services ?? createServices(opts?.skillContracts);
-  const { sessionManager, taskRegistry, eventBus, eventBusHook, skillContracts } = services;
+	// Use provided services or create new ones (tests may omit services)
+	const services = opts?.services ?? createServices(opts?.skillContracts);
+	const {
+		sessionManager,
+		taskRegistry,
+		eventBus,
+		eventBusHook,
+		skillContracts,
+	} = services;
 
-  app.use("*", cors());
-  app.get("/health", (c) => c.json({ status: "ok" }));
+	app.use("*", cors());
+	app.get("/health", (c) => c.json({ status: "ok" }));
 
-  // DI-ready routes — accept optional infrastructure deps.
-  // Without deps they return stub responses; with deps they hit real services.
-  const infra = opts?.infrastructure ?? {};
-  app.route("/commands", createCommandsRouter({ serverEditorCore: infra.serverEditorCore }));
-  app.route("/project", createProjectRouter({ contextManager: infra.contextManager }));
-  app.route("/media", createMediaRouter({ objectStorage: infra.objectStorage }));
-  app.route("/changeset", opts?.changesetRouter ?? changeset);
+	// DI-ready routes — accept optional infrastructure deps.
+	// Without deps they return stub responses; with deps they hit real services.
+	const infra = opts?.infrastructure ?? {};
+	app.route(
+		"/commands",
+		createCommandsRouter({ serverEditorCore: infra.serverEditorCore }),
+	);
+	app.route(
+		"/project",
+		createProjectRouter({ contextManager: infra.contextManager }),
+	);
+	app.route(
+		"/media",
+		createMediaRouter({ objectStorage: infra.objectStorage }),
+	);
+	app.route("/changeset", opts?.changesetRouter ?? changeset);
 
-  // DI-wired routes
-  app.route("/chat", createChatRouter({
-    sessionManager,
-    eventBus,
-    messageHandler: opts?.messageHandler,
-  }));
-  app.route("/events", createEventsRouter({ eventBus }));
-  app.route("/status", createStatusRouter({ sessionManager, taskRegistry }));
+	// DI-wired routes
+	app.route(
+		"/chat",
+		createChatRouter({
+			sessionManager,
+			eventBus,
+			messageHandler: opts?.messageHandler,
+		}),
+	);
+	app.route("/events", createEventsRouter({ eventBus }));
+	app.route("/status", createStatusRouter({ sessionManager, taskRegistry }));
 
-  // Optional /skills route — wired when skill infrastructure is available
-  if (opts?.skillsRouter) {
-    app.route("/skills", opts.skillsRouter);
-  }
+	// Optional /skills route — wired when skill infrastructure is available
+	if (opts?.skillsRouter) {
+		app.route("/skills", opts.skillsRouter);
+	}
 
-  // Expose services for external wiring
-  return Object.assign(app, { services });
+	// Expose services for external wiring
+	return Object.assign(app, { services });
 }
