@@ -26,6 +26,15 @@ export interface TaskStatus {
   resultUrl?: string;
 }
 
+/**
+ * Progress callback shape (audit Phase 4 / tool-evolution §6). Emitted
+ * once per poll cycle from waitForCompletion so the pipeline can forward
+ * `tool.progress` events on the EventBus → SSE → web. Pipeline-side
+ * wrappedProgress auto-injects toolName + toolCallId.
+ */
+export type GenerationProgressUpdate = { step: number; totalSteps?: number; text?: string };
+export type GenerationProgressCallback = (update: GenerationProgressUpdate) => void;
+
 export class GenerationClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -89,12 +98,25 @@ export class GenerationClient {
   async waitForCompletion(
     taskId: string,
     timeoutMs: number = 300_000,
-    pollIntervalMs: number = 5_000
+    pollIntervalMs: number = 5_000,
+    onProgress?: GenerationProgressCallback,
   ): Promise<string> {
     const deadline = Date.now() + timeoutMs;
+    let pollCount = 0;
 
     while (Date.now() < deadline) {
       const status = await this.checkStatus(taskId);
+      pollCount++;
+      // status.progress is a 0-100 int from the upstream provider — we
+      // pass it through as `step`. totalSteps is fixed at 100 so the
+      // event reads as "X / 100 percent done" on the wire. Per-poll
+      // emission gives the operator a heartbeat even when progress
+      // doesn't advance numerically.
+      onProgress?.({
+        step: status.progress,
+        totalSteps: 100,
+        text: `Generation ${status.status} (${status.progress}%)`,
+      });
 
       if (status.status === "completed") {
         if (!status.resultUrl) {
@@ -116,6 +138,6 @@ export class GenerationClient {
       );
     }
 
-    throw new Error(`Task ${taskId} timed out after ${timeoutMs}ms`);
+    throw new Error(`Task ${taskId} timed out after ${timeoutMs}ms (${pollCount} polls)`);
   }
 }

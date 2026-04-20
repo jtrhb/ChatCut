@@ -106,6 +106,13 @@ export function useChat(projectId: string): UseChatReturn {
 					});
 				} else if (type === "status") {
 					setAgentStatus((data.status as AgentStatus) ?? "idle");
+				} else if (type === "tool.progress") {
+					// Phase 4: surface long-call progress as a transient agent
+					// status. The full event also carries toolName / step /
+					// totalSteps / text under `data` for richer renderings later.
+					const progressData = (data.data as Record<string, unknown>) ?? {};
+					const text = (progressData.text as string | undefined) ?? "Working";
+					setAgentStatus(text as AgentStatus);
 				} else if (type === "changeset_update") {
 					const changesetId = data.changesetId as string;
 					const status = data.status as ChangesetAttachment["status"];

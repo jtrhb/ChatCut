@@ -113,6 +113,36 @@ describe("VisionClient", () => {
       expect(promptText).not.toContain("Focus on:");
     });
 
+    // Audit Phase 4 / tool-evolution §6 acceptance test #3:
+    // analyze_video must emit at least 2 tool.progress events per call.
+    it("emits at least 2 progress events for one call (Phase 4 acceptance)", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => makeGeminiResponse(MOCK_ANALYSIS),
+      });
+      const events: Array<{ step: number; totalSteps?: number; text?: string }> = [];
+
+      await client.analyzeVideo("https://example.com/video.mp4", undefined, (e) => events.push(e));
+
+      expect(events.length).toBeGreaterThanOrEqual(2);
+      // Steps are monotonic
+      for (let i = 1; i < events.length; i++) {
+        expect(events[i].step).toBeGreaterThanOrEqual(events[i - 1].step);
+      }
+      // Text descriptions are non-empty
+      for (const e of events) expect(e.text).toBeTruthy();
+    });
+
+    it("does not throw when no onProgress callback is provided (back-compat)", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => makeGeminiResponse(MOCK_ANALYSIS),
+      });
+      // No third arg — must not throw, must still return analysis.
+      const result = await client.analyzeVideo("https://example.com/video.mp4");
+      expect(result).toEqual(MOCK_ANALYSIS);
+    });
+
     it("parses the JSON from candidates[0].content.parts[0].text", async () => {
       const customAnalysis: VideoAnalysis = {
         scenes: [{ start: 1, end: 3, description: "forest path", objects: ["trees"] }],

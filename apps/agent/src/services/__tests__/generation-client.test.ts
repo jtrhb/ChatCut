@@ -234,6 +234,50 @@ describe("GenerationClient", () => {
       ).rejects.toThrow(/failed/i);
     });
 
+    // Audit Phase 4 / tool-evolution §6: generate_video must emit
+    // tool.progress per poll cycle.
+    it("emits one progress event per poll cycle (Phase 4 acceptance)", async () => {
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ status: "pending", progress: 0 }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ status: "processing", progress: 60 }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            status: "completed",
+            progress: 100,
+            resultUrl: "https://cdn.example.com/done.mp4",
+          }),
+        });
+      const events: Array<{ step: number; totalSteps?: number; text?: string }> = [];
+
+      await client.waitForCompletion("task-progress-001", 5000, 10, (e) => events.push(e));
+
+      expect(events).toHaveLength(3);
+      expect(events[0].step).toBe(0);
+      expect(events[1].step).toBe(60);
+      expect(events[2].step).toBe(100);
+      expect(events[2].text).toMatch(/100/);
+    });
+
+    it("does not throw when no onProgress callback is provided (back-compat)", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: "completed",
+          progress: 100,
+          resultUrl: "https://cdn.example.com/x.mp4",
+        }),
+      });
+      const result = await client.waitForCompletion("task-no-cb", 5000, 10);
+      expect(result).toBe("https://cdn.example.com/x.mp4");
+    });
+
     it("throws on timeout when task never completes", async () => {
       // Always return "processing" so it never finishes
       mockFetch.mockResolvedValue({

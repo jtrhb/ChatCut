@@ -5,6 +5,16 @@ export interface VideoAnalysis {
   style: string;
 }
 
+/**
+ * Progress callback shape (audit Phase 4 / tool-evolution §6). The client
+ * emits progress at long-call milestones so the pipeline can forward
+ * `tool.progress` events on the EventBus → SSE → web. Pipeline-side
+ * wrappedProgress (tool-pipeline.ts:289) auto-injects toolName +
+ * toolCallId, so clients only supply the abstract step/totalSteps/text.
+ */
+export type VisionProgressUpdate = { step: number; totalSteps?: number; text?: string };
+export type VisionProgressCallback = (update: VisionProgressUpdate) => void;
+
 export class VisionClient {
   private readonly apiKey: string;
   private readonly baseEndpoint: string;
@@ -15,7 +25,11 @@ export class VisionClient {
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent";
   }
 
-  async analyzeVideo(videoUrl: string, focus?: string): Promise<VideoAnalysis> {
+  async analyzeVideo(
+    videoUrl: string,
+    focus?: string,
+    onProgress?: VisionProgressCallback,
+  ): Promise<VideoAnalysis> {
     const focusLine = focus ? `\nFocus on: ${focus}` : "";
     const prompt = `Analyze the following video and return a JSON object with this exact structure:
 {
@@ -30,6 +44,7 @@ Video URL: ${videoUrl}${focusLine}
 Return only valid JSON, no markdown or extra text.`;
 
     const url = `${this.baseEndpoint}?key=${this.apiKey}`;
+    onProgress?.({ step: 1, totalSteps: 3, text: "Sending analysis request to Gemini" });
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -48,6 +63,7 @@ Return only valid JSON, no markdown or extra text.`;
       );
     }
 
+    onProgress?.({ step: 2, totalSteps: 3, text: "Parsing Gemini response" });
     const data = await response.json() as Record<string, unknown>;
 
     if (
@@ -73,7 +89,9 @@ Return only valid JSON, no markdown or extra text.`;
     const text = parts[0].text;
 
     try {
-      return JSON.parse(text) as VideoAnalysis;
+      const result = JSON.parse(text) as VideoAnalysis;
+      onProgress?.({ step: 3, totalSteps: 3, text: "Analysis complete" });
+      return result;
     } catch {
       throw new Error(
         `Failed to parse Gemini response as JSON: ${text.slice(0, 200)}`
