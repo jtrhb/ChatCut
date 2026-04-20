@@ -15,6 +15,16 @@ export interface VideoAnalysis {
 export type VisionProgressUpdate = { step: number; totalSteps?: number; text?: string };
 export type VisionProgressCallback = (update: VisionProgressUpdate) => void;
 
+/**
+ * Progress emit is best-effort. A throwing onProgress (e.g. an EventBus
+ * subscriber that errors, or a JSON-serialise failure inside wrappedProgress)
+ * must NOT abort an analysis that has already succeeded. Reviewer MEDIUM #1.
+ */
+function safeProgress(cb: VisionProgressCallback | undefined, u: VisionProgressUpdate): void {
+  if (!cb) return;
+  try { cb(u); } catch { /* best-effort */ }
+}
+
 export class VisionClient {
   private readonly apiKey: string;
   private readonly baseEndpoint: string;
@@ -44,7 +54,7 @@ Video URL: ${videoUrl}${focusLine}
 Return only valid JSON, no markdown or extra text.`;
 
     const url = `${this.baseEndpoint}?key=${this.apiKey}`;
-    onProgress?.({ step: 1, totalSteps: 3, text: "Sending analysis request to Gemini" });
+    safeProgress(onProgress, { step: 1, totalSteps: 3, text: "Sending analysis request to Gemini" });
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -63,7 +73,7 @@ Return only valid JSON, no markdown or extra text.`;
       );
     }
 
-    onProgress?.({ step: 2, totalSteps: 3, text: "Parsing Gemini response" });
+    safeProgress(onProgress, { step: 2, totalSteps: 3, text: "Parsing Gemini response" });
     const data = await response.json() as Record<string, unknown>;
 
     if (
@@ -90,7 +100,7 @@ Return only valid JSON, no markdown or extra text.`;
 
     try {
       const result = JSON.parse(text) as VideoAnalysis;
-      onProgress?.({ step: 3, totalSteps: 3, text: "Analysis complete" });
+      safeProgress(onProgress, { step: 3, totalSteps: 3, text: "Analysis complete" });
       return result;
     } catch {
       throw new Error(

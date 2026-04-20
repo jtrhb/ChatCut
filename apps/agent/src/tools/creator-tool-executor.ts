@@ -1,5 +1,6 @@
 import type { ContentEditor } from "../services/content-editor.js";
-import type { AgentType, ToolCallResult } from "./types.js";
+import type { GenerationProgressCallback } from "../services/generation-client.js";
+import type { AgentType, ToolCallResult, ToolProgressEvent } from "./types.js";
 import { GenerateIntoSegmentSchema } from "./creator-tools.js";
 
 /**
@@ -41,6 +42,7 @@ export class CreatorToolExecutor {
     name: string,
     input: unknown,
     ctx: CreatorToolContext,
+    onProgress?: (event: ToolProgressEvent) => void,
   ): Promise<ToolCallResult> {
     if (name !== "generate_into_segment") {
       return {
@@ -57,17 +59,37 @@ export class CreatorToolExecutor {
       };
     }
 
+    // Adapt the pipeline's ToolProgressEvent shape down to the
+    // generation client's simpler GenerationProgressUpdate. The pipeline
+    // injects toolName/toolCallId on the way back up via wrappedProgress,
+    // so we only forward the abstract step/totalSteps/text/eta from the
+    // client's per-poll emit (audit Phase 4 wire-through).
+    const generationProgress: GenerationProgressCallback | undefined = onProgress
+      ? (u) => onProgress({
+          type: "tool.progress",
+          toolName: "generate_into_segment",
+          toolCallId: "",
+          step: u.step,
+          totalSteps: u.totalSteps,
+          text: u.text,
+          estimatedRemainingMs: u.estimatedRemainingMs,
+        })
+      : undefined;
+
     try {
       // ContentEditor uses agentId for change attribution; the per-call
       // taskId is the right value here (mirrors how EditorToolExecutor
       // forwards taskId into ServerEditorCore command execution).
-      const result = await this.contentEditor.replaceWithGenerated({
-        elementId: parsed.data.element_id,
-        prompt: parsed.data.prompt,
-        timeRange: parsed.data.time_range,
-        provider: parsed.data.provider,
-        agentId: ctx.taskId,
-      });
+      const result = await this.contentEditor.replaceWithGenerated(
+        {
+          elementId: parsed.data.element_id,
+          prompt: parsed.data.prompt,
+          timeRange: parsed.data.time_range,
+          provider: parsed.data.provider,
+          agentId: ctx.taskId,
+        },
+        generationProgress,
+      );
       return { success: true, data: result };
     } catch (err) {
       return {

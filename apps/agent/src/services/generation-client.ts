@@ -32,8 +32,34 @@ export interface TaskStatus {
  * `tool.progress` events on the EventBus → SSE → web. Pipeline-side
  * wrappedProgress auto-injects toolName + toolCallId.
  */
-export type GenerationProgressUpdate = { step: number; totalSteps?: number; text?: string };
+export type GenerationProgressUpdate = {
+  step: number;
+  totalSteps?: number;
+  text?: string;
+  estimatedRemainingMs?: number;
+};
 export type GenerationProgressCallback = (update: GenerationProgressUpdate) => void;
+
+/**
+ * Progress emit is best-effort. A throwing onProgress must not abort
+ * the long-running poll that has already succeeded. Reviewer MEDIUM #1.
+ */
+function safeProgress(cb: GenerationProgressCallback | undefined, u: GenerationProgressUpdate): void {
+  if (!cb) return;
+  try { cb(u); } catch { /* best-effort */ }
+}
+
+/**
+ * Clamp + sanitize the upstream provider's progress field. Upstream is
+ * declared `number` with no range constraint — guard against garbage
+ * (-1, 200, NaN, undefined) so the SSE event surfaces a clean 0-100.
+ * Reviewer MEDIUM #6.
+ */
+function sanitizePct(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
 
 export class GenerationClient {
   private readonly baseUrl: string;
@@ -101,21 +127,33 @@ export class GenerationClient {
     pollIntervalMs: number = 5_000,
     onProgress?: GenerationProgressCallback,
   ): Promise<string> {
-    const deadline = Date.now() + timeoutMs;
+    const start = Date.now();
+    const deadline = start + timeoutMs;
     let pollCount = 0;
+    let lastPct = 0;
 
     while (Date.now() < deadline) {
       const status = await this.checkStatus(taskId);
       pollCount++;
-      // status.progress is a 0-100 int from the upstream provider — we
-      // pass it through as `step`. totalSteps is fixed at 100 so the
-      // event reads as "X / 100 percent done" on the wire. Per-poll
-      // emission gives the operator a heartbeat even when progress
-      // doesn't advance numerically.
-      onProgress?.({
-        step: status.progress,
+      // status.progress is a 0-100 int from the upstream provider; we
+      // pass it through as `step`. Per-poll emission gives the operator
+      // a heartbeat even when progress doesn't advance numerically.
+      // Monotonic step is enforced at the boundary — backward jumps
+      // from a flaky upstream get pinned to the previous max so the
+      // SSE consumer sees a non-decreasing progress bar.
+      const pct = Math.max(lastPct, sanitizePct(status.progress));
+      lastPct = pct;
+      // Linear ETA: only meaningful once we have a fix on the rate;
+      // stays undefined for very-low and 100 (already done).
+      const elapsed = Date.now() - start;
+      const eta = pct >= 5 && pct < 100
+        ? Math.round((elapsed * (100 - pct)) / pct)
+        : undefined;
+      safeProgress(onProgress, {
+        step: pct,
         totalSteps: 100,
-        text: `Generation ${status.status} (${status.progress}%)`,
+        text: `Generation ${status.status} (${pct}%)`,
+        estimatedRemainingMs: eta,
       });
 
       if (status.status === "completed") {

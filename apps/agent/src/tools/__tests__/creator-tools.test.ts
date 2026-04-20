@@ -320,7 +320,10 @@ describe("CreatorToolExecutor", () => {
     );
 
     expect(replaceWithGenerated).toHaveBeenCalledTimes(1);
-    expect(replaceWithGenerated).toHaveBeenCalledWith({
+    // Phase 4 wire-through: replaceWithGenerated now receives an optional
+    // onProgress as its 2nd arg. Assert on the params payload only.
+    const callArgs = replaceWithGenerated.mock.calls[0];
+    expect(callArgs[0]).toEqual({
       elementId: "el-1",
       prompt: "snowy mountains",
       timeRange: { start: 1.5, end: 6 },

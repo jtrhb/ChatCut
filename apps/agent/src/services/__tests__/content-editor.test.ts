@@ -103,7 +103,11 @@ describe("ContentEditor", () => {
     it("calls waitForCompletion with the taskId returned from generateVideo", async () => {
       await editor.replaceWithGenerated(baseParams);
 
-      expect(generationClient.waitForCompletion).toHaveBeenCalledWith("task-gen-001");
+      // Phase 4 wire-through: waitForCompletion now also receives an
+      // optional onProgress as its 4th arg. Assert on the taskId only —
+      // the optional plumbing trails behind.
+      const call = (generationClient.waitForCompletion as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(call[0]).toBe("task-gen-001");
     });
 
     it("returns newStorageKey after uploading the generated content to R2", async () => {

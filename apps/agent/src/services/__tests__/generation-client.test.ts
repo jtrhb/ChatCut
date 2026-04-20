@@ -265,6 +265,90 @@ describe("GenerationClient", () => {
       expect(events[2].text).toMatch(/100/);
     });
 
+    it("sanitises out-of-range upstream progress (clamps NaN/-1/200 → 0..100)", async () => {
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ status: "processing", progress: -25 }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ status: "processing", progress: 200 }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ status: "processing", progress: Number.NaN }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            status: "completed",
+            progress: 100,
+            resultUrl: "https://cdn.example.com/x.mp4",
+          }),
+        });
+      const events: Array<{ step: number }> = [];
+
+      await client.waitForCompletion("task-clamp", 5000, 10, (e) => events.push(e));
+
+      // Each emitted step is in 0..100, even from garbage upstream values.
+      for (const e of events) {
+        expect(e.step).toBeGreaterThanOrEqual(0);
+        expect(e.step).toBeLessThanOrEqual(100);
+      }
+      // Step is monotonic (clamp + Math.max enforce it)
+      for (let i = 1; i < events.length; i++) {
+        expect(events[i].step).toBeGreaterThanOrEqual(events[i - 1].step);
+      }
+    });
+
+    it("populates estimatedRemainingMs once a rate is established (>=5%) and omits it at 100%", async () => {
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ status: "processing", progress: 1 }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ status: "processing", progress: 50 }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            status: "completed",
+            progress: 100,
+            resultUrl: "https://cdn.example.com/x.mp4",
+          }),
+        });
+      const events: Array<{ step: number; estimatedRemainingMs?: number }> = [];
+
+      await client.waitForCompletion("task-eta", 5000, 10, (e) => events.push(e));
+
+      // step 1 (<5%): no ETA
+      expect(events[0].estimatedRemainingMs).toBeUndefined();
+      // step 50 (in-range): ETA defined
+      expect(events[1].estimatedRemainingMs).toBeDefined();
+      expect(events[1].estimatedRemainingMs!).toBeGreaterThanOrEqual(0);
+      // step 100: no ETA (already done)
+      expect(events[2].estimatedRemainingMs).toBeUndefined();
+    });
+
+    it("a throwing onProgress does not abort the long poll (best-effort emit)", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: "completed",
+          progress: 100,
+          resultUrl: "https://cdn.example.com/ok.mp4",
+        }),
+      });
+
+      const result = await client.waitForCompletion("task-throw", 5000, 10, () => {
+        throw new Error("subscriber blew up");
+      });
+      expect(result).toBe("https://cdn.example.com/ok.mp4");
+    });
+
     it("does not throw when no onProgress callback is provided (back-compat)", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
