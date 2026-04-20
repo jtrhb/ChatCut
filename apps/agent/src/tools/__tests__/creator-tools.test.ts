@@ -306,7 +306,7 @@ describe("CreatorToolExecutor", () => {
     expect(executor.hasToolName("nonexistent_tool")).toBe(false);
   });
 
-  it("generate_into_segment forwards mapped params to ContentEditor and returns the storageKey", async () => {
+  it("generate_into_segment forwards mapped params to ContentEditor and returns the storageKey (2nd arg undefined when no callback)", async () => {
     const { executor, replaceWithGenerated } = makeExecutor();
     const result = await executor.execute(
       "generate_into_segment",
@@ -320,8 +320,6 @@ describe("CreatorToolExecutor", () => {
     );
 
     expect(replaceWithGenerated).toHaveBeenCalledTimes(1);
-    // Phase 4 wire-through: replaceWithGenerated now receives an optional
-    // onProgress as its 2nd arg. Assert on the params payload only.
     const callArgs = replaceWithGenerated.mock.calls[0];
     expect(callArgs[0]).toEqual({
       elementId: "el-1",
@@ -330,8 +328,55 @@ describe("CreatorToolExecutor", () => {
       provider: "kling",
       agentId: "task-001",
     });
+    // No onProgress passed → no adapter built → 2nd arg must be undefined.
+    // A future refactor that always builds an adapter even when the
+    // pipeline didn't pass onProgress would fail this — the goal is
+    // zero overhead in the no-progress case.
+    expect(callArgs[1]).toBeUndefined();
     expect(result.success).toBe(true);
     expect(result.data).toEqual({ newStorageKey: "generated/abc.mp4" });
+  });
+
+  // Phase 4 wire-through coverage (reviewer HIGH #8): the executor must
+  // build a GenerationProgressCallback adapter that, when invoked with a
+  // GenerationProgressUpdate, calls the pipeline's ToolProgressEvent
+  // callback with the SAME numeric/text payload (toolName="generate_into_segment",
+  // toolCallId injected later by wrappedProgress). Pass A's "loosen the
+  // assertion" hid this — the legacy test only asserted the params arg.
+  it("threads pipeline onProgress through ContentEditor as a properly-shaped adapter", async () => {
+    const { executor, replaceWithGenerated } = makeExecutor();
+    const pipelineOnProgress = vi.fn();
+
+    await executor.execute(
+      "generate_into_segment",
+      {
+        element_id: "el-1",
+        prompt: "snowy mountains",
+        time_range: { start: 1.5, end: 6 },
+      },
+      { agentType: "creator", taskId: "task-001" },
+      pipelineOnProgress,
+    );
+
+    const adapter = replaceWithGenerated.mock.calls[0][1] as
+      | ((u: { step: number; totalSteps?: number; text?: string; estimatedRemainingMs?: number }) => void)
+      | undefined;
+    expect(typeof adapter).toBe("function");
+
+    // Simulate the generation client emitting a per-poll update — the
+    // pipeline-side callback should receive a ToolProgressEvent whose
+    // step/totalSteps/text/eta are mapped 1:1 from the update, with
+    // toolName tagged "generate_into_segment".
+    adapter!({ step: 60, totalSteps: 100, text: "Generation processing (60%)", estimatedRemainingMs: 7500 });
+
+    expect(pipelineOnProgress).toHaveBeenCalledTimes(1);
+    const event = pipelineOnProgress.mock.calls[0][0];
+    expect(event.type).toBe("tool.progress");
+    expect(event.toolName).toBe("generate_into_segment");
+    expect(event.step).toBe(60);
+    expect(event.totalSteps).toBe(100);
+    expect(event.text).toBe("Generation processing (60%)");
+    expect(event.estimatedRemainingMs).toBe(7500);
   });
 
   it("returns success:false on schema validation failure (does not call ContentEditor)", async () => {

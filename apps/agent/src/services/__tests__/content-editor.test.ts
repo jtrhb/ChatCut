@@ -100,14 +100,32 @@ describe("ContentEditor", () => {
       expect(callArgs[0].idempotencyKey.length).toBeGreaterThan(0);
     });
 
-    it("calls waitForCompletion with the taskId returned from generateVideo", async () => {
+    it("calls waitForCompletion with the taskId returned from generateVideo (4th arg undefined when no callback)", async () => {
       await editor.replaceWithGenerated(baseParams);
 
-      // Phase 4 wire-through: waitForCompletion now also receives an
-      // optional onProgress as its 4th arg. Assert on the taskId only —
-      // the optional plumbing trails behind.
       const call = (generationClient.waitForCompletion as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(call[0]).toBe("task-gen-001");
+      // No onProgress passed → 4th arg must be undefined (not e.g. a no-op
+      // function or a partially-curried adapter — the chain stays pure
+      // pass-through).
+      expect(call[3]).toBeUndefined();
+    });
+
+    // Phase 4 wire-through coverage (reviewer HIGH #8): when caller
+    // passes an onProgress, it must reach waitForCompletion as the same
+    // referential function. Pass A's earlier "loosen the assertion"
+    // hid this contract — the legacy test only asserted taskId.
+    it("threads the caller's onProgress callback through to waitForCompletion as the 4th arg", async () => {
+      const cb = vi.fn();
+
+      await editor.replaceWithGenerated(baseParams, cb);
+
+      const call = (generationClient.waitForCompletion as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(call[0]).toBe("task-gen-001");
+      // Identity check: the very same function reference must arrive on
+      // the inside. A future refactor that wraps it in an adapter would
+      // fail this — that's intentional, the contract is pure passthrough.
+      expect(call[3]).toBe(cb);
     });
 
     it("returns newStorageKey after uploading the generated content to R2", async () => {
