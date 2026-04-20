@@ -7,6 +7,15 @@ import type { ProjectContextManager } from "../../context/project-context.js";
 import { ServerEditorCore } from "../../services/server-editor-core.js";
 import { CoreRegistry } from "../../services/core-registry.js";
 import type { MutationDB } from "../../services/commit-mutation.js";
+import type { CommandFactory } from "../commands.js";
+
+// Trivial factory: any (type, params) → a stub Command. Tests that want
+// the commitMutation path to succeed pass this; tests for the
+// "no-factory" guard omit it.
+const stubCommandFactory: CommandFactory = (_type, _params) => ({
+  execute: () => {},
+  undo: () => {},
+} as unknown as import("@opencut/core").Command);
 
 // ---------------------------------------------------------------------------
 // Minimal mock for ServerEditorCore
@@ -224,20 +233,20 @@ function makeRegistryAndDB(opts: {
 }
 
 describe("/commands with coreRegistry + mutationDB (Phase 2C-2)", () => {
-  it("routes through commitMutation when projectId is present; returns success + new version + changeId", async () => {
+  it("routes through commitMutation when projectId + factory are present; returns success + new version + changeId", async () => {
     const { coreRegistry, mutationDB, insertSpy, updateSpy } = makeRegistryAndDB({
       initialVersion: 4,
       insertedChangeId: "ch-42",
     });
     const app = new Hono();
-    app.route("/commands", createCommandsRouter({ coreRegistry, mutationDB }));
+    app.route("/commands", createCommandsRouter({ coreRegistry, mutationDB, commandFactory: stubCommandFactory }));
 
     const res = await app.request("/commands", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         type: "CUT_CLIP",
-        params: { clipId: "abc-123" },
+        params: { id: "el-1", clipId: "abc-123" },
         baseSnapshotVersion: 4,
         projectId: "proj-A",
       }),
@@ -257,14 +266,14 @@ describe("/commands with coreRegistry + mutationDB (Phase 2C-2)", () => {
       initialVersion: 7,
     });
     const app = new Hono();
-    app.route("/commands", createCommandsRouter({ coreRegistry, mutationDB }));
+    app.route("/commands", createCommandsRouter({ coreRegistry, mutationDB, commandFactory: stubCommandFactory }));
 
     const res = await app.request("/commands", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         type: "CUT_CLIP",
-        params: { clipId: "abc-123" },
+        params: { id: "el-1", clipId: "abc-123" },
         baseSnapshotVersion: 4,
         projectId: "proj-A",
       }),
@@ -280,14 +289,14 @@ describe("/commands with coreRegistry + mutationDB (Phase 2C-2)", () => {
       failOn: "update",
     });
     const app = new Hono();
-    app.route("/commands", createCommandsRouter({ coreRegistry, mutationDB }));
+    app.route("/commands", createCommandsRouter({ coreRegistry, mutationDB, commandFactory: stubCommandFactory }));
 
     const res = await app.request("/commands", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         type: "CUT_CLIP",
-        params: { clipId: "abc-123" },
+        params: { id: "el-1", clipId: "abc-123" },
         baseSnapshotVersion: 0,
         projectId: "proj-A",
       }),
@@ -301,17 +310,93 @@ describe("/commands with coreRegistry + mutationDB (Phase 2C-2)", () => {
     expect(liveCore.snapshotVersion).toBe(0);
   });
 
-  it("falls back to the singleton path when projectId is omitted (legacy contract preserved)", async () => {
+  // Reviewer HIGH #4: when registry+DB are wired, missing projectId is
+  // a 400 (not a silent singleton fallback). The pre-fix test that
+  // exercised the silent fallback codified the §A.3 isolation bug as a
+  // contract — flipping the assertion closes that contract.
+  it("returns 400 when projectId is omitted but registry+DB are wired (no silent singleton fallback)", async () => {
     const { coreRegistry, mutationDB, insertSpy } = makeRegistryAndDB();
-    // Mirror the existing pattern (line 128): a mock singleton that
-    // accepts any command shape — real ServerEditorCore would throw
-    // because {type, ...params} isn't a real Command.
     const singleton = makeMockServerEditorCore({ snapshotVersion: 9 });
     const app = new Hono();
     app.route(
       "/commands",
-      createCommandsRouter({ serverEditorCore: singleton, coreRegistry, mutationDB }),
+      createCommandsRouter({
+        serverEditorCore: singleton,
+        coreRegistry,
+        mutationDB,
+        commandFactory: stubCommandFactory,
+      }),
     );
+
+    const res = await app.request("/commands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "CUT_CLIP",
+        params: { id: "el-1", clipId: "abc-123" },
+        baseSnapshotVersion: 9,
+        // no projectId
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(insertSpy).not.toHaveBeenCalled();
+    // Singleton untouched
+    expect(singleton.snapshotVersion).toBe(9);
+  });
+
+  // Reviewer MEDIUM #6: missing params.id surfaces as 400, not as a
+  // change_log row with targetId="unknown".
+  it("returns 400 when params.id is missing (audit trail integrity)", async () => {
+    const { coreRegistry, mutationDB, insertSpy } = makeRegistryAndDB();
+    const app = new Hono();
+    app.route("/commands", createCommandsRouter({ coreRegistry, mutationDB, commandFactory: stubCommandFactory }));
+
+    const res = await app.request("/commands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "CUT_CLIP",
+        params: { clipId: "abc-123" }, // no `id`
+        baseSnapshotVersion: 0,
+        projectId: "proj-A",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(insertSpy).not.toHaveBeenCalled();
+  });
+
+  // Reviewer HIGH #5: no commandFactory wired → 400 instead of letting a
+  // synthesised `{type, ...params}` reach commitMutation and crash.
+  it("returns 400 when no commandFactory is registered (HIGH #5 guard)", async () => {
+    const { coreRegistry, mutationDB, insertSpy } = makeRegistryAndDB();
+    const app = new Hono();
+    app.route("/commands", createCommandsRouter({ coreRegistry, mutationDB }));
+
+    const res = await app.request("/commands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "CUT_CLIP",
+        params: { id: "el-1", clipId: "abc-123" },
+        baseSnapshotVersion: 0,
+        projectId: "proj-A",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toMatch(/dispatcher|factory|command type/i);
+    expect(insertSpy).not.toHaveBeenCalled();
+  });
+
+  // Singleton fallback still works when registry/DB are NOT wired (dev
+  // boot path) — projectId is irrelevant in that mode.
+  it("singleton path still works when registry+DB are absent (dev boot)", async () => {
+    const singleton = makeMockServerEditorCore({ snapshotVersion: 9 });
+    const app = new Hono();
+    app.route("/commands", createCommandsRouter({ serverEditorCore: singleton }));
 
     const res = await app.request("/commands", {
       method: "POST",
@@ -320,15 +405,13 @@ describe("/commands with coreRegistry + mutationDB (Phase 2C-2)", () => {
         type: "CUT_CLIP",
         params: { clipId: "abc-123" },
         baseSnapshotVersion: 9,
-        // no projectId → legacy singleton path
       }),
     });
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
     expect(body.snapshotVersion).toBe(10);
-    expect(body.changeId).toBeUndefined(); // legacy path doesn't return changeId
-    expect(insertSpy).not.toHaveBeenCalled();
+    expect(body.changeId).toBeUndefined();
   });
 });
 

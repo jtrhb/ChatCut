@@ -13,6 +13,12 @@ import type { ServerEditorCore } from "./server-editor-core.js";
  * testable without a real Postgres connection. Phase 2C wires this to
  * the real drizzle handle by adapting the schema's `changeLog` and
  * `projects` tables onto the MutationTx interface.
+ *
+ * Status: the human-command path is wired through the /commands HTTP
+ * route (commands.ts). The agent-command path (isAgent=true with
+ * agentId/taskId) is implemented and unit-tested but no production call
+ * site invokes it yet — MasterAgent tool dispatch will route through it
+ * in a future phase. Reviewer MEDIUM #7.
  */
 
 export type ChangeSource = "human" | "agent" | "system";
