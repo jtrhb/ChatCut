@@ -10,6 +10,7 @@ import { AssetsPanel } from "@/components/editor/panels/assets";
 import { PropertiesPanel } from "@/components/editor/panels/properties";
 import { Timeline } from "@/components/editor/panels/timeline";
 import { PreviewPanel } from "@/components/editor/panels/preview";
+import { ChatPanel } from "@/components/editor/chat/chat-panel";
 import { EditorHeader } from "@/components/editor/editor-header";
 import { EditorProvider } from "@/components/providers/editor-provider";
 import { Onboarding } from "@/components/editor/onboarding";
@@ -35,7 +36,7 @@ export default function Editor() {
 					<DegradedRendererBanner />
 					<EditorHeader />
 					<div className="min-h-0 min-w-0 flex-1">
-						<EditorLayout />
+						<EditorLayout projectId={projectId} />
 					</div>
 					<Onboarding />
 					<MigrationDialog />
@@ -67,7 +68,7 @@ function DegradedRendererBanner() {
 	);
 }
 
-function EditorLayout() {
+function EditorLayout({ projectId }: { projectId: string }) {
 	usePasteMedia();
 	const { panels, setPanel } = usePanelStore();
 
@@ -123,6 +124,24 @@ function EditorLayout() {
 						className="min-w-0"
 					>
 						<PropertiesPanel />
+					</ResizablePanel>
+
+					<ResizableHandle withHandle />
+
+					{/*
+						ChatPanel mounts as a fifth column for the Phase 0 wiring fix
+						(see docs/chatcut-wiring-audit.md). It deliberately does not
+						extend the panel-store; size is per-session only so we don't
+						have to migrate persisted panel-sizes v2 just to ship the
+						wire-format fixes.
+					*/}
+					<ResizablePanel
+						defaultSize={20}
+						minSize={15}
+						maxSize={35}
+						className="min-w-0"
+					>
+						<ChatPanel projectId={projectId} className="h-full" />
 					</ResizablePanel>
 				</ResizablePanelGroup>
 			</ResizablePanel>
