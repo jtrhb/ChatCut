@@ -27,6 +27,7 @@ export const projects = pgTable("projects", {
   name: text("name").default("Untitled").notNull(),
   snapshotVersion: integer("snapshot_version").default(0).notNull(),
   timelineSnapshot: jsonb("timeline_snapshot"),
+  lastCommittedChangeId: text("last_committed_change_id"),
   settings: jsonb("settings"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

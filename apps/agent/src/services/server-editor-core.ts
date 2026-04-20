@@ -11,7 +11,7 @@ import type { Command } from "@opencut/core";
  * - Agent and human command dispatch with automatic version increment
  */
 export class ServerEditorCore {
-  private readonly _core: EditorCore;
+  private _core: EditorCore;
   private _version: number;
 
   // Private constructor — use static factory methods
@@ -125,5 +125,21 @@ export class ServerEditorCore {
   clone(): ServerEditorCore {
     const state = this._core.serialize();
     return ServerEditorCore.fromSnapshot(state, this._version);
+  }
+
+  /**
+   * Atomically swap the live runtime + version with a donor's. Used by
+   * commitMutation (Phase 2.4) to land a successfully-DB-committed clone
+   * on top of the live core in a single synchronous step. No await may
+   * sit between the two assignments — JS is single-threaded so contiguous
+   * synchronous statements are observably atomic to other code paths.
+   *
+   * The donor instance is left intact so callers can keep using it as a
+   * temporary handle (e.g. to read the post-execute state) before
+   * dropping the reference.
+   */
+  replaceRuntime(donor: ServerEditorCore): void {
+    this._core = donor._core;
+    this._version = donor._version;
   }
 }

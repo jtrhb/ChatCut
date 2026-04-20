@@ -135,6 +135,60 @@ describe("ServerEditorCore", () => {
     });
   });
 
+  describe("replaceRuntime()", () => {
+    it("swaps in the donor's state — target.serialize() then equals donor.serialize()", () => {
+      // Build the donor state via applyTracksAsCommand so it routes through
+      // CommandManager (matches the production path where commitMutation
+      // executes a command on a clone, then hands the clone to replaceRuntime).
+      const v0 = [makeTrack("t1")];
+      const v1 = [makeTrack("t1"), makeTrack("t2", "audio")];
+      const target = ServerEditorCore.fromSnapshot(stateWithTracks(v0), 5);
+      const donor = ServerEditorCore.fromSnapshot(stateWithTracks(v0), 5);
+      donor.applyTracksAsCommand(v0, v1, "editor", "task-A");
+
+      target.replaceRuntime(donor);
+
+      expect(target.snapshotVersion).toBe(donor.snapshotVersion);
+      expect(target.serialize()).toEqual(donor.serialize());
+    });
+
+    it("preserves the target instance identity (caller's reference still valid)", () => {
+      const target = ServerEditorCore.fromSnapshot(emptyState, 0);
+      const donor = ServerEditorCore.fromSnapshot(emptyState, 3);
+
+      const before = target;
+      target.replaceRuntime(donor);
+
+      expect(target).toBe(before);
+    });
+
+    it("after replaceRuntime, executing a command bumps the donor's version (not the original)", () => {
+      const target = ServerEditorCore.fromSnapshot(emptyState, 0);
+      const donor = ServerEditorCore.fromSnapshot(emptyState, 10);
+      target.replaceRuntime(donor);
+
+      const stub = { execute: () => {}, undo: () => {} } as unknown as import("@opencut/core").Command;
+      target.executeAgentCommand(stub, "agent-1");
+
+      expect(target.snapshotVersion).toBe(11);
+    });
+
+    it("does not mutate the donor (donor's state remains usable independently)", () => {
+      const v0 = [makeTrack("t1")];
+      const v1 = [makeTrack("t1"), makeTrack("t2", "audio")];
+      const target = ServerEditorCore.fromSnapshot(stateWithTracks(v0), 1);
+      const donor = ServerEditorCore.fromSnapshot(stateWithTracks(v0), 2);
+      donor.applyTracksAsCommand(v0, v1, "editor", "task-A");
+      const donorVersionBeforeSwap = donor.snapshotVersion;
+      const donorStateBeforeSwap = donor.serialize();
+
+      target.replaceRuntime(donor);
+
+      expect(donor.snapshotVersion).toBe(donorVersionBeforeSwap);
+      expect(donor.serialize()).toEqual(donorStateBeforeSwap);
+    });
+  });
+
   describe("clone()", () => {
     it("creates an independent copy at the same version", () => {
       const original = ServerEditorCore.fromSnapshot(emptyState, 7);
