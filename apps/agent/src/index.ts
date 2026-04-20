@@ -256,19 +256,59 @@ async function main() {
 		}
 
 		if (jobQueue) {
-			// Phase 3 will replace this with the real Playwright pipeline. For
-			// now we register a no-op worker so enqueued preview-render jobs are
-			// acknowledged (instead of starving forever); the worker logs the
-			// payload so we can confirm the ExplorationEngine → queue → worker
-			// wire actually moves messages.
-			jobQueue.registerWorker<{ explorationId: string; candidateId: string }>(
-				"preview-render",
-				async (job) => {
+			// Phase 3 (scaffold): the worker wires through to HeadlessRenderer
+			// when it can be constructed (RENDERER_BASE_URL + R2 + a real
+			// Playwright BrowserFactory all wired). The factory is null in
+			// this build because Playwright is not yet installed in the agent
+			// host — see the deferral note in
+			// .omc/plans/wiring-audit-remediation.md §3 (3.1, 3.3). Until that
+			// lands, the worker keeps the existing log-only fallback so
+			// enqueued jobs are still acknowledged.
+			let headlessRenderer:
+				| import("./services/headless-renderer.js").HeadlessRenderer
+				| null = null;
+			if (process.env.RENDERER_BASE_URL && r2) {
+				// browserFactory placeholder — wire to playwright.chromium.launch()
+				// when Phase 3.1 + 3.3 prerequisites are met. Today this branch
+				// stays inert: no factory is registered, no renderer constructed.
+				console.warn(
+					"[boot] HeadlessRenderer not yet constructed: Playwright BrowserFactory not wired (Phase 3.1 deferred). RENDERER_BASE_URL is set but the renderer module (Phase 3.3) and Playwright install (Phase 3.1) are still missing.",
+				);
+			}
+
+			jobQueue.registerWorker<{
+				explorationId: string;
+				candidateId: string;
+				timelineSnapshot?: import("@opencut/core").SerializedEditorState;
+				durationSec?: number;
+			}>("preview-render", async (job) => {
+				if (!headlessRenderer) {
 					console.log(
-						`[preview-render stub] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId}`,
+						`[preview-render stub] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} (renderer not wired — Phase 3.1+3.3)`,
 					);
-				},
-			);
+					return;
+				}
+				try {
+					const result = await headlessRenderer.exportVideo({
+						explorationId: job.data.explorationId,
+						candidateId: job.data.candidateId,
+						timelineSnapshot:
+							job.data.timelineSnapshot ?? {
+								project: null,
+								scenes: [],
+								activeSceneId: null,
+							},
+						durationSec: job.data.durationSec ?? 5,
+					});
+					console.log(
+						`[preview-render] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} → ${result.storageKey}`,
+					);
+				} catch (err) {
+					console.warn(
+						`[preview-render] failed: explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} — ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			});
 
 			if (r2) {
 				const { ExplorationEngine } = await import(

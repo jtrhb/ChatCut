@@ -125,6 +125,20 @@ Goal: persistent multi-project state, `commitMutation` clone-then-commit, projec
 
 ---
 
+## Phase 3 status (2026-04-20): SCAFFOLD SHIPPED, RENDER ENGINE DEFERRED
+
+What landed this session (commits to follow):
+- `services/headless-renderer.ts`: browser-pool orchestration shell with mockable Browser/Page seam (TDD: 6 tests). Pool race condition (concurrent acquires racing past poolSize) caught + fixed pre-commit via synchronous slot reservation.
+- `routes/exploration.ts`: GET `/:id/preview/:candidateId` mints signed URL from R2 — the URL shape the web client will consume once previews actually exist.
+- `index.ts` preview-render worker: wired through to `HeadlessRenderer.exportVideo` when a real renderer is constructible; falls back to the existing log-only stub otherwise (the path that runs today because the browser factory + renderer base URL aren't wired).
+
+What stays explicitly deferred:
+- §3.1 Playwright + chromium install (~500MB, root-level deps via `--with-deps`). Add as a runtime install step on the agent host; not a code change.
+- §3.3 renderer-friendly static build. **The web side has no `apps/web/src/components/editor/preview/` module to extract** — the renderer that Playwright would load doesn't exist yet. Until a Phase-3.3 spike builds it (plan's "highest-risk single task"), the HeadlessRenderer's `page.evaluate` body has nothing to call, so `exportVideo` cannot produce real MP4s in production.
+- §3.6 Daytona sandbox pool — defer per the original plan recommendation.
+
+The scaffold is committed so the contract is testable + the URL-side endpoint is live; flipping it on requires a separate (multi-day) renderer extraction effort that should be scoped as its own phase, not buried in Phase 3 wrap-up.
+
 ## Phase 3 — Preview rendering pipeline (C: HeadlessRenderer + Daytona decision) — 3 d (or formally defer)
 
 Goal: `preview-render` worker actually produces playable previews.
