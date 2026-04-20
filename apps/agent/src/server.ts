@@ -252,7 +252,10 @@ export function createApp(opts?: {
 	);
 	app.route(
 		"/project",
-		createProjectRouter({ contextManager: infra.contextManager }),
+		createProjectRouter({
+			contextManager: infra.contextManager,
+			coreRegistry: infra.coreRegistry,
+		}),
 	);
 	app.route(
 		"/media",

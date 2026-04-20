@@ -335,6 +335,73 @@ describe("/commands with coreRegistry + mutationDB (Phase 2C-2)", () => {
 // ---------------------------------------------------------------------------
 // /project with mock contextManager — returns real data
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// /project with coreRegistry — Phase 2D registry-backed hydration
+// ---------------------------------------------------------------------------
+describe("/project with coreRegistry (Phase 2D)", () => {
+  it("returns the per-project snapshot + version from the registry", async () => {
+    const liveCore = makeMockCore(11);
+    const coreRegistry = {
+      get: async () => liveCore,
+      has: () => true,
+      invalidate: () => {},
+      evictIdle: () => [],
+    } as unknown as CoreRegistry;
+    const app = new Hono();
+    app.route("/project", createProjectRouter({ coreRegistry }));
+
+    const res = await app.request("/project/proj-A");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.projectId).toBe("proj-A");
+    expect(body.snapshotVersion).toBe(11);
+    expect(body.timeline).toBeDefined();
+    expect(body._warning).toBeUndefined(); // legacy warn doesn't appear on the registry path
+  });
+
+  it("returns 404 when the registry rejects (project not found)", async () => {
+    const coreRegistry = {
+      get: async () => { throw new Error("Project not found: missing"); },
+      has: () => false,
+      invalidate: () => {},
+      evictIdle: () => [],
+    } as unknown as CoreRegistry;
+    const app = new Hono();
+    app.route("/project", createProjectRouter({ coreRegistry }));
+
+    const res = await app.request("/project/missing");
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as any;
+    expect(body.error).toMatch(/missing/);
+  });
+
+  it("prefers the registry path over the legacy contextManager when both are wired", async () => {
+    const liveCore = makeMockCore(2);
+    const coreRegistry = {
+      get: async () => liveCore,
+      has: () => true,
+      invalidate: () => {},
+      evictIdle: () => [],
+    } as unknown as CoreRegistry;
+    const contextManager = makeMockContextManager({
+      timelineState: '{"scenes":["legacy"]}',
+      snapshotVersion: 99,
+    });
+    const app = new Hono();
+    app.route("/project", createProjectRouter({ coreRegistry, contextManager }));
+
+    const res = await app.request("/project/proj-A");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    // Came from the mock core (version 2), NOT the contextManager (version 99)
+    expect(body.snapshotVersion).toBe(2);
+    expect(body._warning).toBeUndefined();
+  });
+});
+
 describe("/project with mock contextManager", () => {
   const contextManager = makeMockContextManager({
     timelineState: '{"scenes":["scene-1"]}',
