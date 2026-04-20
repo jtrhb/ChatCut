@@ -42,6 +42,14 @@ export interface ExploreParams {
   baseSnapshotVersion: number;
   timelineSnapshot: string;
   candidates: ExplorationCandidate[];
+  /**
+   * The project this exploration belongs to. Required so the persisted
+   * exploration_sessions row carries the right tenant scope. Audit §A.7
+   * fix: previously this was hardcoded to "default" with a TODO, which
+   * meant every project's explorations collided on a single key in
+   * multi-project deployments.
+   */
+  projectId: string;
 }
 
 export interface CandidateResult {
@@ -185,7 +193,7 @@ export class ExplorationEngine {
       .insert(explorationSessions)
       .values({
         id: explorationId,
-        projectId: "default", // set by caller when real project routing is wired
+        projectId: params.projectId,
         baseSnapshotVersion: params.baseSnapshotVersion,
         userIntent: params.intent,
         candidates: candidateResults,

@@ -625,28 +625,39 @@ export class MasterAgent {
 			}
 
 			case "explore_options": {
-				if (this.explorationEngine) {
-					const params = input as {
-						intent: string;
-						baseSnapshotVersion: number;
-						timelineSnapshot: string;
-						candidates: Array<{
-							label: string;
-							summary: string;
-							candidateType: string;
-							commands: unknown[];
-							expectedMetrics: {
-								durationChange: string;
-								affectedElements: number;
-							};
-						}>;
+				if (!this.explorationEngine) {
+					return {
+						error:
+							"explore_options unavailable: ExplorationEngine not configured for this session",
 					};
-					return this.explorationEngine.explore(params);
 				}
-				return {
-					error:
-						"explore_options unavailable: ExplorationEngine not configured for this session",
+				// Audit §A.7 fix: projectId must come from the current turn's
+				// identity so the persisted exploration row carries the right
+				// tenant scope. Without an identity we cannot safely persist —
+				// surface a clear error instead of falling back to "default".
+				const projectId = this.currentIdentity?.projectId;
+				if (!projectId) {
+					return {
+						error:
+							"explore_options requires a projectId on the current turn identity",
+					};
+				}
+				const params = input as {
+					intent: string;
+					baseSnapshotVersion: number;
+					timelineSnapshot: string;
+					candidates: Array<{
+						label: string;
+						summary: string;
+						candidateType: string;
+						commands: unknown[];
+						expectedMetrics: {
+							durationChange: string;
+							affectedElements: number;
+						};
+					}>;
 				};
+				return this.explorationEngine.explore({ ...params, projectId });
 			}
 
 			case "export_video": {

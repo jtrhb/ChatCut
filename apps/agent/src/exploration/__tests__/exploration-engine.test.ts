@@ -53,6 +53,7 @@ const BASE_PARAMS = {
   intent: "make it shorter",
   baseSnapshotVersion: 1,
   timelineSnapshot: "snap-abc",
+  projectId: "proj-test",
   candidates: [buildCandidate("Option A"), buildCandidate("Option B")],
 };
 
@@ -115,6 +116,19 @@ describe("ExplorationEngine", () => {
     await engine.explore(BASE_PARAMS);
     expect(db.insert).toHaveBeenCalledTimes(1);
     expect(db.insert().values).toHaveBeenCalledTimes(1);
+  });
+
+  // Audit §A.7 / §B.ExplorationEngine: the persisted row hardcoded
+  // projectId: "default" with a TODO. Multi-project deployments would
+  // therefore have every exploration collide on a single key. This test
+  // asserts the projectId from ExploreParams reaches the DB row.
+  it("persists projectId from params (not hardcoded default)", async () => {
+    const projectId = "proj-abc-123";
+    await engine.explore({ ...BASE_PARAMS, projectId });
+    const valuesCall = db.insert.mock.results[0]?.value.values.mock.calls[0]?.[0];
+    expect(valuesCall).toBeDefined();
+    expect(valuesCall.projectId).toBe(projectId);
+    expect(valuesCall.projectId).not.toBe("default");
   });
 
   it("handles 3 candidates correctly", async () => {

@@ -194,6 +194,56 @@ async function main() {
 		);
 	}
 
+	// ── Job queue + ExplorationEngine (audit §B.JobQueue / §B.ExplorationEngine) ──
+	// pg-boss requires DATABASE_URL. ExplorationEngine then needs the queue,
+	// a real ServerEditorCore, R2, and the drizzle db. Each dep is gated so
+	// a partial setup degrades gracefully (the explore_options master tool
+	// returns "not configured" when explorationEngine is absent).
+	let jobQueue: import("./services/job-queue.js").JobQueue | null = null;
+	let explorationEngine:
+		| import("./exploration/exploration-engine.js").ExplorationEngine
+		| null = null;
+	if (process.env.DATABASE_URL) {
+		const { JobQueue } = await import("./services/job-queue.js");
+		jobQueue = new JobQueue({ connectionString: process.env.DATABASE_URL });
+		await jobQueue.start();
+
+		// Phase 3 will replace this with the real Playwright pipeline. For
+		// now we register a no-op worker so enqueued preview-render jobs are
+		// acknowledged (instead of starving forever); the worker logs the
+		// payload so we can confirm the ExplorationEngine → queue → worker
+		// wire actually moves messages.
+		jobQueue.registerWorker<{ explorationId: string; candidateId: string }>(
+			"preview-render",
+			async (job) => {
+				console.log(
+					`[preview-render stub] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId}`,
+				);
+			},
+		);
+
+		if (r2) {
+			const { ExplorationEngine } = await import(
+				"./exploration/exploration-engine.js"
+			);
+			const { db } = await import("./db/index.js");
+			explorationEngine = new ExplorationEngine({
+				serverCore: serverEditorCore,
+				jobQueue,
+				objectStorage: r2 as any,
+				db: db as any,
+			});
+		} else {
+			console.warn(
+				"[boot] ExplorationEngine disabled: R2_BUCKET required (in addition to DATABASE_URL).",
+			);
+		}
+	} else {
+		console.warn(
+			"[boot] JobQueue + ExplorationEngine disabled: DATABASE_URL not set. fan-out exploration unavailable.",
+		);
+	}
+
 	// Tool executor for sub-agents — routes to real implementations when available.
 	// Accepts optional ToolContext from the pipeline so identity (sessionId/userId)
 	// reaches the underlying executor for tenant-scoped operations.
@@ -265,6 +315,7 @@ async function main() {
 		memoryStore: memoryStore ?? undefined,
 		memoryLoader: memoryLoader ?? undefined,
 		contextSynchronizer,
+		explorationEngine: explorationEngine ?? undefined,
 	});
 
 	// ── Memory consumers wired AFTER MasterAgent (writer token sequencing) ──
