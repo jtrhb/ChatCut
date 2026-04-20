@@ -134,11 +134,21 @@ export class ServerEditorCore {
    * sit between the two assignments — JS is single-threaded so contiguous
    * synchronous statements are observably atomic to other code paths.
    *
-   * The donor instance is left intact so callers can keep using it as a
-   * temporary handle (e.g. to read the post-execute state) before
-   * dropping the reference.
+   * **Consumes the donor.** After this call, the donor's `_core` is shared
+   * by reference with `this`. Mutating the donor (executeAgentCommand,
+   * etc.) would silently mutate the live core while leaving the donor's
+   * version stale — desyncing the two version counters. Callers must drop
+   * the donor reference immediately after this call. Production usage
+   * (commitMutation) creates the donor as a clone, executes on it, then
+   * passes it here and never touches it again.
+   *
+   * Self-swap (`donor === this`) throws — it would do nothing useful and
+   * always indicates a coding bug in the caller (e.g. double-swap).
    */
   replaceRuntime(donor: ServerEditorCore): void {
+    if (donor === this) {
+      throw new Error("replaceRuntime: donor must not be the same instance as the target");
+    }
     this._core = donor._core;
     this._version = donor._version;
   }

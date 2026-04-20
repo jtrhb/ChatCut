@@ -27,7 +27,14 @@ export const projects = pgTable("projects", {
   name: text("name").default("Untitled").notNull(),
   snapshotVersion: integer("snapshot_version").default(0).notNull(),
   timelineSnapshot: jsonb("timeline_snapshot"),
-  lastCommittedChangeId: text("last_committed_change_id"),
+  // FK with onDelete: set null — change_log retention may evict rows;
+  // a dangling pointer would corrupt the projects table, so we let the
+  // pointer go null and treat "no last committed change" as the safe
+  // post-retention state. uuid (not text) so type matches change_log.id.
+  lastCommittedChangeId: uuid("last_committed_change_id").references(
+    () => changeLog.id,
+    { onDelete: "set null" },
+  ),
   settings: jsonb("settings"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

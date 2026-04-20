@@ -49,8 +49,13 @@ export class CoreRegistry {
     const inflight = this.inflight.get(projectId);
     if (inflight) return inflight;
 
-    const loadPromise = (async () => {
-      const row = await this.source.loadSnapshot(projectId);
+    // Build the load promise via .then chaining so callers receive the
+    // unwrapped result-or-rejection. The cleanup is a separate promise
+    // chain whose rejection branch is explicitly silenced — the actual
+    // failure is delivered to callers via the loadPromise we hand back;
+    // letting the detached cleanup chain reject would trip Node's
+    // unhandledRejection.
+    const loadPromise = this.source.loadSnapshot(projectId).then((row) => {
       if (!row) {
         throw new Error(`Project not found: ${projectId}`);
       }
@@ -58,9 +63,14 @@ export class CoreRegistry {
       this.cores.set(projectId, core);
       this.lastAccessed.set(projectId, Date.now());
       return core;
-    })().finally(() => {
-      this.inflight.delete(projectId);
     });
+    loadPromise
+      .finally(() => {
+        this.inflight.delete(projectId);
+      })
+      .catch(() => {
+        // Cleanup-branch rejection is intentionally swallowed — see comment above.
+      });
 
     this.inflight.set(projectId, loadPromise);
     return loadPromise;
@@ -75,6 +85,11 @@ export class CoreRegistry {
     this.lastAccessed.delete(projectId);
   }
 
+  // TODO(Phase 2C): plan §2.6 calls for "LRU with 30-min idle (mirrors
+  // SessionStore)". Phase 2A ships TTL-only with no scheduled invocation
+  // and no max-entries cap — callers run evictIdle() cooperatively. Add
+  // maxEntries + LRU eviction on cache-set, plus a setInterval kick-off
+  // from index.ts, when the registry has its first real callers.
   evictIdle(thresholdMs: number, now: number = Date.now()): string[] {
     const evicted: string[] = [];
     for (const [id, ts] of this.lastAccessed.entries()) {

@@ -151,6 +151,35 @@ describe("CoreRegistry", () => {
       now.mockRestore();
     });
 
+    it("does not interrupt an in-flight load (concurrent evictIdle + get for same id)", async () => {
+      // Hold the loader open until we explicitly release it.
+      let release!: (row: {
+        snapshot: SerializedEditorState;
+        snapshotVersion: number;
+        lastCommittedChangeId: string | null;
+      }) => void;
+      const pending = new Promise<{
+        snapshot: SerializedEditorState;
+        snapshotVersion: number;
+        lastCommittedChangeId: string | null;
+      }>((resolve) => {
+        release = resolve;
+      });
+      const loadSnapshot = vi.fn(() => pending);
+      const registry = new CoreRegistry({ source: { loadSnapshot } });
+
+      const getPromise = registry.get("p1");
+      // Eviction with a tight window — there's no lastAccessed entry yet
+      // because the load hasn't resolved, so nothing should be evicted.
+      const evicted = registry.evictIdle(0, Date.now() + 1_000);
+      expect(evicted).toEqual([]);
+
+      release({ snapshot: emptyState, snapshotVersion: 3, lastCommittedChangeId: null });
+      const core = await getPromise;
+      expect(core.snapshotVersion).toBe(3);
+      expect(registry.has("p1")).toBe(true);
+    });
+
     it("returns empty array when nothing is stale", async () => {
       const { source } = makeSource({
         "p1": { snapshot: emptyState, snapshotVersion: 0, lastCommittedChangeId: null },

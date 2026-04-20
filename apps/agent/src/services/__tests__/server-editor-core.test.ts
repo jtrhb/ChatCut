@@ -173,19 +173,25 @@ describe("ServerEditorCore", () => {
       expect(target.snapshotVersion).toBe(11);
     });
 
-    it("does not mutate the donor (donor's state remains usable independently)", () => {
+    it("throws on self-swap (catches double-swap coding bug)", () => {
+      const target = ServerEditorCore.fromSnapshot(emptyState, 0);
+      expect(() => target.replaceRuntime(target)).toThrowError(/same instance/);
+    });
+
+    it("preserves the donor's CommandManager history (post-swap rollbackByTaskId on target unwinds the donor's command)", () => {
       const v0 = [makeTrack("t1")];
       const v1 = [makeTrack("t1"), makeTrack("t2", "audio")];
-      const target = ServerEditorCore.fromSnapshot(stateWithTracks(v0), 1);
-      const donor = ServerEditorCore.fromSnapshot(stateWithTracks(v0), 2);
-      donor.applyTracksAsCommand(v0, v1, "editor", "task-A");
-      const donorVersionBeforeSwap = donor.snapshotVersion;
-      const donorStateBeforeSwap = donor.serialize();
+      const target = ServerEditorCore.fromSnapshot(emptyState, 0);
+      const donor = ServerEditorCore.fromSnapshot(stateWithTracks(v0), 5);
+      donor.applyTracksAsCommand(v0, v1, "editor", "task-X");
 
       target.replaceRuntime(donor);
 
-      expect(donor.snapshotVersion).toBe(donorVersionBeforeSwap);
-      expect(donor.serialize()).toEqual(donorStateBeforeSwap);
+      // History was grafted onto target via the shared _core; rollback on
+      // target should walk the donor's command stack. Phase 2B's
+      // commitMutation relies on this invariant.
+      const undone = target.rollbackByTaskId("task-X");
+      expect(undone).toBe(1);
     });
   });
 
