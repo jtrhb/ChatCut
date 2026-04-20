@@ -6,6 +6,7 @@ import {
   jsonb,
   timestamp,
   index,
+  uniqueIndex,
   customType,
 } from "drizzle-orm/pg-core";
 
@@ -59,7 +60,12 @@ export const changeLog = pgTable(
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => [
-    index("change_log_project_sequence_idx").on(table.projectId, table.sequence),
+    // (projectId, sequence) is the canonical replay-order key. Unique so
+    // the SELECT-max-then-INSERT pattern in DrizzleMutationDB cannot
+    // silently produce two rows with the same sequence under concurrent
+    // writes — the second INSERT raises a unique-violation that aborts
+    // the second tx (the first one's swap still lands cleanly).
+    uniqueIndex("change_log_project_sequence_uniq").on(table.projectId, table.sequence),
     index("change_log_changeset_idx").on(table.changesetId),
   ]
 );

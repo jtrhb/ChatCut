@@ -63,7 +63,56 @@ export interface CommitMutationResult {
   changeId: string;
 }
 
+/**
+ * Per-project serialization. Two concurrent commitMutation calls on the
+ * same projectId would otherwise interleave at every await boundary
+ * (cloneA → cloneB → executeA → executeB → txA → txB → swapA → swapB),
+ * leaving DB and live core desynced — both clones derive from the same
+ * base version, both txs write the same snapshotVersion, and the row
+ * the live core ends up at depends on swap timing rather than tx
+ * ordering. The mutex chains all calls for a given projectId through a
+ * single promise so each clone observes the previous swap's post-state.
+ *
+ * Spec §3.3.2: single Agent service instance — in-process locking is
+ * sufficient. The (project_id, sequence) unique index in change_log is
+ * the Postgres-level backstop for the future multi-instance case.
+ *
+ * The mutex is module-scoped because the live cores live in CoreRegistry
+ * (also module-scoped per process) — no per-call dep injection is needed
+ * and tests with isolated cores still serialize correctly because they
+ * share this Map.
+ */
+const projectLocks = new Map<string, Promise<unknown>>();
+
 export async function commitMutation(
+  params: CommitMutationParams,
+): Promise<CommitMutationResult> {
+  const { projectId } = params;
+  // Chain onto any in-flight commit for this project. Settled promises
+  // are still chained from — the previous .then() on a settled promise
+  // is microtask-immediate, so contention-free calls aren't penalised.
+  const previous = projectLocks.get(projectId) ?? Promise.resolve();
+  const next = previous.then(
+    () => doCommit(params),
+    () => doCommit(params), // previous failure must not block subsequent commits
+  );
+  projectLocks.set(projectId, next);
+
+  // Cleanup: drop the entry when this is the last in the chain. We
+  // detach via .finally with a no-op catch — the actual rejection is
+  // delivered to the caller via the `next` promise we return.
+  next
+    .finally(() => {
+      if (projectLocks.get(projectId) === next) {
+        projectLocks.delete(projectId);
+      }
+    })
+    .catch(() => {});
+
+  return next;
+}
+
+async function doCommit(
   params: CommitMutationParams,
 ): Promise<CommitMutationResult> {
   const { liveCore, projectId, command, changeEntry, db } = params;

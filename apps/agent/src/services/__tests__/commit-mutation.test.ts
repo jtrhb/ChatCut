@@ -203,6 +203,66 @@ describe("commitMutation", () => {
     });
   });
 
+  describe("same-project serialization (per-project mutex)", () => {
+    it("two parallel commits on the same liveCore serialize: snapshotVersion advances by 2, both txs run", async () => {
+      const liveCore = ServerEditorCore.fromSnapshot(emptyState, 0);
+      const { db, insertSpy, updateSpy } = makeDB({ insertedId: "ch-X" });
+
+      const callP = (n: number) =>
+        commitMutation({
+          liveCore,
+          projectId: "proj-shared",
+          command: stubCommand(),
+          agentId: `agent-${n}`,
+          changeEntry: { projectId: "proj-shared", source: "agent", actionType: "x", targetType: "track", targetId: `t${n}` },
+          db,
+        });
+
+      const [r1, r2] = await Promise.all([callP(1), callP(2)]);
+
+      // Both txs ran (mutex serialized them, did not skip)
+      expect(insertSpy).toHaveBeenCalledTimes(2);
+      expect(updateSpy).toHaveBeenCalledTimes(2);
+
+      // Live core advanced by exactly 2 (no interleaving lost a bump)
+      expect(liveCore.snapshotVersion).toBe(2);
+
+      // Returned versions are distinct and monotonic
+      const versions = [r1.snapshotVersion, r2.snapshotVersion].sort();
+      expect(versions).toEqual([1, 2]);
+    });
+
+    it("a failed commit does not block the next commit (mutex chain swallows rejections)", async () => {
+      const liveCore = ServerEditorCore.fromSnapshot(emptyState, 0);
+      const { db: failingDb } = makeDB({ failOn: "update" });
+      const { db: okDb } = makeDB({ insertedId: "ch-OK" });
+
+      const failure = commitMutation({
+        liveCore,
+        projectId: "proj-shared",
+        command: stubCommand(),
+        agentId: "agent-1",
+        changeEntry: { projectId: "proj-shared", source: "agent", actionType: "x", targetType: "track", targetId: "t1" },
+        db: failingDb,
+      });
+      const success = commitMutation({
+        liveCore,
+        projectId: "proj-shared",
+        command: stubCommand(),
+        agentId: "agent-2",
+        changeEntry: { projectId: "proj-shared", source: "agent", actionType: "x", targetType: "track", targetId: "t2" },
+        db: okDb,
+      });
+
+      await expect(failure).rejects.toThrow();
+      const result = await success;
+
+      expect(result.changeId).toBe("ch-OK");
+      // First call did not bump; second call bumped exactly once
+      expect(liveCore.snapshotVersion).toBe(1);
+    });
+  });
+
   describe("cross-project isolation", () => {
     it("two parallel commits on different live cores don't bleed state", async () => {
       const coreA = ServerEditorCore.fromSnapshot(emptyState, 0);

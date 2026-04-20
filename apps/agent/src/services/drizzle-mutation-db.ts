@@ -17,9 +17,15 @@ import type {
  * `SELECT max(sequence) FROM change_log WHERE project_id=$1` plus 1.
  * That SELECT shares the tx isolation level — under SERIALIZABLE this
  * is race-free; under READ COMMITTED two parallel commits could pick
- * the same sequence and the unique-index (added by Phase 2C-2) catches
- * the dup at INSERT time. Pre-MVP we run single-instance per spec
- * §3.3.2, so the contention case is theoretical.
+ * the same sequence, but the **unique index on (project_id, sequence)**
+ * (declared in `db/schema.ts` as `change_log_project_sequence_uniq`)
+ * raises Postgres's unique_violation on the second INSERT and aborts
+ * that tx. The losing call sees the rejection at the
+ * `commitMutation`-level catch and the live core stays untouched per
+ * the rollback semantics. The in-process per-project mutex in
+ * `commitMutation` is the first line of defense; this index is the
+ * Postgres-level backstop for cases that bypass that mutex (multi-process
+ * deployments after the §3.3.2 single-instance constraint is lifted).
  */
 export class DrizzleMutationDB implements MutationDB {
   private readonly db: any;
