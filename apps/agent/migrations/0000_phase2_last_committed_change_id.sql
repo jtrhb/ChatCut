@@ -2,20 +2,29 @@
 -- Adds projects.last_committed_change_id so commitMutation (Phase 2B)
 -- can stamp the head changeId atomically alongside the snapshot update.
 --
--- This file is the manual SQL diff. The project has not previously kept
--- generated drizzle-kit manifests; future migrations should either land
--- as additional manual files here, or the team can run `drizzle-kit
--- generate` once to bring the manifest format up to date.
+-- =============================================================================
+-- DEPLOYMENT BOOTSTRAP — READ BEFORE APPLYING
+-- =============================================================================
+-- This file is a manual SQL diff. It assumes the base schema (`projects`,
+-- `change_log`, etc.) is ALREADY present in the database. It does NOT
+-- create the base tables.
 --
--- Apply with: psql "$DATABASE_URL" -f migrations/0000_phase2_last_committed_change_id.sql
--- Idempotent (uses IF NOT EXISTS / DO blocks) so re-running is safe.
+-- Recommended bootstrap on a fresh DB:
+--     bun run db:bootstrap        # runs db:push (creates base schema) then db:migrate (this file)
 --
--- PREREQUISITE: the base schema (`projects`, `change_log`, etc.) must
--- already be present in the DB. The project bootstraps tables via
--- `bun run db:push` (drizzle-kit push) on first deploy — see
--- `apps/agent/package.json`. Only run this migration AFTER that initial
--- push. Future schema changes either land here as additional manual SQL
--- files OR get picked up by another `db:push` for dev workflows.
+-- Or step-by-step:
+--     bun run db:push             # drizzle-kit push — creates base schema from src/db/schema.ts
+--     bun run db:migrate          # applies every migrations/*.sql in order
+--
+-- Why a hybrid push+migrate flow: the project never committed an initial
+-- schema dump (predates Phase 2). Rather than synthesise one retroactively,
+-- new structural changes that need transactional precision (FKs, unique
+-- indexes, data backfills) live here as manual SQL; routine schema drift
+-- continues to be applied via `db:push` from src/db/schema.ts.
+--
+-- All statements below are idempotent (IF NOT EXISTS / DO blocks) so
+-- re-running this migration after a schema push is safe.
+-- =============================================================================
 
 ALTER TABLE projects
   ADD COLUMN IF NOT EXISTS last_committed_change_id uuid NULL;

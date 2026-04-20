@@ -8,7 +8,10 @@
     "build": "tsup src/index.ts --format esm",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "db:push": "drizzle-kit push",
+    "db:migrate": "for f in migrations/*.sql; do echo \"-- $f\"; psql \"$DATABASE_URL\" -f \"$f\"; done",
+    "db:bootstrap": "bun run db:push && bun run db:migrate"
   },
   "dependencies": {
     "@opencut/core": "workspace:*",
@@ -28,6 +31,7 @@
     "typescript": "^5.8.3",
     "tsx": "^4.19.0",
     "tsup": "^8.5.0",
-    "vitest": "^3.2.1"
+    "vitest": "^3.2.1",
+    "drizzle-kit": "^0.31.4"
   }
 }
