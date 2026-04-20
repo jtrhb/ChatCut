@@ -139,10 +139,10 @@ describe("CreatorAgent", () => {
     expect(config.model).toBe("claude-sonnet-4-6");
   });
 
-  it("has 5 tools configured", async () => {
+  it("has 6 tools configured (5 originals + Phase 1C generate_into_segment)", async () => {
     await agent.dispatch(baseInput());
     const config = mockRun.mock.calls[0][0];
-    expect(config.tools).toHaveLength(5);
+    expect(config.tools).toHaveLength(6);
   });
 });
 

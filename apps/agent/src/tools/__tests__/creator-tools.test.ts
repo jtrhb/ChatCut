@@ -1,12 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   GenerateVideoSchema,
   GenerateImageSchema,
   CheckGenerationStatusSchema,
   ReplaceSegmentSchema,
   CompareBeforeAfterSchema,
+  GenerateIntoSegmentSchema,
   creatorToolDefinitions,
 } from "../creator-tools.js";
+import { CreatorToolExecutor } from "../creator-tool-executor.js";
+import type { ContentEditor } from "../../services/content-editor.js";
 
 // ── Schema Validation Tests ──────────────────────────────────────────────────
 
@@ -192,8 +195,8 @@ describe("Creator Tool Schemas", () => {
 // ── Tool Definition Tests ────────────────────────────────────────────────────
 
 describe("creatorToolDefinitions", () => {
-  it("contains exactly 5 tools", () => {
-    expect(creatorToolDefinitions).toHaveLength(5);
+  it("contains exactly 6 tools (5 originals + Phase 1C generate_into_segment)", () => {
+    expect(creatorToolDefinitions).toHaveLength(6);
   });
 
   it("all tools have agentType 'creator'", () => {
@@ -234,5 +237,137 @@ describe("creatorToolDefinitions", () => {
   it("replace_segment is a write tool", () => {
     const tool = creatorToolDefinitions.find((t) => t.name === "replace_segment");
     expect(tool?.accessMode).toBe("write");
+  });
+});
+
+// ── Phase 1C: generate_into_segment + CreatorToolExecutor ────────────────────
+// Audit §B.ContentEditor was the last dormant module: a full
+// generate→download→upload pipeline existed but no tool ever called it.
+// This phase wires it via a new generate_into_segment tool exposed by a
+// minimal CreatorToolExecutor (mirrors the AssetToolExecutor shape).
+
+describe("GenerateIntoSegmentSchema", () => {
+  it("accepts the minimum required input", () => {
+    expect(
+      GenerateIntoSegmentSchema.safeParse({
+        element_id: "el-1",
+        prompt: "snowy mountains",
+        time_range: { start: 0, end: 5 },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("accepts optional provider", () => {
+    expect(
+      GenerateIntoSegmentSchema.safeParse({
+        element_id: "el-1",
+        prompt: "snowy mountains",
+        time_range: { start: 0, end: 5 },
+        provider: "kling",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects missing prompt", () => {
+    expect(
+      GenerateIntoSegmentSchema.safeParse({
+        element_id: "el-1",
+        time_range: { start: 0, end: 5 },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects missing time_range", () => {
+    expect(
+      GenerateIntoSegmentSchema.safeParse({
+        element_id: "el-1",
+        prompt: "snowy mountains",
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("CreatorToolExecutor", () => {
+  function makeExecutor(contentEditorOverrides: Partial<ContentEditor> = {}) {
+    const replaceWithGenerated = vi.fn().mockResolvedValue({
+      newStorageKey: "generated/abc.mp4",
+    });
+    const contentEditor = {
+      replaceWithGenerated,
+      ...contentEditorOverrides,
+    } as unknown as ContentEditor;
+    const executor = new CreatorToolExecutor({ contentEditor });
+    return { executor, replaceWithGenerated };
+  }
+
+  it("hasToolName recognises generate_into_segment", () => {
+    const { executor } = makeExecutor();
+    expect(executor.hasToolName("generate_into_segment")).toBe(true);
+    expect(executor.hasToolName("nonexistent_tool")).toBe(false);
+  });
+
+  it("generate_into_segment forwards mapped params to ContentEditor and returns the storageKey", async () => {
+    const { executor, replaceWithGenerated } = makeExecutor();
+    const result = await executor.execute(
+      "generate_into_segment",
+      {
+        element_id: "el-1",
+        prompt: "snowy mountains",
+        time_range: { start: 1.5, end: 6 },
+        provider: "kling",
+      },
+      { agentType: "creator", taskId: "task-001" },
+    );
+
+    expect(replaceWithGenerated).toHaveBeenCalledTimes(1);
+    expect(replaceWithGenerated).toHaveBeenCalledWith({
+      elementId: "el-1",
+      prompt: "snowy mountains",
+      timeRange: { start: 1.5, end: 6 },
+      provider: "kling",
+      agentId: "task-001",
+    });
+    expect(result.success).toBe(true);
+    expect(result.data).toEqual({ newStorageKey: "generated/abc.mp4" });
+  });
+
+  it("returns success:false on schema validation failure (does not call ContentEditor)", async () => {
+    const { executor, replaceWithGenerated } = makeExecutor();
+    const result = await executor.execute(
+      "generate_into_segment",
+      { element_id: "el-1" }, // missing prompt + time_range
+      { agentType: "creator", taskId: "task-002" },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/schema|required|invalid/i);
+    expect(replaceWithGenerated).not.toHaveBeenCalled();
+  });
+
+  it("returns success:false when ContentEditor throws", async () => {
+    const { executor } = makeExecutor({
+      replaceWithGenerated: vi.fn().mockRejectedValue(new Error("provider 503")),
+    } as Partial<ContentEditor>);
+    const result = await executor.execute(
+      "generate_into_segment",
+      {
+        element_id: "el-1",
+        prompt: "snowy",
+        time_range: { start: 0, end: 5 },
+      },
+      { agentType: "creator", taskId: "task-003" },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("provider 503");
+  });
+
+  it("returns success:false for unregistered tool names", async () => {
+    const { executor } = makeExecutor();
+    const result = await executor.execute(
+      "nonexistent_tool",
+      {},
+      { agentType: "creator", taskId: "task-004" },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/unknown|registered|nonexistent_tool/i);
   });
 });

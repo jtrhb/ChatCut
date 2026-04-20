@@ -268,6 +268,38 @@ async function main() {
 		);
 	}
 
+	// ── CreatorToolExecutor (audit §B.ContentEditor / Phase 1C) ──────────────
+	// First call site for the previously-dormant ContentEditor pipeline.
+	// Requires GENERATION_API_URL + R2 — without both we leave the executor
+	// null and the toolExecutor router falls through to "no registered
+	// executor" for generate_into_segment, matching the AssetToolExecutor
+	// fail-fast pattern.
+	let creatorToolExecutor:
+		| import("./tools/creator-tool-executor.js").CreatorToolExecutor
+		| null = null;
+	if (process.env.GENERATION_API_URL && r2) {
+		const [{ ContentEditor }, { GenerationClient }, { CreatorToolExecutor }] =
+			await Promise.all([
+				import("./services/content-editor.js"),
+				import("./services/generation-client.js"),
+				import("./tools/creator-tool-executor.js"),
+			]);
+		const generationClient = new GenerationClient({
+			baseUrl: process.env.GENERATION_API_URL,
+			apiKey: process.env.GENERATION_API_KEY ?? "",
+		});
+		const contentEditor = new ContentEditor({
+			generationClient,
+			objectStorage: r2,
+			serverEditorCore,
+		});
+		creatorToolExecutor = new CreatorToolExecutor({ contentEditor });
+	} else {
+		console.warn(
+			"[boot] CreatorToolExecutor disabled: GENERATION_API_URL and R2_BUCKET must both be set for generate_into_segment to load.",
+		);
+	}
+
 	// Tool executor for sub-agents — routes to real implementations when available.
 	// Accepts optional ToolContext from the pipeline so identity (sessionId/userId)
 	// reaches the underlying executor for tenant-scoped operations.
@@ -292,6 +324,14 @@ async function main() {
 		if (assetToolExecutor?.hasToolName(name)) {
 			return assetToolExecutor.execute(name, input, {
 				agentType: (context?.agentType as any) ?? "asset",
+				taskId: context?.taskId ?? "default",
+				sessionId: context?.sessionId,
+				userId: context?.userId,
+			});
+		}
+		if (creatorToolExecutor?.hasToolName(name)) {
+			return creatorToolExecutor.execute(name, input, {
+				agentType: (context?.agentType as any) ?? "creator",
 				taskId: context?.taskId ?? "default",
 				sessionId: context?.sessionId,
 				userId: context?.userId,

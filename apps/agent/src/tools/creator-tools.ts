@@ -38,6 +38,22 @@ export const CompareBeforeAfterSchema = z.object({
   time: z.number(),
 });
 
+/**
+ * Phase 1C: drives ContentEditor.replaceWithGenerated end-to-end —
+ * generation request → completion poll → upload → return storageKey.
+ * The model can chain a separate replace_segment call (with the
+ * returned new_storage_key) when timeline placement is needed.
+ *
+ * Audit §B.ContentEditor: this is the first call site for the existing
+ * extract→generate→upload pipeline.
+ */
+export const GenerateIntoSegmentSchema = z.object({
+  element_id: z.string(),
+  prompt: z.string(),
+  time_range: z.object({ start: z.number(), end: z.number() }),
+  provider: z.enum(["kling", "seedance", "veo"]).optional(),
+});
+
 // ── Tool Definitions ─────────────────────────────────────────────────────────
 
 export const creatorToolDefinitions: ToolDefinition[] = [
@@ -75,5 +91,13 @@ export const creatorToolDefinitions: ToolDefinition[] = [
     inputSchema: CompareBeforeAfterSchema,
     agentTypes: ["creator"],
     accessMode: "read",
+  },
+  {
+    name: "generate_into_segment",
+    description:
+      "Generate a new video clip from a prompt and upload it to storage in one call. Returns the new storage key, which can then be passed to replace_segment to swap the timeline element.",
+    inputSchema: GenerateIntoSegmentSchema,
+    agentTypes: ["creator"],
+    accessMode: "write",
   },
 ];
