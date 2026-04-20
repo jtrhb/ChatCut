@@ -172,4 +172,96 @@ describe("Production wiring", () => {
       expect(masterAgent).toBeDefined();
     });
   });
+
+  // ── Phase 1A smoke: memory + context-sync wiring ────────────────────────
+  // The audit's largest dormant-module cluster (§B.MemoryStore et al.)
+  // failed because nothing constructed the chain at boot. This test wires
+  // the same chain index.ts now wires (memoryStore → MasterAgent →
+  // writer-token callback → MemoryExtractor → ChangeLog subscription) and
+  // proves a changeset_rejected event flows end-to-end into a memory
+  // write. Without this wiring the rejection event had no listener, so
+  // the regression target is "an emitted decision must reach the store."
+  describe("Phase 1A: memory + context-sync wiring", () => {
+    it("ChangeLog → MemoryExtractor write callback fires through MasterAgent's writer token", async () => {
+      const { createWiredMasterAgent } = await import("../server.js");
+      const { ProjectContextManager } = await import("../context/project-context.js");
+      const { ProjectWriteLock } = await import("../context/write-lock.js");
+      const { createEventBusHook } = await import("../tools/hooks.js");
+      const { EventBus } = await import("../events/event-bus.js");
+      const { MemoryExtractor } = await import("../memory/memory-extractor.js");
+      const { ContextSynchronizer } = await import("../context/context-sync.js");
+
+      // Fake store satisfies both the reader interface (used by the
+      // extractor) and the token-gated writer interface (used by
+      // MasterAgent.writeMemory under the hood). The token check passes
+      // because MasterAgent claims the token via grantWriterToken on
+      // construction and reuses it on writeMemory.
+      const writtenToken: { current: symbol | null } = { current: null };
+      const writes: Array<{ token: symbol; path: string; memory: any }> = [];
+      const fakeStore: any = {
+        listDir: async () => [],
+        readParsed: async () => { throw new Error("not stored"); },
+        exists: async () => false,
+        grantWriterToken: () => {
+          if (writtenToken.current) {
+            throw new Error("token already granted");
+          }
+          writtenToken.current = Symbol("memory-writer");
+          return writtenToken.current;
+        },
+        writeMemory: async (token: symbol, path: string, memory: any) => {
+          writes.push({ token, path, memory });
+        },
+      };
+
+      const changeLog = new ChangeLog();
+      const contextSynchronizer = new ContextSynchronizer(changeLog);
+      const eventBus = new EventBus();
+
+      const masterAgent = createWiredMasterAgent({
+        apiKey: "test-key",
+        contextManager: new ProjectContextManager(),
+        writeLock: new ProjectWriteLock(),
+        eventBusHook: createEventBusHook(eventBus),
+        skillContracts: [],
+        subAgentDispatchers: new Map(),
+        memoryStore: fakeStore,
+        contextSynchronizer,
+      });
+
+      // Mirror index.ts: extractor uses the writer callback that's
+      // bound to Master's claimed token.
+      const writeMemory = masterAgent.getMemoryWriter();
+      const extractor = new MemoryExtractor({
+        changeLog,
+        memoryReader: fakeStore,
+        writeMemory,
+      });
+      extractor.start();
+
+      // Trigger the chain: a recorded entry + a rejection decision.
+      changeLog.record({
+        source: "agent",
+        changesetId: "cs-wire-smoke",
+        action: { type: "delete", targetType: "element", targetId: "el-1", details: {} },
+        summary: "Deleted clip",
+      });
+      changeLog.emitDecision({
+        type: "changeset_rejected",
+        changesetId: "cs-wire-smoke",
+        timestamp: Date.now(),
+      });
+
+      // The extractor's listener is async; let microtasks settle.
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Token must have been granted exactly once (Master claimed it).
+      expect(writtenToken.current).not.toBeNull();
+      // The decision event must have produced a draft-implicit memory.
+      expect(writes.length).toBeGreaterThan(0);
+      expect(writes[0].token).toBe(writtenToken.current);
+      expect(writes[0].memory.source).toBe("implicit");
+      expect(writes[0].memory.status).toBe("draft");
+    });
+  });
 });
