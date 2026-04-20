@@ -18,6 +18,7 @@ export function ChatPanel({ projectId, className }: ChatPanelProps) {
     messages,
     isLoading,
     agentStatus,
+    progressText,
     sendMessage,
     approveChangeset,
     rejectChangeset,
@@ -70,6 +71,15 @@ export function ChatPanel({ projectId, className }: ChatPanelProps) {
         <span className="text-sm font-medium">Chat</span>
         <AgentStatusIndicator status={agentStatus} />
       </div>
+
+      {/* Progress line (Phase 4 tool.progress SSE events). Only renders
+          when a long-call has emitted at least one update — clears on
+          assistant message arrival or status→idle. */}
+      {progressText && (
+        <div className="px-3 py-1.5 border-b shrink-0 text-xs text-muted-foreground bg-muted/40">
+          {progressText}
+        </div>
+      )}
 
       {/* Message list */}
       <div className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-3 min-h-0">

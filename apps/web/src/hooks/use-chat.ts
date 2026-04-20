@@ -44,10 +44,31 @@ export type AgentStatus =
 	| "executing"
 	| "awaiting_approval";
 
+/**
+ * Typed shape of the `tool.progress` SSE event published by the agent
+ * service (mirrors the agent-side `tool-pipeline.ts:298-309` emit). Lives
+ * in this hook because it's the single SSE consumer; if a second
+ * consumer ever needs it we'll move it to a shared module.
+ */
+interface ToolProgressSseEvent {
+	type: "tool.progress";
+	data: {
+		toolName: string;
+		toolCallId?: string;
+		step: number;
+		totalSteps?: number;
+		text?: string;
+		estimatedRemainingMs?: number;
+	};
+}
+
 export interface UseChatReturn {
 	messages: Message[];
 	isLoading: boolean;
 	agentStatus: AgentStatus;
+	/** Free-form description of the tool currently mid-flight (from
+	 *  tool.progress events). null when no long-call is active. */
+	progressText: string | null;
 	sendMessage: (content: string) => void;
 	approveChangeset: (changesetId: string) => void;
 	rejectChangeset: (changesetId: string) => void;
@@ -58,6 +79,7 @@ export function useChat(projectId: string): UseChatReturn {
 	const [messages, setMessages] = useState<Message[]>([]);
 	const [isLoading, setIsLoading] = useState(false);
 	const [agentStatus, setAgentStatus] = useState<AgentStatus>("idle");
+	const [progressText, setProgressText] = useState<string | null>(null);
 	// Session is created lazily by the agent on the first chat POST and
 	// returned in the response body; we hold onto it for SSE filtering and
 	// subsequent multi-turn requests.
@@ -97,6 +119,10 @@ export function useChat(projectId: string): UseChatReturn {
 
 				if (type === "message") {
 					const msg = data.message as Message;
+					// A new assistant message means whatever long-call was
+					// running has produced its result — clear the progress line
+					// so it doesn't linger above stale work.
+					if (msg.role === "assistant") setProgressText(null);
 					setMessages((prev) => {
 						const exists = prev.some((m) => m.id === msg.id);
 						if (exists) {
@@ -105,14 +131,24 @@ export function useChat(projectId: string): UseChatReturn {
 						return [...prev, msg];
 					});
 				} else if (type === "status") {
-					setAgentStatus((data.status as AgentStatus) ?? "idle");
+					const next = (data.status as AgentStatus) ?? "idle";
+					setAgentStatus(next);
+					// Status transitions back to idle/awaiting_approval mean
+					// no long-call is active; drop any stale progress line.
+					if (next === "idle" || next === "awaiting_approval") {
+						setProgressText(null);
+					}
 				} else if (type === "tool.progress") {
-					// Phase 4: surface long-call progress as a transient agent
-					// status. The full event also carries toolName / step /
-					// totalSteps / text under `data` for richer renderings later.
-					const progressData = (data.data as Record<string, unknown>) ?? {};
-					const text = (progressData.text as string | undefined) ?? "Working";
-					setAgentStatus(text as AgentStatus);
+					// Phase 4 reviewer HIGH #2: surface long-call progress in
+					// its OWN state, not by abusing the typed AgentStatus union
+					// (the indicator's STATUS_CONFIG[status] would crash on a
+					// free-form string). Fully typed against the agent-side
+					// emit shape.
+					const evt = data as unknown as ToolProgressSseEvent;
+					const text = evt.data?.text;
+					if (typeof text === "string" && text.length > 0) {
+						setProgressText(text);
+					}
 				} else if (type === "changeset_update") {
 					const changesetId = data.changesetId as string;
 					const status = data.status as ChangesetAttachment["status"];
@@ -261,6 +297,7 @@ export function useChat(projectId: string): UseChatReturn {
 		messages,
 		isLoading,
 		agentStatus,
+		progressText,
 		sendMessage,
 		approveChangeset,
 		rejectChangeset,
