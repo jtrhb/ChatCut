@@ -11,7 +11,10 @@ import type {
 	ProjectContextManager,
 } from "../context/project-context.js";
 import type { ProjectWriteLock } from "../context/write-lock.js";
-import { masterToolDefinitions } from "../tools/master-tools.js";
+import {
+	ExploreOptionsSchema,
+	masterToolDefinitions,
+} from "../tools/master-tools.js";
 import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
 import { PromptBuilder } from "../prompt/prompt-builder.js";
 import type { PromptContext } from "../prompt/types.js";
@@ -642,22 +645,20 @@ export class MasterAgent {
 							"explore_options requires a projectId on the current turn identity",
 					};
 				}
-				const params = input as {
-					intent: string;
-					baseSnapshotVersion: number;
-					timelineSnapshot: string;
-					candidates: Array<{
-						label: string;
-						summary: string;
-						candidateType: string;
-						commands: unknown[];
-						expectedMetrics: {
-							durationChange: string;
-							affectedElements: number;
-						};
-					}>;
-				};
-				return this.explorationEngine.explore({ ...params, projectId });
+				// Reviewer MEDIUM #3: validate against the existing zod
+				// schema (the same one the model sees in the tool definition)
+				// so a malformed model output yields a clear error instead
+				// of crashing mid-persist with a runtime TypeError.
+				const parsed = ExploreOptionsSchema.safeParse(input);
+				if (!parsed.success) {
+					return {
+						error: `explore_options input failed schema validation: ${parsed.error.message}`,
+					};
+				}
+				return this.explorationEngine.explore({
+					...parsed.data,
+					projectId,
+				});
 			}
 
 			case "export_video": {

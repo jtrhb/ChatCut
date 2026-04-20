@@ -62,6 +62,10 @@ export function createMessageHandler(deps: {
 		userId?: string;
 	}) => Promise<void> | void;
 }): MessageHandler {
+	// Per-handler flag for the "afterTurn wired but no projectId" warn-once
+	// (reviewer MEDIUM #5). Per-handler — not module-level — so multiple
+	// handlers in tests don't share state.
+	let warnedOnAfterTurnSkip = false;
 	return async (message, sessionId, identity) => {
 		deps.eventBus.emit({
 			type: "agent.turn_start",
@@ -109,15 +113,26 @@ export function createMessageHandler(deps: {
 
 		// Best-effort post-turn callback (PatternObserver scheduling, etc.).
 		// Errors here MUST NOT propagate — the user's turn already succeeded.
-		if (deps.afterTurn && identity?.projectId) {
-			try {
-				await deps.afterTurn({
-					sessionId,
-					projectId: identity.projectId,
-					userId: identity.userId,
-				});
-			} catch {
-				// swallow — telemetry / observers are not load-bearing
+		if (deps.afterTurn) {
+			if (identity?.projectId) {
+				try {
+					await deps.afterTurn({
+						sessionId,
+						projectId: identity.projectId,
+						userId: identity.userId,
+					});
+				} catch {
+					// swallow — telemetry / observers are not load-bearing
+				}
+			} else if (!warnedOnAfterTurnSkip) {
+				// Reviewer MEDIUM #5: silent skip used to make
+				// "PatternObserver never fired in prod" a recurring
+				// debug expedition. Warn exactly once per handler so the
+				// log isn't spammy but the operator gets a clear signal.
+				warnedOnAfterTurnSkip = true;
+				console.warn(
+					"[messageHandler] afterTurn wired but the request carries no projectId — observer will not fire until identity is propagated.",
+				);
 			}
 		}
 

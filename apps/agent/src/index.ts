@@ -205,38 +205,62 @@ async function main() {
 		| null = null;
 	if (process.env.DATABASE_URL) {
 		const { JobQueue } = await import("./services/job-queue.js");
-		jobQueue = new JobQueue({ connectionString: process.env.DATABASE_URL });
-		await jobQueue.start();
-
-		// Phase 3 will replace this with the real Playwright pipeline. For
-		// now we register a no-op worker so enqueued preview-render jobs are
-		// acknowledged (instead of starving forever); the worker logs the
-		// payload so we can confirm the ExplorationEngine → queue → worker
-		// wire actually moves messages.
-		jobQueue.registerWorker<{ explorationId: string; candidateId: string }>(
-			"preview-render",
-			async (job) => {
-				console.log(
-					`[preview-render stub] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId}`,
-				);
-			},
-		);
-
-		if (r2) {
-			const { ExplorationEngine } = await import(
-				"./exploration/exploration-engine.js"
-			);
-			const { db } = await import("./db/index.js");
-			explorationEngine = new ExplorationEngine({
-				serverCore: serverEditorCore,
-				jobQueue,
-				objectStorage: r2 as any,
-				db: db as any,
-			});
-		} else {
+		const queue = new JobQueue({
+			connectionString: process.env.DATABASE_URL,
+		});
+		// Reviewer MEDIUM #4: pg-boss connect failures (bad connection
+		// string, transient network) must not abort the whole boot. Every
+		// other subsystem here degrades gracefully; mirror that behaviour so
+		// a queue outage doesn't take down chat / changeset routes.
+		try {
+			await queue.start();
+			jobQueue = queue;
+		} catch (err) {
 			console.warn(
-				"[boot] ExplorationEngine disabled: R2_BUCKET required (in addition to DATABASE_URL).",
+				`[boot] JobQueue.start() failed; ExplorationEngine will be disabled. Error: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
 			);
+		}
+
+		if (jobQueue) {
+			// Phase 3 will replace this with the real Playwright pipeline. For
+			// now we register a no-op worker so enqueued preview-render jobs are
+			// acknowledged (instead of starving forever); the worker logs the
+			// payload so we can confirm the ExplorationEngine → queue → worker
+			// wire actually moves messages.
+			jobQueue.registerWorker<{ explorationId: string; candidateId: string }>(
+				"preview-render",
+				async (job) => {
+					console.log(
+						`[preview-render stub] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId}`,
+					);
+				},
+			);
+
+			if (r2) {
+				const { ExplorationEngine } = await import(
+					"./exploration/exploration-engine.js"
+				);
+				const { db } = await import("./db/index.js");
+				// `r2` narrows to ObjectStorage in this branch — no cast needed.
+				// `db` is the drizzle handle; ExplorationEngine declares a
+				// minimal `ExplorationDB` interface and drizzle satisfies it
+				// structurally at runtime. Cast via `unknown` to that named
+				// type instead of `any` so future drift surfaces in tsc.
+				type ExplorationDBT =
+					import("./exploration/exploration-engine.js").ExplorationDB;
+				explorationEngine = new ExplorationEngine({
+					serverCore: serverEditorCore,
+					jobQueue,
+					objectStorage: r2,
+					db: db as unknown as ExplorationDBT,
+				});
+			} else {
+				console.warn(
+					"[boot] ExplorationEngine disabled: R2_BUCKET required (in addition to DATABASE_URL).",
+				);
+			}
 		}
 	} else {
 		console.warn(
@@ -341,13 +365,21 @@ async function main() {
 		masterAgent,
 		sessionManager,
 		eventBus,
-		afterTurn: patternObserver
-			? async (identity) => {
-					const mapping = contextManager.getBrandForProject(identity.projectId);
-					if (!mapping) return;
-					maybeTriggerAnalysis(patternObserver!, mapping.brand, mapping.series);
-				}
-			: undefined,
+		// Reviewer HIGH #2: capture patternObserver in a local const
+		// inside the truthy branch so the async closure holds a non-null
+		// reference instead of relying on `!` (which a future re-null of
+		// the outer binding would silently invalidate). Same shape — the
+		// IIFE just exists to give the const a scope tighter than this
+		// object literal.
+		afterTurn: (() => {
+			const observer = patternObserver;
+			if (!observer) return undefined;
+			return async (identity: { projectId: string; sessionId: string; userId?: string }) => {
+				const mapping = contextManager.getBrandForProject(identity.projectId);
+				if (!mapping) return;
+				maybeTriggerAnalysis(observer, mapping.brand, mapping.series);
+			};
+		})(),
 	});
 
 	// B8: Construct skillsRouter only when DB + R2 are configured. Previously
