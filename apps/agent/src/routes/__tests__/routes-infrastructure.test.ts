@@ -1,9 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import { createCommandsRouter } from "../commands.js";
 import { createProjectRouter } from "../project.js";
 import { createMediaRouter } from "../media.js";
 import type { ProjectContextManager } from "../../context/project-context.js";
+import { ServerEditorCore } from "../../services/server-editor-core.js";
+import { CoreRegistry } from "../../services/core-registry.js";
+import type { MutationDB } from "../../services/commit-mutation.js";
 
 // ---------------------------------------------------------------------------
 // Minimal mock for ServerEditorCore
@@ -160,6 +163,172 @@ describe("/commands with mock serverEditorCore", () => {
     expect(res.status).toBe(409);
     const body = await res.json() as any;
     expect(body).toHaveProperty("error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /commands with CoreRegistry + MutationDB — Phase 2C-2 commitMutation path
+// ---------------------------------------------------------------------------
+// Mirrors the existing makeMockServerEditorCore pattern (which mocks
+// because the route's `{type, ...params}` shape is not a real Command —
+// real EditorCore would throw at execute time). We need clone() and
+// replaceRuntime() too because commitMutation calls them.
+function makeMockCore(initialVersion: number): any {
+  let version = initialVersion;
+  const state = { project: null, scenes: [], activeSceneId: null };
+  const self: any = {
+    get snapshotVersion() { return version; },
+    validateVersion(v: number) {
+      if (version !== v) throw new Error(`Stale snapshot version: expected ${v}, got ${version}`);
+    },
+    executeHumanCommand() { version++; },
+    executeAgentCommand() { version++; },
+    clone() { return makeMockCore(version); },
+    replaceRuntime(donor: any) { version = donor.snapshotVersion; },
+    serialize() { return state; },
+  };
+  return self;
+}
+
+function makeRegistryAndDB(opts: {
+  initialVersion?: number;
+  insertedChangeId?: string;
+  failOn?: "insert" | "update";
+} = {}): {
+  coreRegistry: CoreRegistry;
+  mutationDB: MutationDB;
+  liveCore: any;
+  insertSpy: ReturnType<typeof vi.fn>;
+  updateSpy: ReturnType<typeof vi.fn>;
+} {
+  const liveCore = makeMockCore(opts.initialVersion ?? 0);
+  const coreRegistry = {
+    get: async () => liveCore,
+    has: () => true,
+    invalidate: () => {},
+    evictIdle: () => [],
+  } as unknown as CoreRegistry;
+
+  const insertSpy = vi.fn(async () => ({ id: opts.insertedChangeId ?? "ch-1" }));
+  const updateSpy = vi.fn(async () => {});
+  if (opts.failOn === "insert") insertSpy.mockRejectedValue(new Error("insert failed"));
+  if (opts.failOn === "update") updateSpy.mockRejectedValue(new Error("update failed"));
+  const mutationDB: MutationDB = {
+    transaction: async (fn) =>
+      fn({
+        insertChangeLogEntry: insertSpy,
+        updateProjectSnapshot: updateSpy,
+      }),
+  };
+  return { coreRegistry, mutationDB, liveCore, insertSpy, updateSpy };
+}
+
+describe("/commands with coreRegistry + mutationDB (Phase 2C-2)", () => {
+  it("routes through commitMutation when projectId is present; returns success + new version + changeId", async () => {
+    const { coreRegistry, mutationDB, insertSpy, updateSpy } = makeRegistryAndDB({
+      initialVersion: 4,
+      insertedChangeId: "ch-42",
+    });
+    const app = new Hono();
+    app.route("/commands", createCommandsRouter({ coreRegistry, mutationDB }));
+
+    const res = await app.request("/commands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "CUT_CLIP",
+        params: { clipId: "abc-123" },
+        baseSnapshotVersion: 4,
+        projectId: "proj-A",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(true);
+    expect(body.snapshotVersion).toBe(5);
+    expect(body.changeId).toBe("ch-42");
+    expect(insertSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 409 with stale-version error when baseSnapshotVersion doesn't match", async () => {
+    const { coreRegistry, mutationDB, insertSpy } = makeRegistryAndDB({
+      initialVersion: 7,
+    });
+    const app = new Hono();
+    app.route("/commands", createCommandsRouter({ coreRegistry, mutationDB }));
+
+    const res = await app.request("/commands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "CUT_CLIP",
+        params: { clipId: "abc-123" },
+        baseSnapshotVersion: 4,
+        projectId: "proj-A",
+      }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(insertSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 with persisted:false when DB tx update fails (live core unchanged)", async () => {
+    const { coreRegistry, mutationDB, liveCore } = makeRegistryAndDB({
+      initialVersion: 0,
+      failOn: "update",
+    });
+    const app = new Hono();
+    app.route("/commands", createCommandsRouter({ coreRegistry, mutationDB }));
+
+    const res = await app.request("/commands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "CUT_CLIP",
+        params: { clipId: "abc-123" },
+        baseSnapshotVersion: 0,
+        projectId: "proj-A",
+      }),
+    });
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as any;
+    expect(body.persisted).toBe(false);
+
+    // Live core's version still 0 (live not touched on tx failure)
+    expect(liveCore.snapshotVersion).toBe(0);
+  });
+
+  it("falls back to the singleton path when projectId is omitted (legacy contract preserved)", async () => {
+    const { coreRegistry, mutationDB, insertSpy } = makeRegistryAndDB();
+    // Mirror the existing pattern (line 128): a mock singleton that
+    // accepts any command shape — real ServerEditorCore would throw
+    // because {type, ...params} isn't a real Command.
+    const singleton = makeMockServerEditorCore({ snapshotVersion: 9 });
+    const app = new Hono();
+    app.route(
+      "/commands",
+      createCommandsRouter({ serverEditorCore: singleton, coreRegistry, mutationDB }),
+    );
+
+    const res = await app.request("/commands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "CUT_CLIP",
+        params: { clipId: "abc-123" },
+        baseSnapshotVersion: 9,
+        // no projectId → legacy singleton path
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.snapshotVersion).toBe(10);
+    expect(body.changeId).toBeUndefined(); // legacy path doesn't return changeId
+    expect(insertSpy).not.toHaveBeenCalled();
   });
 });
 

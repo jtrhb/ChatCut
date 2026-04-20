@@ -194,6 +194,38 @@ async function main() {
 		);
 	}
 
+	// ── CoreRegistry + DrizzleMutationDB (audit Phase 2C-2) ──────────────────
+	// When DATABASE_URL is set we stand up the per-project registry and a
+	// drizzle-backed MutationDB so the /commands route can persist via
+	// commitMutation. The legacy singleton serverEditorCore stays wired
+	// for the dev/test boot that has no DB. Cutover to a registry-only
+	// boot lands when all consumers (changesetManager, ExplorationEngine,
+	// Master tool exec) take projectId-scoped cores instead of the
+	// singleton — tracked as a follow-up to this phase.
+	let coreRegistry:
+		| import("./services/core-registry.js").CoreRegistry
+		| null = null;
+	let mutationDB:
+		| import("./services/commit-mutation.js").MutationDB
+		| null = null;
+	if (process.env.DATABASE_URL) {
+		const [{ CoreRegistry }, { DrizzleSnapshotSource }, { DrizzleMutationDB }, { db }] =
+			await Promise.all([
+				import("./services/core-registry.js"),
+				import("./services/drizzle-snapshot-source.js"),
+				import("./services/drizzle-mutation-db.js"),
+				import("./db/index.js"),
+			]);
+		coreRegistry = new CoreRegistry({
+			source: new DrizzleSnapshotSource(db),
+		});
+		mutationDB = new DrizzleMutationDB(db);
+	} else {
+		console.warn(
+			"[boot] CoreRegistry + MutationDB disabled: DATABASE_URL not set. /commands runs against the singleton serverEditorCore (no persistence).",
+		);
+	}
+
 	// ── Job queue + ExplorationEngine (audit §B.JobQueue / §B.ExplorationEngine) ──
 	// pg-boss requires DATABASE_URL. ExplorationEngine then needs the queue,
 	// a real ServerEditorCore, R2, and the drizzle db. Each dep is gated so
@@ -457,7 +489,12 @@ async function main() {
 	const app = createApp({
 		services,
 		messageHandler,
-		infrastructure: { serverEditorCore, contextManager },
+		infrastructure: {
+			serverEditorCore,
+			contextManager,
+			coreRegistry: coreRegistry ?? undefined,
+			mutationDB: mutationDB ?? undefined,
+		},
 		skillsRouter,
 		changesetRouter,
 	});

@@ -21,6 +21,8 @@ import type { ProjectContextManager } from "./context/project-context.js";
 import type { ProjectWriteLock } from "./context/write-lock.js";
 import type { DispatchInput, DispatchOutput } from "./agents/types.js";
 import type { ServerEditorCore } from "./services/server-editor-core.js";
+import type { CoreRegistry } from "./services/core-registry.js";
+import type { MutationDB } from "./services/commit-mutation.js";
 import type { ObjectStorage } from "./services/object-storage.js";
 import type { ChangesetManager } from "./changeset/changeset-manager.js";
 import type { MemoryStore } from "./memory/memory-store.js";
@@ -33,6 +35,10 @@ export interface InfrastructureDeps {
 	serverEditorCore?: ServerEditorCore;
 	contextManager?: ProjectContextManager;
 	objectStorage?: ObjectStorage;
+	/** Phase 2C-2: when both are present the /commands route routes through
+	 *  commitMutation for any request that names a projectId. */
+	coreRegistry?: CoreRegistry;
+	mutationDB?: MutationDB;
 }
 
 export interface AppServices {
@@ -238,7 +244,11 @@ export function createApp(opts?: {
 	const infra = opts?.infrastructure ?? {};
 	app.route(
 		"/commands",
-		createCommandsRouter({ serverEditorCore: infra.serverEditorCore }),
+		createCommandsRouter({
+			serverEditorCore: infra.serverEditorCore,
+			coreRegistry: infra.coreRegistry,
+			mutationDB: infra.mutationDB,
+		}),
 	);
 	app.route(
 		"/project",
