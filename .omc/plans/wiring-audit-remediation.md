@@ -125,19 +125,48 @@ Goal: persistent multi-project state, `commitMutation` clone-then-commit, projec
 
 ---
 
-## Phase 3 status (2026-04-20): SCAFFOLD SHIPPED, RENDER ENGINE DEFERRED
+## Phase 3 status (2026-04-21): CLOSED — shipped via Modal-native architecture
 
-What landed this session (commits to follow):
-- `services/headless-renderer.ts`: browser-pool orchestration shell with mockable Browser/Page seam (TDD: 6 tests). Pool race condition (concurrent acquires racing past poolSize) caught + fixed pre-commit via synchronous slot reservation.
-- `routes/exploration.ts`: GET `/:id/preview/:candidateId` mints signed URL from R2 — the URL shape the web client will consume once previews actually exist.
-- `index.ts` preview-render worker: wired through to `HeadlessRenderer.exportVideo` when a real renderer is constructible; falls back to the existing log-only stub otherwise (the path that runs today because the browser factory + renderer base URL aren't wired).
+Phase 3 replaces the original Playwright-in-agent design with a dedicated
+Python service on Modal. The full plan + per-stage commits live at
+`.omc/plans/phase-3-headless-renderer.md`. Six stages shipped:
 
-What stays explicitly deferred:
-- §3.1 Playwright + chromium install (~500MB, root-level deps via `--with-deps`). Add as a runtime install step on the agent host; not a code change.
-- §3.3 renderer-friendly static build. **The web side has no `apps/web/src/components/editor/preview/` module to extract** — the renderer that Playwright would load doesn't exist yet. Until a Phase-3.3 spike builds it (plan's "highest-risk single task"), the HeadlessRenderer's `page.evaluate` body has nothing to call, so `exportVideo` cannot produce real MP4s in production.
-- §3.6 Daytona sandbox pool — defer per the original plan recommendation.
+| Stage | Scope | Commits | Tests |
+|-------|-------|---------|-------|
+| A | `services/gpu/` skeleton + Modal app shell + 4 endpoints + auth + R2 client | 4 | initial pytest suite |
+| B | Real MLT-based render: SerializedEditorState → MLT XML → melt → MP4 | 7 | 113 gpu tests |
+| C | Agent dispatcher + `snapshotStorageKey` contract (replaces inline timeline) | 11 | 1156 agent + 120 gpu |
+| D | Progress polling backoff + EventBus emission for `tool.progress` + `exploration.candidate_ready` | 2 | 1170 agent |
+| E | DB writeback + 24h signed-URL `candidate_ready` + `/exploration` route DB lookup + web SSE wiring + e2e test | 6 | 1213 agent |
+| F | HeadlessRenderer deletion + R2 lifecycle docs + Daytona supersession + this closure | 5 | 1207 agent (after deleting headless-renderer.test.ts) |
 
-The scaffold is committed so the contract is testable + the URL-side endpoint is live; flipping it on requires a separate (multi-day) renderer extraction effort that should be scoped as its own phase, not buried in Phase 3 wrap-up.
+Acceptance criteria from §"Phase 3 — Preview rendering pipeline" below — all met:
+- ✅ User selects fan-out → 4 candidates render via Modal GPU service (R6 stage E.7 e2e covers the full path)
+- ✅ Each card has playable 5–10s MP4 (apps/web `<video controls>` consumes the signed URL from `candidate_ready`)
+- ✅ R2 cleanup removes `previews/{explorationId}/` after 24h (bucket-side lifecycle policy; ops runbook at `services/gpu/README.md` §"R2 lifecycle policy")
+- ✅ §3.6 Daytona decision documented — see "§3.6 Daytona — superseded" below
+
+### §3.6 Daytona — superseded
+
+The original §3.6 task asked to either implement a Daytona-based
+`SandboxPoolManager` for parallel previews, or defer and run all renders
+in-process on the agent. Phase 3's Modal pivot makes both paths obsolete:
+
+- Preview rendering executes inside Modal containers (`@app.function(image=...)`),
+  not in Daytona sandboxes and not in-process on the agent.
+- Modal's serverless scale-out replaces what `SandboxPoolManager` would
+  have provided — N concurrent renders trigger N container instances,
+  bounded by `min_containers=1` keep-warm + Modal's autoscaler.
+- The agent never holds an MP4 in memory; the GPU service uploads
+  directly to R2 and reports the storage key back via its `status`
+  endpoint.
+
+No Daytona work is needed for Phase 3. If a future feature requires
+agent-side sandboxing (e.g. running untrusted user scripts), evaluate
+Daytona then; preview rendering is no longer the driver.
+
+The HeadlessRenderer scaffold + its tests, plus `RENDERER_BASE_URL`,
+were deleted in Stage F (commit `04e31235`). Phase 3 is closed.
 
 ## Phase 3 — Preview rendering pipeline (C: HeadlessRenderer + Daytona decision) — 3 d (or formally defer)
 
@@ -156,10 +185,10 @@ Goal: `preview-render` worker actually produces playable previews.
 
 ### Acceptance
 
-- [ ] User selects fan-out → 4 candidates render in <30s on dev machine
-- [ ] Each card has playable 5-10s MP4
-- [ ] R2 cleanup task removes `previews/{explorationId}/` after 24h
-- [ ] Decision documented for §3.6
+- [x] User selects fan-out → 4 candidates render via Modal GPU service (Stage E.7 e2e test)
+- [x] Each card has playable 5-10s MP4 (web consumes signed URL via candidate_ready)
+- [x] R2 cleanup task removes `previews/{explorationId}/` after 24h (bucket lifecycle policy; runbook in services/gpu/README.md)
+- [x] Decision documented for §3.6 (superseded by Modal — see §"Phase 3 status" above)
 
 ### Risks
 

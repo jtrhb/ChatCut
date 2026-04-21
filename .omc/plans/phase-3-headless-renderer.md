@@ -15,7 +15,9 @@ Date: 2026-04-21
    - MEDIUM #2: candidate_ready has no web handler (closed in E.6)
    - LOW #3: `safeForLog` not applied to synthetic toolCallId (defense-in-depth, defer to user-supplied-ID future path)
 - Stage E — CLOSED + APPROVED. 6 commits (5 stage + 1 reviewer-fix). 1213 agent tests passing (+43). All 10 reviewer findings (1 HIGH + 4 MED + 3 LOW + 2 NIT) FIXED in bd0d7f7a; re-review verdict: APPROVE.
-- Stage F — IN PROGRESS. Cleanup, deprecation, decisions: HeadlessRenderer deletion + R2 lifecycle docs + Daytona supersession + Phase 3 closure.
+- Stage F — CLOSED. 2 commits. HeadlessRenderer + RENDERER_BASE_URL deleted (acceptance grep returns nothing); R2 lifecycle ops runbook expanded; §3.6 Daytona superseded by Modal documented; Phase 3 marked closed in audit plan; top-level README mentions services/gpu + Modal setup.
+
+**Phase 3: COMPLETE** — Modal-native GPU service shipped end-to-end. 1207 agent tests + 120 gpu tests passing.
 
 ---
 

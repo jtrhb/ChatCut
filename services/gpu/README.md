@@ -4,7 +4,7 @@ Modal-deployed Python service hosting GPU workloads:
 
 | Endpoint          | Purpose              | Status                  |
 |-------------------|----------------------|-------------------------|
-| `render_preview`  | Exploration previews | Stage A placeholder; Stage B real |
+| `render_preview`  | Exploration previews | Stage E shipped (real MP4 via MLT) |
 | `generate_video`  | AI generation        | Phase 5 stub (501)      |
 | `analyze_video`   | Vision               | Phase 5 stub (501)      |
 | `transcribe`      | Audio                | Phase 5 stub (501)      |
@@ -57,12 +57,60 @@ Created once via Modal dashboard or CLI (`modal secret create ...`):
 - `chatcut-gpu-r2`
   - `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`
 
-## R2 lifecycle policy
+## R2 lifecycle policy (ops runbook)
 
-The R2 bucket should have a 24h expiration policy on the `previews/` prefix
-(applied via Cloudflare dashboard → bucket → Settings → Object Lifecycle).
-This is the only guard against accumulating preview MP4s; the agent does
-not run a cleanup job (see Stage F of the plan).
+Two prefixes accumulate during fan-out and need lifecycle expiration:
+
+| Prefix          | Lifetime | Why                                                         |
+|-----------------|----------|-------------------------------------------------------------|
+| `previews/`     | 24h      | Rendered MP4s. Signed URLs in candidate_ready use 24h TTL.  |
+| `explorations/` | 24h      | Per-candidate snapshot JSONs uploaded by ExplorationEngine. |
+
+The 24h preview TTL must match `PREVIEW_SIGNED_URL_TTL_SEC` in
+`apps/agent/src/services/previews-config.ts` — a longer R2 expiration is
+fine but a shorter one would point at deleted objects.
+
+### Apply via Cloudflare dashboard
+
+1. Cloudflare dashboard → R2 → select your bucket
+2. Settings → Object Lifecycle Rules → **Add rule**
+3. Rule for `previews/`:
+   - Name: `previews-24h`
+   - Scope: prefix `previews/`
+   - Action: **Delete objects after 1 day**
+4. Repeat with name `explorations-24h` and prefix `explorations/`.
+5. Save. Cloudflare runs the sweeper roughly daily; do not expect
+   second-precise expiration.
+
+### Verify
+
+```bash
+# List the live policies (uses wrangler)
+wrangler r2 bucket lifecycle list <bucket>
+
+# Or, inspect with the AWS CLI pointed at R2's S3-compatible endpoint
+aws --endpoint-url https://<account-id>.r2.cloudflarestorage.com \
+    s3api get-bucket-lifecycle-configuration --bucket <bucket>
+```
+
+You should see two `Rules` entries with `Status: Enabled` and `Expiration: { Days: 1 }`.
+
+### Why this is the only cleanup
+
+The agent does **not** run a cleanup job. The Modal `_do_render` worker
+uploads via `R2Uploader.upload_preview` and never tracks lifetime; the
+ExplorationEngine writes snapshots and never deletes them. R2's bucket-
+side policy is the single source of truth — if it's missing, storage
+costs grow linearly with fan-out volume.
+
+If lifecycle is misconfigured for any reason, the manual recovery is:
+
+```bash
+aws --endpoint-url https://<account-id>.r2.cloudflarestorage.com \
+    s3 rm s3://<bucket>/previews/ --recursive --exclude "*" --include "*.mp4"
+```
+
+(Replace `<bucket>` and `<account-id>` with your values.)
 
 ## Architecture (agent ↔ this service)
 

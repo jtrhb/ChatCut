@@ -31,9 +31,39 @@ Thanks to [Vercel](https://vercel.com?utm_source=github-opencut&utm_campaign=oss
 ## Project Structure
 
 - `apps/web/`: Next.js web application
+- `apps/agent/`: Bun/Hono agent service (ChatCut layer — chat, tool pipeline, exploration engine)
 - `apps/desktop/`: Native desktop app built with GPUI (in progress)
+- `services/gpu/`: Modal-deployed Python GPU service (preview rendering via MLT; Phase 5 stubs for generation/vision/transcription)
 - `rust/`: Platform-agnostic core: GPU compositor, effects, masks, and WASM bindings. We're actively migrating business logic here from TypeScript.
 - `docs/`: Architecture and subsystem documentation
+
+## ChatCut GPU service (preview rendering)
+
+Server-side preview MP4s for the exploration fan-out flow live in
+`services/gpu/`, deployed to [Modal](https://modal.com). The agent talks
+to it over HTTPS with `X-API-Key` auth; render output lands in R2 with a
+24h lifecycle policy.
+
+Local dev (one-time):
+
+```bash
+cd services/gpu
+uv sync                           # Python 3.12 + deps via uv
+modal token new                   # one-time Modal account auth
+modal serve modal_app.py          # hot-reload dev URLs printed to stdout
+```
+
+Test suite + lint:
+
+```bash
+uv run pytest                     # unit tests across auth/jobs/r2/handlers/render
+uv run ruff check .
+```
+
+Production deploy is `modal deploy modal_app.py` after Modal Secrets
+(`chatcut-gpu-api-key`, `chatcut-gpu-r2`) are created via the dashboard.
+Full ops runbook (R2 lifecycle, secret rotation) lives in
+[`services/gpu/README.md`](services/gpu/README.md).
 
 ## Getting Started
 
