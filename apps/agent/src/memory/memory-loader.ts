@@ -133,19 +133,34 @@ export class MemoryLoader {
     let filenames: string[];
     try {
       filenames = await this.store.listConflictMarkers();
-    } catch {
+    } catch (err) {
+      // Phase 5c LOW-2: previously this swallowed silently — invisible
+      // best-effort = debugging hell. The agent runs without conflict
+      // signals for the entire session if R2 is down, and there used to be
+      // zero log signal indicating that. Warn so an operator can correlate
+      // "agent re-proposed a known-rejected action" with "loader couldn't
+      // read R2".
+      console.warn(
+        "[MemoryLoader] listConflictMarkers failed; turn proceeds without conflict signals.",
+        err instanceof Error ? (err.stack ?? err.message) : err,
+      );
       return [];
     }
 
     const markers: ConflictMarker[] = [];
     for (const filename of filenames) {
+      const path = `_conflicts/${filename}`;
       try {
-        const marker = await this.store.readConflictMarker(
-          `_conflicts/${filename}`,
-        );
+        const marker = await this.store.readConflictMarker(path);
         markers.push(marker);
-      } catch {
-        // Skip unparseable markers — file is still on disk for human review.
+      } catch (err) {
+        // Skip unparseable markers — file stays on disk for human review.
+        // Warn so a misfiled memory or corrupted marker is visible in logs
+        // instead of silently dropped (Phase 5c LOW-2 / MED-3 partner fix).
+        console.warn(
+          `[MemoryLoader] failed to parse conflict marker at ${path}; skipping.`,
+          err instanceof Error ? (err.stack ?? err.message) : err,
+        );
       }
     }
     // Newest-first so the prompt builder can take the top N if a budget cap

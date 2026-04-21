@@ -156,6 +156,45 @@ describe("Phase 5c — MemoryStore conflict markers", () => {
     // Special chars should be replaced with `_` in the filename slug
     expect(path).toMatch(/-weird_type_with_chars-/);
   });
+
+  it("MED-2: target with `:` round-trips intact (frontmatter scalar escaping)", async () => {
+    const { path } = await store.writeConflictMarker(writerToken, {
+      actionType: "delete",
+      target: "clip:0:00",
+      severity: "high",
+      reason: "x",
+    });
+    const round = await store.readConflictMarker(path);
+    // Without the MED-2 fix this would parse as `target = "clip"`
+    expect(round.target).toBe("clip:0:00");
+  });
+
+  it("MED-2: actionType with `:` round-trips intact via frontmatter", async () => {
+    const { path } = await store.writeConflictMarker(writerToken, {
+      actionType: "verb:noun",
+      severity: "low",
+      reason: "x",
+    });
+    const round = await store.readConflictMarker(path);
+    // Filename slug sanitizes the `:`, but the frontmatter must preserve it
+    expect(round.action_type).toBe("verb:noun");
+  });
+
+  it("LOW-1: two writes with identical params in the same ms get distinct paths (collision salt)", async () => {
+    // Race two writes via Promise.all — even if both Date.now() calls return
+    // the same ms, the random salt should produce different shortHashes.
+    const params = {
+      actionType: "delete",
+      target: "clip-1",
+      severity: "high" as const,
+      reason: "identical reason",
+    };
+    const [a, b] = await Promise.all([
+      store.writeConflictMarker(writerToken, params),
+      store.writeConflictMarker(writerToken, params),
+    ]);
+    expect(a.path).not.toBe(b.path);
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -199,12 +238,50 @@ User repeatedly rejected delete actions on clip-1.`;
     const raw = `---
 marker_id: conflict-xxx
 action_type: delete
+first_seen_at: 2026-04-21T10:00:00.000Z
 ---
 reason text`;
     const m = parseConflictMarker(raw);
     expect(m.target).toBe("*");
     expect(m.severity).toBe("low");
     expect(m.conflicts_with).toEqual([]);
+    // last_seen_at falls back to first_seen_at when omitted
+    expect(m.last_seen_at).toBe("2026-04-21T10:00:00.000Z");
+  });
+
+  it("MED-3: throws on a misfiled ParsedMemory (missing marker_id)", () => {
+    // ParsedMemory shape — no marker_id, no action_type, no first_seen_at.
+    // Without the MED-3 fix this would have parsed as a degenerate marker
+    // (action_type="unknown") that polluted the prompt.
+    const memoryShaped = `---
+memory_id: mem-001
+type: preference
+status: active
+confidence: high
+source: explicit
+created: 2026-01-01T00:00:00.000Z
+---
+User prefers quick cuts.`;
+    expect(() => parseConflictMarker(memoryShaped)).toThrow(
+      /missing marker_id/,
+    );
+  });
+
+  it("MED-3: throws on missing action_type even when marker_id is present", () => {
+    const raw = `---
+marker_id: conflict-xxx
+---
+reason`;
+    expect(() => parseConflictMarker(raw)).toThrow(/missing action_type/);
+  });
+
+  it("MED-3: throws on missing first_seen_at", () => {
+    const raw = `---
+marker_id: conflict-xxx
+action_type: delete
+---
+reason`;
+    expect(() => parseConflictMarker(raw)).toThrow(/missing first_seen_at/);
   });
 });
 
@@ -266,9 +343,40 @@ describe("Phase 5c — MemoryLoader.loadConflictMarkers", () => {
       listConflictMarkers: vi.fn().mockRejectedValue(new Error("R2 down")),
       readConflictMarker: vi.fn(),
     };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const loader = new MemoryLoader(failingStore as any);
     const markers = await loader.loadConflictMarkers();
     expect(markers).toEqual([]);
+    // LOW-2: failure must be visible in logs, not silently swallowed
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("LOW-2: per-file parse failure logs a warn with the marker path", async () => {
+    const storage = makeMockStorage();
+    const store = new MemoryStore(storage as any, USER_ID);
+    const token = store.grantWriterToken();
+
+    await store.writeConflictMarker(token, {
+      actionType: "delete",
+      severity: "high",
+      reason: "valid",
+    });
+    storage._objects.set(
+      `chatcut-memory/${USER_ID}/_conflicts/corrupt.md`,
+      "not a frontmatter file",
+    );
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const loader = new MemoryLoader(store);
+    const markers = await loader.loadConflictMarkers();
+    expect(markers).toHaveLength(1);
+    // Warn was called with the offending path so an operator can find the file
+    const warnCall = warn.mock.calls.find((c) =>
+      String(c[0]).includes("_conflicts/corrupt.md"),
+    );
+    expect(warnCall).toBeDefined();
+    warn.mockRestore();
   });
 
   it("skips individual files that fail to parse but returns the rest", async () => {
@@ -447,6 +555,34 @@ describe("Phase 5c — MemoryExtractor conflict-marker trigger", () => {
     expect(writeConflictMarker).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it("MED-1: 3rd consecutive rejection sets activation_scope.session_id to the EXTRACTOR session, not the changesetId", async () => {
+    const writeMemory = vi.fn().mockResolvedValue(undefined);
+    const writeConflictMarker = vi.fn().mockResolvedValue(undefined);
+    const SESSION_ID = "extractor-session-abc";
+    const extractor = new MemoryExtractor({
+      changeLog: makeChangeLog({
+        decisions: [
+          { type: "changeset_rejected", changesetId: "cs-1" },
+          { type: "changeset_rejected", changesetId: "cs-2" },
+        ],
+        entriesByChangeset: {
+          "cs-1": [{ id: "ch-1", action: { type: "delete" } }],
+          "cs-2": [{ id: "ch-2", action: { type: "delete" } }],
+          "cs-3": [{ id: "ch-3", action: { type: "delete" } }],
+        },
+      }),
+      memoryReader: makeReader(),
+      writeMemory,
+      writeConflictMarker,
+      sessionId: SESSION_ID,
+    });
+    const memory = await extractor.handleRejection("cs-3");
+
+    // Without the MED-1 fix this used to be `cs-3` (the changesetId);
+    // now it's the extractor's sessionId where the streak was observed.
+    expect(memory!.activation_scope?.session_id).toBe(SESSION_ID);
   });
 
   it("works without writeConflictMarker wired (legacy/minimal boots)", async () => {

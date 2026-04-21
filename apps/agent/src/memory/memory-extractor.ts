@@ -130,8 +130,13 @@ export class MemoryExtractor {
     // Check for 3+ consecutive rejections of the same signal type
     const consecutiveCount = this.countConsecutiveRejections(signal.type, changesetId);
     if (consecutiveCount >= 2) {
-      // This is the 3rd (or more) consecutive rejection — set activation_scope
-      memory.activation_scope = { session_id: changesetId };
+      // This is the 3rd (or more) consecutive rejection — scope the
+      // activation to THIS extractor's session (the agent run that observed
+      // the streak). Phase 5c MED-1 fix: previously this wrote `changesetId`
+      // into the `session_id` field, which was a field-name/value mismatch
+      // that downstream filtering would have misinterpreted once it started
+      // routing on activation_scope.
+      memory.activation_scope = { session_id: this.sessionId };
     }
 
     const path = `drafts/${memory.memory_id}.md`;

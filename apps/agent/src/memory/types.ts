@@ -52,13 +52,11 @@ export interface MemoryContext {
   promptText: string;
   injectedMemoryIds: string[];
   injectedSkillIds: string[];
-  /**
-   * Phase 5c: active conflict markers loaded from `_conflicts/*` for this turn.
-   * Surfaced as a dedicated "Active conflicts (do not repeat)" section in the
-   * system prompt — kept separate from regular memory so the LLM doesn't
-   * weigh past rejections like positive guidance.
-   */
-  conflictMarkers?: ConflictMarker[];
+  // Phase 5c: conflict markers do NOT live on MemoryContext — MasterAgent
+  // calls MemoryLoader.loadConflictMarkers() separately and threads the
+  // result directly into formatConflictsSection. Keeping them off this
+  // shape avoids a misleading attractor for future readers (NIT-1: a
+  // declared-but-never-populated field is worse than no field).
 }
 
 /**

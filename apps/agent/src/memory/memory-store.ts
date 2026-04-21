@@ -5,9 +5,13 @@ import {
   ListObjectsV2Command,
   DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
-import { createHash } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import type { ParsedMemory, ConflictMarker } from "./types.js";
-import { parseFrontmatter, parseConflictMarker } from "../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  parseConflictMarker,
+  serializeYamlScalar,
+} from "../utils/frontmatter.js";
 
 /**
  * Minimal interface for the ObjectStorage dependency so we can accept both
@@ -167,6 +171,13 @@ export class MemoryStore {
     token: symbol,
     params: {
       actionType: string;
+      /**
+       * Free-form identifier of what the rejected action targeted. Omit when
+       * the rejection signal is action-class-only (no specific entity);
+       * the marker is then stamped with `target = "*"`. Phase 5c NIT-2:
+       * `"*"` is a reserved sentinel for "no specific target" — do not pass
+       * `"*"` explicitly as a real target identifier.
+       */
       target?: string;
       severity: ConflictMarker["severity"];
       conflictsWith?: string[];
@@ -182,9 +193,15 @@ export class MemoryStore {
 
     const now = new Date().toISOString();
     const target = params.target ?? "*";
-    // Short content-hash for filename uniqueness when ISO timestamps collide.
+    // Phase 5c LOW-1: include 4 random bytes in the hash input so two
+    // synthetic / batch writes in the same millisecond with identical
+    // params don't collide and overwrite each other on disk. The
+    // content-derived portion still gives the hash meaning for debugging.
+    const collisionSalt = randomBytes(4).toString("hex");
     const shortHash = createHash("sha256")
-      .update(`${params.actionType}|${target}|${params.reason}|${now}`)
+      .update(
+        `${params.actionType}|${target}|${params.reason}|${now}|${collisionSalt}`,
+      )
       .digest("hex")
       .slice(0, 8);
     const safeActionType = params.actionType.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -237,14 +254,19 @@ export class MemoryStore {
    * but kept separate so the field shapes don't get muddled.
    */
   private serializeConflictMarker(marker: ConflictMarker): string {
+    // Phase 5c MED-2: route string scalars through serializeYamlScalar so
+    // values containing `:`, `\n`, or other special chars round-trip via
+    // parseYamlValue without truncation. severity is a known-safe enum so
+    // it stays unquoted; conflicts_with is JSON-stringified (parseYamlValue
+    // already JSON-parses anything starting with `[`).
     const lines: string[] = [
-      `marker_id: ${marker.marker_id}`,
-      `action_type: ${marker.action_type}`,
-      `target: ${marker.target}`,
+      `marker_id: ${serializeYamlScalar(marker.marker_id)}`,
+      `action_type: ${serializeYamlScalar(marker.action_type)}`,
+      `target: ${serializeYamlScalar(marker.target)}`,
       `severity: ${marker.severity}`,
       `conflicts_with: ${JSON.stringify(marker.conflicts_with)}`,
-      `first_seen_at: ${marker.first_seen_at}`,
-      `last_seen_at: ${marker.last_seen_at}`,
+      `first_seen_at: ${serializeYamlScalar(marker.first_seen_at)}`,
+      `last_seen_at: ${serializeYamlScalar(marker.last_seen_at)}`,
     ];
     return `---\n${lines.join("\n")}\n---\n${marker.reason}`;
   }

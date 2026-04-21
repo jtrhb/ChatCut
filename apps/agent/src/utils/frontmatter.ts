@@ -141,19 +141,37 @@ export function parseConflictMarker(raw: string): ConflictMarker {
     fields[key] = parseYamlValue(rawValue);
   }
 
+  // Phase 5c MED-3: a misfiled ParsedMemory under `_conflicts/` would have
+  // parsed to a degenerate marker (marker_id="", action_type="unknown") and
+  // silently polluted the "do not repeat" prompt section with arbitrary
+  // memory content. Treat the marker-shape required fields as load-bearing —
+  // throw if any are missing so the loader's per-file try/catch skips the
+  // file. The file stays on disk for a human to investigate.
+  if (!fields.marker_id) {
+    throw new Error(
+      "Invalid conflict marker: missing marker_id (file may be a misfiled memory)",
+    );
+  }
+  if (!fields.action_type) {
+    throw new Error("Invalid conflict marker: missing action_type");
+  }
+  if (!fields.first_seen_at) {
+    throw new Error("Invalid conflict marker: missing first_seen_at");
+  }
+
   return {
-    marker_id: String(fields.marker_id ?? ""),
-    action_type: String(fields.action_type ?? "unknown"),
+    marker_id: String(fields.marker_id),
+    action_type: String(fields.action_type),
     target: String(fields.target ?? "*"),
     severity: (fields.severity as ConflictMarker["severity"]) ?? "low",
     conflicts_with: (fields.conflicts_with as string[]) ?? [],
-    first_seen_at: String(fields.first_seen_at ?? ""),
-    last_seen_at: String(fields.last_seen_at ?? ""),
+    first_seen_at: String(fields.first_seen_at),
+    last_seen_at: String(fields.last_seen_at ?? fields.first_seen_at),
     reason,
   };
 }
 
-/** Parse a single YAML scalar value: number, boolean, JSON array/object, or string. */
+/** Parse a single YAML scalar value: number, boolean, JSON array/object/string, or plain string. */
 export function parseYamlValue(raw: string): unknown {
   if (raw === "") return "";
 
@@ -175,6 +193,18 @@ export function parseYamlValue(raw: string): unknown {
     }
   }
 
+  // Phase 5c MED-2: JSON-quoted string. Lets serializers emit
+  // `"foo:bar"` so values containing `:`, `\n`, or other special chars
+  // round-trip without truncation.
+  if (raw.startsWith('"')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === "string") return parsed;
+    } catch {
+      // fall through to plain-string treatment
+    }
+  }
+
   // Boolean
   if (raw === "true") return true;
   if (raw === "false") return false;
@@ -185,4 +215,25 @@ export function parseYamlValue(raw: string): unknown {
 
   // Plain string
   return raw;
+}
+
+/**
+ * Phase 5c MED-2: serialize a string scalar for frontmatter, JSON-encoding
+ * when the value would otherwise be misparsed (contains `:`, newline, leading
+ * special char, or matches a reserved literal). Safe round-trip with
+ * parseYamlValue. Use for any user-influenced string field.
+ */
+export function serializeYamlScalar(value: string): string {
+  // Anything with a colon, newline, carriage return, leading special char,
+  // or that parses as a non-string literal needs JSON-quoting.
+  const needsQuoting =
+    value.includes(":") ||
+    value.includes("\n") ||
+    value.includes("\r") ||
+    /^[\[\{"]/.test(value) ||
+    value === "true" ||
+    value === "false" ||
+    value === "" ||
+    !isNaN(Number(value));
+  return needsQuoting ? JSON.stringify(value) : value;
 }
