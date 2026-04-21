@@ -7,7 +7,12 @@ import { createExplorationRouter } from "./routes/exploration.js";
 import { changeset } from "./routes/changeset.js";
 import { SessionStore } from "./session/session-store.js";
 import { SessionManager } from "./session/session-manager.js";
-import { SessionCompactor, createAnthropicSummarizer } from "./session/compactor.js";
+import {
+	SessionCompactor,
+	createAnthropicSummarizer,
+	stringifyContent,
+} from "./session/compactor.js";
+import type { SessionMessage } from "./session/types.js";
 import { TaskRegistry } from "./tasks/task-registry.js";
 import { EventBus } from "./events/event-bus.js";
 import { createChatRouter } from "./routes/chat.js";
@@ -86,6 +91,39 @@ export function createMessageHandler(deps: {
 	// (reviewer MEDIUM #5). Per-handler — not module-level — so multiple
 	// handlers in tests don't share state.
 	let warnedOnAfterTurnSkip = false;
+	// Phase 5e MED-3: per-session async mutex. Two concurrent requests on the
+	// same sessionId would otherwise both observe the same pre-compaction
+	// snapshot, both call Haiku (2x cost), and the second applyCompaction
+	// would clobber the first along with any messages appended in between.
+	// The lock chains promises per sessionId so only one turn at a time
+	// executes the compaction read-modify-write window. Map entries are
+	// cleared once their chain settles to avoid unbounded growth.
+	const sessionLocks = new Map<string, Promise<void>>();
+	const withSessionLock = async <T>(
+		sid: string,
+		fn: () => Promise<T>,
+	): Promise<T> => {
+		const prev = sessionLocks.get(sid) ?? Promise.resolve();
+		let release!: () => void;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		// `tail` is the promise the next caller will wait on. Capture it once
+		// so the cleanup-when-still-tail check below compares the same object.
+		const tail = prev.then(() => released);
+		sessionLocks.set(sid, tail);
+		await prev;
+		try {
+			return await fn();
+		} finally {
+			release();
+			// Only delete if we're still the tail — otherwise a later request
+			// has chained onto this sid and dropping the entry would orphan it.
+			if (sessionLocks.get(sid) === tail) {
+				sessionLocks.delete(sid);
+			}
+		}
+	};
 	return async (message, sessionId, identity) => {
 		deps.eventBus.emit({
 			type: "agent.turn_start",
@@ -110,19 +148,56 @@ export function createMessageHandler(deps: {
 		// Phase 5e: best-effort compaction. Errors here MUST NOT fail the user's
 		// turn — we fall through to the legacy slice path if the summarizer
 		// rejects (rate limit, transient, missing key in dev).
-		if (deps.sessionCompactor && session) {
-			const allMsgs = session.messages.filter(
-				(m) => m.role === "user" || m.role === "assistant",
-			);
-			if (deps.sessionCompactor.shouldCompact(allMsgs, sessionSummary)) {
+		// Wrapped in withSessionLock (MED-3) so concurrent turns on the same
+		// sessionId can't both summarize the same snapshot or clobber each
+		// other's writes mid-flight.
+		if (deps.sessionCompactor) {
+			await withSessionLock(sessionId, async () => {
+				// Re-read inside the lock so we don't operate on a stale snapshot
+				// from before another concurrent turn finished.
+				const fresh = deps.sessionManager.getSession(sessionId);
+				if (!fresh || !deps.sessionCompactor) return;
+
+				const allMsgs = fresh.messages.filter(
+					(m) => m.role === "user" || m.role === "assistant",
+				);
+				// MED-2: include the current user message in the threshold check
+				// so the turn that crosses the budget actually triggers compaction
+				// (chat.ts appends the user message AFTER this handler runs).
+				if (
+					!deps.sessionCompactor.shouldCompact(allMsgs, fresh.summary, message)
+				) {
+					return;
+				}
 				try {
 					const result = await deps.sessionCompactor.compact(
 						allMsgs,
-						sessionSummary,
+						fresh.summary,
 					);
+					// MED-1: applyCompaction overwrites the entire messages array,
+					// so we must hand it the COMPLETE desired post-compaction list —
+					// not just the user/assistant slice. The compactor's retainedTail
+					// items are the SAME object references as the corresponding
+					// entries in fresh.messages (Array.filter + Array.slice preserve
+					// element references), so indexOf finds the right index even
+					// when seed data has identical content/timestamps. Slice from
+					// that index so any interleaved non-user/assistant rows
+					// (e.g. a future tool_result) are preserved verbatim.
+					const firstRetained = result.retainedTail[0];
+					let unfilteredTail: SessionMessage[];
+					if (!firstRetained) {
+						unfilteredTail = [];
+					} else {
+						const firstIdx = fresh.messages.indexOf(firstRetained);
+						unfilteredTail =
+							firstIdx >= 0
+								? fresh.messages.slice(firstIdx)
+								: [...result.retainedTail];
+					}
+					const previousCompactionAt = fresh.lastCompactedAt;
 					deps.sessionManager.applyCompaction(sessionId, {
 						summary: result.summary,
-						retainedTail: result.retainedTail,
+						retainedTail: unfilteredTail,
 					});
 					sessionSummary = result.summary;
 					session = deps.sessionManager.getSession(sessionId);
@@ -132,25 +207,38 @@ export function createMessageHandler(deps: {
 						sessionId,
 						data: {
 							droppedCount: result.droppedCount,
-							retainedCount: result.retainedTail.length,
+							retainedCount: unfilteredTail.length,
 							summaryChars: result.summary.length,
+							// LOW-2: surface the prior compaction time so observability
+							// can compute compaction cadence per session.
+							previousCompactionAt: previousCompactionAt ?? null,
 						},
 					});
 				} catch (err) {
-					// Telemetry only — keep going with uncompacted history.
+					// LOW-4: include sessionId + size context + full Error (stack)
+					// so a recurring failure is one-line searchable in logs.
+					const messageCount = allMsgs.length;
+					const estimatedTokens = deps.sessionCompactor.estimateTokens(
+						allMsgs,
+						fresh.summary,
+						message,
+					);
 					console.warn(
-						"[messageHandler] session compaction failed; continuing without compaction:",
-						err instanceof Error ? err.message : err,
+						`[messageHandler] session compaction failed (sessionId=${sessionId}, messages=${messageCount}, estimatedTokens=${estimatedTokens}); continuing without compaction:`,
+						err instanceof Error ? (err.stack ?? err.message) : err,
 					);
 				}
-			}
+			});
 		}
 
 		const history =
 			session?.messages
 				?.filter((m) => m.role === "user" || m.role === "assistant")
 				.slice(-MAX_HISTORY_MESSAGES)
-				.map((m) => ({ role: m.role, content: String(m.content) })) ?? [];
+				// LOW-1: use the same stringifyContent helper the compactor uses
+				// so non-string content doesn't degrade to "[object Object]".
+				.map((m) => ({ role: m.role, content: stringifyContent(m.content) })) ??
+			[];
 
 		const { text: response, tokensUsed } =
 			await deps.masterAgent.handleUserMessage(

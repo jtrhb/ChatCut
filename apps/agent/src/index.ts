@@ -614,14 +614,13 @@ async function main() {
 		});
 	}
 
-	// Phase 5e: SessionCompactor is wired only when ANTHROPIC_API_KEY is
-	// present. In dev paths without the key, the handler still works — it just
-	// skips compaction and relies on the 50-message slice ceiling.
-	const sessionCompactor = apiKey
-		? new SessionCompactor({
-				summarize: createAnthropicSummarizer({ apiKey }),
-			})
-		: undefined;
+	// Phase 5e: main() throws above if ANTHROPIC_API_KEY is missing, so this
+	// constructor always runs in production. The optional `sessionCompactor?`
+	// dep on createMessageHandler still exists for tests + minimal boots that
+	// invoke createMessageHandler directly without an apiKey in scope.
+	const sessionCompactor = new SessionCompactor({
+		summarize: createAnthropicSummarizer({ apiKey }),
+	});
 
 	const messageHandler = createMessageHandler({
 		masterAgent,

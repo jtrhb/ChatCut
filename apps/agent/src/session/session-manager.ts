@@ -73,6 +73,13 @@ export class SessionManager {
    *
    * Single combined method instead of separate setSummary / replaceMessages
    * so partial application is impossible — either both land or neither does.
+   *
+   * **Contract (Phase 5e MED-1):** `retainedTail` MUST be the COMPLETE
+   * desired post-compaction message list — including any non-user/assistant
+   * rows (e.g. `tool_result`) you want to keep. This method does an
+   * unconditional `messages = retainedTail` write, so anything you omit is
+   * destroyed. Today no caller persists `tool_result` to AgentSession.messages,
+   * but if that changes the caller is responsible for re-stitching them in.
    */
   applyCompaction(
     sessionId: string,

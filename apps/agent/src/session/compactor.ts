@@ -64,19 +64,38 @@ export class SessionCompactor {
     this.retainTailCount = deps.retainTailCount ?? DEFAULT_RETAIN_TAIL_COUNT;
   }
 
-  /** Char-based token estimate. Cheap, no tokenizer dep. Pessimistic by design. */
-  estimateTokens(messages: SessionMessage[], priorSummary?: string): number {
+  /**
+   * Char-based token estimate. Cheap, no tokenizer dep. Pessimistic by design.
+   *
+   * `extraText` (Phase 5e MED-2 fix) lets the caller include the current
+   * turn's user message in the threshold check WITHOUT having it count as
+   * something to summarize. The chat route appends the user message AFTER
+   * messageHandler runs, so without this the threshold lags the real input
+   * by one turn — eating the entire 30K headroom in a worst-case turn.
+   */
+  estimateTokens(
+    messages: SessionMessage[],
+    priorSummary?: string,
+    extraText?: string,
+  ): number {
     let chars = priorSummary ? priorSummary.length : 0;
+    if (extraText) chars += extraText.length;
     for (const m of messages) {
       chars += stringifyContent(m.content).length;
     }
     return Math.ceil(chars / CHARS_PER_TOKEN);
   }
 
-  /** True when (history + summary) would push the next turn over budget. */
-  shouldCompact(messages: SessionMessage[], priorSummary?: string): boolean {
+  /** True when (history + summary + extraText) would push the next turn over budget. */
+  shouldCompact(
+    messages: SessionMessage[],
+    priorSummary?: string,
+    extraText?: string,
+  ): boolean {
     if (messages.length <= this.retainTailCount) return false;
-    return this.estimateTokens(messages, priorSummary) > this.thresholdTokens;
+    return (
+      this.estimateTokens(messages, priorSummary, extraText) > this.thresholdTokens
+    );
   }
 
   /**
@@ -120,7 +139,9 @@ const SUMMARIZER_SYSTEM = [
   "1. User's stated goals and constraints (deadlines, style, target length, brand).",
   "2. Decisions made and tools used (so the assistant doesn't redo work).",
   "3. Outstanding TODOs or rejected approaches the user told you to avoid.",
-  "4. Key entities: project name, clip names, timeline structure facts.",
+  "4. Key entities: project name, clip names, timecodes/ranges already discussed",
+  "   (e.g. \"in:out 00:01:23–00:02:10\" — the model will recompute or re-ask",
+  "   if it forgets a range), timeline structure facts.",
   "",
   "Drop: chit-chat, greetings, retracted plans, verbose tool output already acted on.",
   "",
@@ -182,14 +203,26 @@ export function createAnthropicSummarizer(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Internal helpers
+// Helpers (exported so server.ts and any other history-flattening callsite
+// can mirror this — Phase 5e LOW-1 fix avoids `String({...}) === "[object Object]"`).
 // ────────────────────────────────────────────────────────────────────────────
 
-function stringifyContent(content: unknown): string {
+const UNSERIALIZABLE_SENTINEL = "[unserializable content]";
+
+/**
+ * Serialize SessionMessage.content for token estimation, summarizer input,
+ * and history flattening. Returns a string that's safe to feed to an LLM:
+ * - strings pass through verbatim
+ * - JSON-serializable objects → JSON.stringify
+ * - circular refs / unserializable values → explicit sentinel (NIT-1).
+ *   Returning `String(content) === "[object Object]"` would silently inject
+ *   garbage into the summary; the sentinel makes the failure visible.
+ */
+export function stringifyContent(content: unknown): string {
   if (typeof content === "string") return content;
   try {
     return JSON.stringify(content);
   } catch {
-    return String(content);
+    return UNSERIALIZABLE_SENTINEL;
   }
 }
