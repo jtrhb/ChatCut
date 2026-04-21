@@ -84,7 +84,17 @@ export class NativeAPIRuntime implements AgentRuntime {
     // for an annotated frame), it replaces the string `input` in the
     // outgoing user message. Un-annotated turns pass `input` as a plain
     // string and the wire format is bit-for-bit identical to pre-5d.
-    const firstUserContent = userContent ?? input;
+    //
+    // MED-2 guard: `??` only short-circuits null/undefined. Without the
+    // empty-array check, a future caller that defensively filtered blocks
+    // down to `[]` would replace the meaningful `input` string with an
+    // empty content array and 400 the Anthropic API deep in the runtime
+    // loop, miles from the actual root cause. Treating `[]` as "absent"
+    // matches the intent of `userContent ?? input` semantically.
+    const firstUserContent =
+      Array.isArray(userContent) && userContent.length === 0
+        ? input
+        : (userContent ?? input);
 
     // Start from conversation history if provided (multi-turn session),
     // otherwise start fresh (single-turn or sub-agent dispatch)

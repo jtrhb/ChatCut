@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import type { SessionManager } from "../session/session-manager.js";
 import type { EventBus } from "../events/event-bus.js";
@@ -29,11 +30,24 @@ export const SpatialAnnotationSchema = z.object({
   label: z.string().max(200).optional(),
 });
 
-/** Phase 5d: temporal window the user wants the agent to focus on. */
-export const TemporalAnnotationSchema = z.object({
-  startSec: z.number().min(0),
-  endSec: z.number().min(0),
-});
+/**
+ * Phase 5d: temporal window the user wants the agent to focus on.
+ *
+ * LOW-2 fix: enforce `endSec > startSec` at the schema layer. Without this,
+ * a buggy client could ship an inverted (`endSec < startSec`) or zero-
+ * duration (`endSec === startSec`) window that the formatter would render
+ * verbatim, producing prompts like "Temporal: 5.00s → 3.00s" that are
+ * incoherent to the model. Reject at the gate so the operator gets a
+ * clear 400 instead of a silent semantic failure downstream.
+ */
+export const TemporalAnnotationSchema = z
+  .object({
+    startSec: z.number().min(0),
+    endSec: z.number().min(0),
+  })
+  .refine((t) => t.endSec > t.startSec, {
+    message: "endSec must be strictly greater than startSec",
+  });
 
 /**
  * Phase 5d (Q3): schema supports 1..N spatial + 0..N temporal even though
@@ -52,8 +66,17 @@ export const AnnotationsSchema = z
 /**
  * Phase 5d (Q1=d): the annotated frame — overlay drawn on the captured
  * preview frame BEFORE base64 encoding. Carries the "I mean THIS one"
- * signal directly. Cap at ~12MB encoded so a misbehaving client can't OOM
- * the route. Anthropic vision blocks accept png/jpeg/webp/gif.
+ * signal directly. Anthropic vision blocks accept png/jpeg/webp/gif.
+ *
+ * LOW-3 clarification: `12_000_000` caps the base64 STRING length, which
+ * is ~9MB of decoded image bytes (base64 is 4/3 inflation). The
+ * effective ceiling is also bounded by:
+ *   - Anthropic's per-image limit (currently ~5MB decoded; check current
+ *     SDK docs as it can change)
+ *   - The route-level body limit middleware in createChatRouter
+ *     (CHAT_BODY_LIMIT below) which gates total request size
+ * The 12MB schema cap is a final defensive layer; the body-limit
+ * middleware catches oversized payloads BEFORE JSON.parse allocates them.
  */
 export const AnnotatedFrameSchema = z
   .object({
@@ -67,6 +90,15 @@ export const AnnotatedFrameSchema = z
     base64: z.string().min(1).max(12_000_000),
   })
   .optional();
+
+/**
+ * Phase 5d LOW-4: total chat request body cap. The annotatedFrame field
+ * raised legitimate payload sizes from KB to multi-MB; without a body
+ * limit at the route, c.req.json() at line 165 would parse an arbitrarily
+ * large payload into memory before the schema runs. 16MB leaves room for
+ * the 12MB base64 frame + reasonable message text + envelope overhead.
+ */
+export const CHAT_BODY_LIMIT = 16 * 1024 * 1024;
 
 export type SpatialAnnotation = z.infer<typeof SpatialAnnotationSchema>;
 export type TemporalAnnotation = z.infer<typeof TemporalAnnotationSchema>;
@@ -108,7 +140,20 @@ function createChatRouter(deps: {
   const { sessionManager, eventBus, messageHandler } = deps;
   const router = new Hono();
 
-  router.post("/", async (c) => {
+  // Phase 5d LOW-4: gate the body size BEFORE c.req.json() allocates it.
+  // Without this, a misbehaving client uploading a 200MB payload would
+  // pull the whole thing into memory before the schema cap can reject it.
+  router.post(
+    "/",
+    bodyLimit({
+      maxSize: CHAT_BODY_LIMIT,
+      onError: (c) =>
+        c.json(
+          { error: "Request body too large", limit: CHAT_BODY_LIMIT },
+          413,
+        ),
+    }),
+    async (c) => {
     let body: unknown;
     try {
       body = await c.req.json();
