@@ -5,8 +5,9 @@ import {
   ListObjectsV2Command,
   DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
-import type { ParsedMemory } from "./types.js";
-import { parseFrontmatter } from "../utils/frontmatter.js";
+import { createHash } from "crypto";
+import type { ParsedMemory, ConflictMarker } from "./types.js";
+import { parseFrontmatter, parseConflictMarker } from "../utils/frontmatter.js";
 
 /**
  * Minimal interface for the ObjectStorage dependency so we can accept both
@@ -145,6 +146,107 @@ export class MemoryStore {
     } catch {
       return false;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5c — Conflict markers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Phase 5c: write a `_conflicts/{ISO-ts}-{actionType}-{shortHash}.md` marker.
+   *
+   * Same writer-token gate as writeMemory — only MasterAgent (per spec §9.4)
+   * may persist. MemoryExtractor reaches this via a master-bound callback so
+   * it never touches the store directly.
+   *
+   * Filename includes an ISO timestamp so `listDir("_conflicts/")` returns
+   * markers in natural chronological order. The shortHash dedupe helps avoid
+   * filename collisions when several markers fire in the same millisecond.
+   */
+  async writeConflictMarker(
+    token: symbol,
+    params: {
+      actionType: string;
+      target?: string;
+      severity: ConflictMarker["severity"];
+      conflictsWith?: string[];
+      reason: string;
+    },
+  ): Promise<{ path: string; marker: ConflictMarker }> {
+    if (token !== this.writerToken) {
+      throw new Error(
+        "MemoryStore.writeConflictMarker denied: a valid writer token is required. " +
+        "All writes must be routed through MasterAgent (spec §9.4 — sole memory writer).",
+      );
+    }
+
+    const now = new Date().toISOString();
+    const target = params.target ?? "*";
+    // Short content-hash for filename uniqueness when ISO timestamps collide.
+    const shortHash = createHash("sha256")
+      .update(`${params.actionType}|${target}|${params.reason}|${now}`)
+      .digest("hex")
+      .slice(0, 8);
+    const safeActionType = params.actionType.replace(/[^a-zA-Z0-9_-]/g, "_");
+    // Filesystem-safe ISO: replace `:` with `-` (Windows + S3 path safety).
+    const safeIso = now.replace(/:/g, "-");
+    const filename = `${safeIso}-${safeActionType}-${shortHash}.md`;
+    const path = `_conflicts/${filename}`;
+
+    const marker: ConflictMarker = {
+      marker_id: `conflict-${shortHash}`,
+      action_type: params.actionType,
+      target,
+      severity: params.severity,
+      conflicts_with: params.conflictsWith ?? [],
+      first_seen_at: now,
+      last_seen_at: now,
+      reason: params.reason,
+    };
+
+    const markdown = this.serializeConflictMarker(marker);
+    const command = new PutObjectCommand({
+      Bucket: "memory",
+      Key: `${this.userPrefix}/${path}`,
+      Body: markdown,
+      ContentType: "text/markdown",
+    });
+    await this.storage.client.send(command);
+
+    return { path, marker };
+  }
+
+  /**
+   * Read a single conflict marker file and parse it. Errors propagate so the
+   * caller (typically MemoryLoader.loadConflictMarkers, which handles the
+   * skip-on-error policy) decides whether to drop or surface.
+   */
+  async readConflictMarker(path: string): Promise<ConflictMarker> {
+    const raw = await this.readFile(path);
+    return parseConflictMarker(raw);
+  }
+
+  /** List conflict marker filenames (not full paths) under `_conflicts/`. */
+  async listConflictMarkers(): Promise<string[]> {
+    return this.listDir("_conflicts/");
+  }
+
+  /**
+   * Serialize a ConflictMarker to the same `---\nyaml\n---\nbody` format used
+   * by ParsedMemory, with the reason as the body. Mirrors serializeToMarkdown
+   * but kept separate so the field shapes don't get muddled.
+   */
+  private serializeConflictMarker(marker: ConflictMarker): string {
+    const lines: string[] = [
+      `marker_id: ${marker.marker_id}`,
+      `action_type: ${marker.action_type}`,
+      `target: ${marker.target}`,
+      `severity: ${marker.severity}`,
+      `conflicts_with: ${JSON.stringify(marker.conflicts_with)}`,
+      `first_seen_at: ${marker.first_seen_at}`,
+      `last_seen_at: ${marker.last_seen_at}`,
+    ];
+    return `---\n${lines.join("\n")}\n---\n${marker.reason}`;
   }
 
   // ---------------------------------------------------------------------------

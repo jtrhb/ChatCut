@@ -1,4 +1,9 @@
-import type { ParsedMemory, TaskContext, MemoryContext } from "./types.js";
+import type {
+  ParsedMemory,
+  TaskContext,
+  MemoryContext,
+  ConflictMarker,
+} from "./types.js";
 import type { MemoryStore } from "./memory-store.js";
 import { MemorySelector } from "./memory-selector.js";
 import { MemoryIndex } from "./memory-index.js";
@@ -21,7 +26,12 @@ const QUERY_TEMPLATES: Record<string, (params: TaskContext) => string[]> = {
         ]
       : []),
     ...(p.projectId ? [`projects/${p.projectId}/*`] : []),
-    "_conflicts/*",
+    // Phase 5c: `_conflicts/*` no longer loaded via QUERY_TEMPLATES.
+    // Conflict markers have their own shape (target/severity/conflicts_with)
+    // that doesn't fit ParsedMemory cleanly, so they go through a dedicated
+    // loadConflictMarkers() path instead. The MasterAgent prompt builder
+    // surfaces them in a separate "Active conflicts" section so the LLM
+    // doesn't weigh past rejections like positive guidance.
   ],
   "single-edit": (p) => [
     "global/aesthetic/*",
@@ -46,6 +56,11 @@ const CHARS_PER_TOKEN = 4;
 interface MemoryStoreLike {
   readParsed(path: string): Promise<ParsedMemory>;
   listDir(path: string): Promise<string[]>;
+  // Phase 5c: optional so test doubles that don't exercise conflicts can
+  // omit them. loadConflictMarkers handles the unsupported case via the
+  // wired-or-not check below.
+  listConflictMarkers?(): Promise<string[]>;
+  readConflictMarker?(path: string): Promise<ConflictMarker>;
 }
 
 export class MemoryLoader {
@@ -102,6 +117,41 @@ export class MemoryLoader {
     // Use MemorySelector for the filter/merge/truncate pipeline
     const selected = this.selector.selectRelevant(candidates, task);
     return this.serializeForPrompt(selected, (task.tokenBudget ?? DEFAULT_TOKEN_BUDGET) * CHARS_PER_TOKEN);
+  }
+
+  /**
+   * Phase 5c: load all active conflict markers from `_conflicts/*`. Markers
+   * stay until manually cleared (5c-Q4 — auto-aging is out of scope this
+   * phase). Returns empty array when the store doesn't support markers
+   * (older test doubles) or when listing fails — callers treat conflicts as
+   * best-effort, never fail-the-turn.
+   */
+  async loadConflictMarkers(): Promise<ConflictMarker[]> {
+    if (!this.store.listConflictMarkers || !this.store.readConflictMarker) {
+      return [];
+    }
+    let filenames: string[];
+    try {
+      filenames = await this.store.listConflictMarkers();
+    } catch {
+      return [];
+    }
+
+    const markers: ConflictMarker[] = [];
+    for (const filename of filenames) {
+      try {
+        const marker = await this.store.readConflictMarker(
+          `_conflicts/${filename}`,
+        );
+        markers.push(marker);
+      } catch {
+        // Skip unparseable markers — file is still on disk for human review.
+      }
+    }
+    // Newest-first so the prompt builder can take the top N if a budget cap
+    // is ever added. Sort by last_seen_at (ISO strings sort correctly).
+    markers.sort((a, b) => b.last_seen_at.localeCompare(a.last_seen_at));
+    return markers;
   }
 
   /**

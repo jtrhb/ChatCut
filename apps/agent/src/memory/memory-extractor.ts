@@ -20,6 +20,20 @@ interface MemoryReader {
  *  the token or the store directly. */
 type MemoryWriter = (path: string, memory: ParsedMemory) => Promise<void>;
 
+/**
+ * Phase 5c: writer callback for conflict markers, also injected by MasterAgent.
+ * Optional — when omitted, the extractor still records draft memories on
+ * rejection but skips marker writes (for tests / minimal boots that don't
+ * exercise the conflict surface).
+ */
+type ConflictMarkerWriter = (params: {
+  actionType: string;
+  target?: string;
+  severity: "high" | "medium" | "low";
+  conflictsWith?: string[];
+  reason: string;
+}) => Promise<void>;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -37,17 +51,22 @@ export class MemoryExtractor {
   private readonly changeLog: ChangeLog;
   private readonly reader: MemoryReader;
   private readonly writeMemory: MemoryWriter;
+  /** Phase 5c: optional — writes a `_conflicts/*` marker when 3+ consecutive
+   *  rejections of the same signal type fire. Skipped silently when not wired. */
+  private readonly writeConflictMarker?: ConflictMarkerWriter;
   private readonly sessionId: string;
 
   constructor(deps: {
     changeLog: ChangeLog;
     memoryReader: MemoryReader;
     writeMemory: MemoryWriter;
+    writeConflictMarker?: ConflictMarkerWriter;
     sessionId?: string;
   }) {
     this.changeLog = deps.changeLog;
     this.reader = deps.memoryReader;
     this.writeMemory = deps.writeMemory;
+    this.writeConflictMarker = deps.writeConflictMarker;
     this.sessionId = deps.sessionId ?? `session-${nanoid(6)}`;
   }
 
@@ -117,6 +136,33 @@ export class MemoryExtractor {
 
     const path = `drafts/${memory.memory_id}.md`;
     await this.writeMemory(path, memory);
+
+    // Phase 5c: same 3+ consecutive trigger as activation_scope above. Writes
+    // a `_conflicts/{ts}-{signalType}-{hash}.md` marker via the master-bound
+    // callback so the next turn's prompt builder surfaces it as an active
+    // conflict the agent must acknowledge before re-proposing the action.
+    // Best-effort — marker-write failures must not break the rejection-handling
+    // path that already persisted the draft memory above.
+    if (consecutiveCount >= 2 && this.writeConflictMarker) {
+      try {
+        await this.writeConflictMarker({
+          actionType: signal.type,
+          severity: signal.severity,
+          conflictsWith: [path],
+          reason:
+            `User rejected ${consecutiveCount + 1} consecutive changesets ` +
+            `containing ${signal.type} actions. The agent should acknowledge ` +
+            `this pattern and propose a different approach (or ask the user ` +
+            `to clarify what they want instead) before re-proposing ${signal.type}.`,
+        });
+      } catch (err) {
+        // Telemetry-only; the draft memory above already captured the signal.
+        console.warn(
+          `[MemoryExtractor] writeConflictMarker failed for ${signal.type}; draft memory at ${path} is still persisted.`,
+          err instanceof Error ? (err.stack ?? err.message) : err,
+        );
+      }
+    }
 
     return memory;
   }

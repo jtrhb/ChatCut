@@ -1,4 +1,4 @@
-import type { ParsedMemory } from "../memory/types.js";
+import type { ParsedMemory, ConflictMarker } from "../memory/types.js";
 
 /**
  * Parse `---\nyaml\n---\ncontent` format into a ParsedMemory.
@@ -106,6 +106,51 @@ export function parseFrontmatter(raw: string): ParsedMemory {
   }
 
   return mem;
+}
+
+/**
+ * Phase 5c: parse a `---\nyaml\n---\nbody` conflict marker file. Same
+ * frontmatter format as ParsedMemory, different field shape — body is the
+ * marker's free-text reason, not a memory's content payload.
+ *
+ * Required fields: marker_id, action_type, target, severity, first_seen_at,
+ * last_seen_at. conflicts_with defaults to []. Throws on missing frontmatter
+ * delimiters so the caller (memory-loader) can skip the file via its existing
+ * try/catch policy without ambiguity about whether parsing succeeded.
+ */
+export function parseConflictMarker(raw: string): ConflictMarker {
+  if (!raw.startsWith("---")) {
+    throw new Error("Invalid conflict marker: missing frontmatter opening ---");
+  }
+
+  const afterOpen = raw.slice(3);
+  const closeIdx = afterOpen.indexOf("\n---");
+  if (closeIdx === -1) {
+    throw new Error("Invalid conflict marker: missing frontmatter closing ---");
+  }
+
+  const yamlBlock = afterOpen.slice(0, closeIdx).trim();
+  const reason = afterOpen.slice(closeIdx + 4).trim();
+
+  const fields: Record<string, unknown> = {};
+  for (const line of yamlBlock.split("\n")) {
+    const colonIdx = line.indexOf(":");
+    if (colonIdx === -1) continue;
+    const key = line.slice(0, colonIdx).trim();
+    const rawValue = line.slice(colonIdx + 1).trim();
+    fields[key] = parseYamlValue(rawValue);
+  }
+
+  return {
+    marker_id: String(fields.marker_id ?? ""),
+    action_type: String(fields.action_type ?? "unknown"),
+    target: String(fields.target ?? "*"),
+    severity: (fields.severity as ConflictMarker["severity"]) ?? "low",
+    conflicts_with: (fields.conflicts_with as string[]) ?? [],
+    first_seen_at: String(fields.first_seen_at ?? ""),
+    last_seen_at: String(fields.last_seen_at ?? ""),
+    reason,
+  };
 }
 
 /** Parse a single YAML scalar value: number, boolean, JSON array/object, or string. */

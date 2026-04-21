@@ -31,7 +31,7 @@ import type { TaskRegistry } from "../tasks/task-registry.js";
 import type { ServerEditorCore } from "../services/server-editor-core.js";
 import type { MemoryStore } from "../memory/memory-store.js";
 import type { MemoryLoader } from "../memory/memory-loader.js";
-import type { ParsedMemory, TaskContext } from "../memory/types.js";
+import type { ParsedMemory, TaskContext, ConflictMarker } from "../memory/types.js";
 import type { ContextSynchronizer } from "../context/context-sync.js";
 import { DeferredRegistry } from "../tools/deferred-registry.js";
 import { createResolveToolsTool } from "../tools/resolve-tools-tool.js";
@@ -282,6 +282,42 @@ export class MasterAgent {
 	}
 
 	/**
+	 * Phase 5c: write a conflict marker via the master-owned token. Mirrors
+	 * writeMemory — sole sanctioned path per spec §9.4. Throws if no
+	 * memoryStore was configured at construction.
+	 */
+	async writeConflictMarker(params: {
+		actionType: string;
+		target?: string;
+		severity: "high" | "medium" | "low";
+		conflictsWith?: string[];
+		reason: string;
+	}): Promise<void> {
+		if (!this.memoryStore || !this.memoryWriterToken) {
+			throw new Error(
+				"MasterAgent.writeConflictMarker: memoryStore was not configured at construction. " +
+					"Wire it via the memoryStore constructor dep to enable conflict-marker persistence.",
+			);
+		}
+		await this.memoryStore.writeConflictMarker(this.memoryWriterToken, params);
+	}
+
+	/**
+	 * Phase 5c: returns a write callback bound to this master's writer token.
+	 * Pass to MemoryExtractor as its `writeConflictMarker` dep so it can
+	 * persist markers through the sanctioned path without holding a store ref.
+	 */
+	getConflictMarkerWriter(): (params: {
+		actionType: string;
+		target?: string;
+		severity: "high" | "medium" | "low";
+		conflictsWith?: string[];
+		reason: string;
+	}) => Promise<void> {
+		return (params) => this.writeConflictMarker(params);
+	}
+
+	/**
 	 * Expose the memory IDs injected into the most recent turn. Called by
 	 * propose_changes (or anyone that builds a changeset from the current
 	 * turn) to stamp injectedMemoryIds / injectedSkillIds per spec §9.4 so
@@ -353,6 +389,45 @@ export class MasterAgent {
 		}
 	}
 
+	/**
+	 * Phase 5c: load conflict markers via the memory loader, swallowing errors
+	 * so a missing/unreadable conflicts dir doesn't fail the user's turn. The
+	 * loader itself already swallows per-file parse errors; this catch covers
+	 * the listConflictMarkers + listing-error path.
+	 */
+	private async loadConflictMarkersBestEffort(): Promise<ConflictMarker[]> {
+		if (!this.memoryLoader) return [];
+		try {
+			return await this.memoryLoader.loadConflictMarkers();
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * Phase 5c (5c-Q3): format conflict markers as a dedicated system-prompt
+	 * section. The "do not repeat" framing is intentional — markers exist
+	 * because the user already rejected this pattern multiple times, and the
+	 * agent should propose a different approach (or ask) before retrying.
+	 */
+	private formatConflictsSection(markers: ConflictMarker[]): string {
+		const lines: string[] = ["## Active conflicts (do not repeat)"];
+		lines.push(
+			"The following actions were repeatedly rejected. Acknowledge the conflict",
+			"and propose a different approach (or ask the user to clarify) before",
+			"re-proposing them.",
+			"",
+		);
+		for (const m of markers) {
+			lines.push(
+				`### ${m.action_type} → ${m.target} (${m.severity}, last seen ${m.last_seen_at})`,
+			);
+			lines.push(m.reason);
+			lines.push("");
+		}
+		return lines.join("\n").trimEnd();
+	}
+
 	private async runTurn(
 		message: string,
 		history?: Array<{ role: string; content: string }>,
@@ -409,6 +484,17 @@ export class MasterAgent {
 		const masterMemory = await this.loadMemoriesFor("master");
 		if (masterMemory?.promptText) {
 			systemPrompt += `\n\n## Memory\n\n${masterMemory.promptText}`;
+		}
+
+		// Phase 5c: load active conflict markers and surface them in a dedicated
+		// section. Best-effort — loader returns [] when memory isn't wired or
+		// listing fails. Kept separate from the regular Memory section so the
+		// LLM doesn't weigh past rejections like positive guidance.
+		const conflictMarkers = this.memoryLoader
+			? await this.loadConflictMarkersBestEffort()
+			: [];
+		if (conflictMarkers.length > 0) {
+			systemPrompt += `\n\n${this.formatConflictsSection(conflictMarkers)}`;
 		}
 
 		// Phase 5e Q3+Q4: when prior turns were compacted, the rolling summary

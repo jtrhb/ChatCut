@@ -602,10 +602,15 @@ async function main() {
 	let patternObserver: PatternObserver | null = null;
 	if (memoryStore) {
 		const writeMemory = masterAgent.getMemoryWriter();
+		// Phase 5c: hand the master-bound conflict-marker writer to the
+		// extractor so 3+ consecutive same-type rejections automatically
+		// emit `_conflicts/*` markers that the next turn's prompt surfaces.
+		const writeConflictMarker = masterAgent.getConflictMarkerWriter();
 		const extractor = new MemoryExtractor({
 			changeLog,
 			memoryReader: memoryStore,
 			writeMemory,
+			writeConflictMarker,
 		});
 		extractor.start();
 		patternObserver = new PatternObserver({

@@ -104,7 +104,11 @@ describe("MemoryLoader", () => {
     expect(listDirCalls).toContain("brands/acme/series/summer-series/");
     expect(listDirCalls).toContain("brands/acme/series/summer-series/_skills/");
     expect(listDirCalls).toContain("projects/proj-42/");
-    expect(listDirCalls).toContain("_conflicts/");
+    // Phase 5c: _conflicts/* is no longer loaded via QUERY_TEMPLATES — it
+    // routes through MemoryLoader.loadConflictMarkers() instead so the
+    // shape difference (target/severity vs ParsedMemory) doesn't pollute
+    // the regular memory pipeline. See phase5c-conflict-markers.test.ts.
+    expect(listDirCalls).not.toContain("_conflicts/");
 
     const readCalls = mockStore.readParsed.mock.calls.map((c) => c[0]);
     expect(readCalls).toContain("global/quality/approval-criteria.md");
