@@ -105,6 +105,10 @@ The application will be available at [http://localhost:3000](http://localhost:30
 
 The `.env.example` has sensible defaults that match the Docker Compose config — it should work out of the box.
 
+> Working on preview rendering or the agent's exploration fan-out? See
+> [`## ChatCut GPU service`](#chatcut-gpu-service-preview-rendering)
+> above for the Modal-side setup.
+
 ### Desktop setup
 
 Desktop is opt-in. If you're only working on the web app, skip this entirely.

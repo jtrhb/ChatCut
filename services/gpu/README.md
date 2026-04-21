@@ -85,8 +85,10 @@ fine but a shorter one would point at deleted objects.
 ### Verify
 
 ```bash
-# List the live policies (uses wrangler)
-wrangler r2 bucket lifecycle list <bucket>
+# Read the live lifecycle configuration via Wrangler (>=3.60).
+# The subcommand is `get`, not `list` — `list` only exists at the
+# parent `wrangler r2 bucket` level.
+wrangler r2 bucket lifecycle get <bucket>
 
 # Or, inspect with the AWS CLI pointed at R2's S3-compatible endpoint
 aws --endpoint-url https://<account-id>.r2.cloudflarestorage.com \
@@ -106,11 +108,20 @@ costs grow linearly with fan-out volume.
 If lifecycle is misconfigured for any reason, the manual recovery is:
 
 ```bash
+# 1. DRY RUN — list what would be deleted, no writes.
 aws --endpoint-url https://<account-id>.r2.cloudflarestorage.com \
-    s3 rm s3://<bucket>/previews/ --recursive --exclude "*" --include "*.mp4"
+    s3 ls s3://<bucket>/previews/ --recursive
+
+# 2. ACTUAL DELETE — irreversible. R2 has no soft-delete by default;
+#    once this returns, the objects are gone. Re-run the dry-run above
+#    until the listing matches what you actually want to remove.
+aws --endpoint-url https://<account-id>.r2.cloudflarestorage.com \
+    s3 rm s3://<bucket>/previews/ --recursive
 ```
 
-(Replace `<bucket>` and `<account-id>` with your values.)
+(Replace `<bucket>` and `<account-id>` with your values. The previews/
+prefix only ever holds rendered MP4s, so an unscoped `rm --recursive`
+is safe inside that prefix — but double-check via the dry-run anyway.)
 
 ## Architecture (agent ↔ this service)
 

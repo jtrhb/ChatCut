@@ -157,6 +157,11 @@ in-process on the agent. Phase 3's Modal pivot makes both paths obsolete:
 - Modal's serverless scale-out replaces what `SandboxPoolManager` would
   have provided — N concurrent renders trigger N container instances,
   bounded by `min_containers=1` keep-warm + Modal's autoscaler.
+- Modal's container-per-invocation model also provides the process
+  isolation the original Daytona path was reaching for; agent code
+  never executes inside a render container, and a hostile / crashing
+  render can take down at most one Modal instance without touching the
+  agent process or sibling renders.
 - The agent never holds an MP4 in memory; the GPU service uploads
   directly to R2 and reports the storage key back via its `status`
   endpoint.
@@ -168,32 +173,24 @@ Daytona then; preview rendering is no longer the driver.
 The HeadlessRenderer scaffold + its tests, plus `RENDERER_BASE_URL`,
 were deleted in Stage F (commit `04e31235`). Phase 3 is closed.
 
-## Phase 3 — Preview rendering pipeline (C: HeadlessRenderer + Daytona decision) — 3 d (or formally defer)
+## Phase 3 — Preview rendering pipeline — SUPERSEDED
 
-Goal: `preview-render` worker actually produces playable previews.
+The original Phase 3 design (Playwright + `HeadlessRenderer` + Daytona
+decision; tasks 3.1–3.6) is **superseded by the Modal-native
+architecture**. See §"Phase 3 status (2026-04-21): CLOSED" above and
+the per-stage commit table in
+[`.omc/plans/phase-3-headless-renderer.md`](phase-3-headless-renderer.md).
 
-### Tasks
-
-| # | Task | Files | Change |
-|---|---|---|---|
-| 3.1 | Add Playwright dependency | `apps/agent/package.json` | `playwright`, install `chromium` via `npx playwright install --with-deps chromium`. |
-| 3.2 | `HeadlessRenderer` service | new `apps/agent/src/services/headless-renderer.ts` | Per spec `plan §7.9`: browser pool, `renderFrame(project, time): Promise<Blob>`, `exportVideo(project, opts): Promise<{storageKey}>`. Uses temp file + uploadToR2; never holds full ArrayBuffer in memory. |
-| 3.3 | Renderer-friendly static build | `apps/web` build pipeline | Phase 4 deliverable per spec — produce a static HTML/JS bundle of the renderer that Playwright can load via `file://`. May require pulling renderer module out of Next.js. |
-| 3.4 | Replace preview-render worker stub | `apps/agent/src/index.ts:1.10` | Worker now: download media via `objectStorage.downloadToTempFile`, call `headlessRenderer.exportVideo` for the candidate's `resultTimeline`, upload preview to R2, emit SSE `candidate_ready`. |
-| 3.5 | Preview URL endpoint | new `apps/agent/src/routes/exploration.ts` (or extend `routes/project.ts`) | `GET /api/exploration/:id/preview/:candidateId` mints signed URL from R2 storageKey. |
-| 3.6 | Daytona sandbox pool — **decide** | doc decision | Choose: (a) implement `SandboxPoolManager` per `fanout §5.2-5.4`, or (b) defer and run all preview renders in-process on Agent service (single-instance bottleneck, but simpler). Recommendation: defer to post-MVP; add issue link. |
-
-### Acceptance
+The legacy task list (Add Playwright dep, `HeadlessRenderer` service,
+renderer-friendly static build, in-process Chromium pool, Daytona
+sandbox decision) and its risks (Next.js renderer extraction, ~500 MB
+per Chromium) are no longer load-bearing — none of those code paths
+exist in the current tree. Closure record:
 
 - [x] User selects fan-out → 4 candidates render via Modal GPU service (Stage E.7 e2e test)
 - [x] Each card has playable 5-10s MP4 (web consumes signed URL via candidate_ready)
 - [x] R2 cleanup task removes `previews/{explorationId}/` after 24h (bucket lifecycle policy; runbook in services/gpu/README.md)
 - [x] Decision documented for §3.6 (superseded by Modal — see §"Phase 3 status" above)
-
-### Risks
-
-- **Renderer build extraction** is the highest-risk single task — Next.js coupling may be deep. Spike this first (1 day timebox); if blocked, formally defer fan-out preview rendering and keep the rest of fan-out (text-only candidates) shipping.
-- **Memory**: each Chromium ≈ 250-500 MB. In-process pool of 4 is the spec's expected baseline.
 
 ---
 
