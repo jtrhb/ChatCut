@@ -7,9 +7,10 @@ Source: `.omc/plans/wiring-audit-remediation.md` Phase 3 acceptance criteria. Th
 Date: 2026-04-21
 
 **Status:**
-- Stage A — CLOSED. 4 commits on `main` (e335a39f, b45f137f, f00835d5, 58cd2ca8). 47 unit tests, ruff clean, reviewer APPROVED.
-- Stage B — IN PROGRESS, with **second pivot to MLT** (server-side multi-track NLE engine; see §0.b).
-- Stages C–F — pending.
+- Stage A — CLOSED + APPROVED. 4 commits.
+- Stage B — CLOSED + APPROVED. 7 commits (incl. 2nd pivot to MLT, see §0.b). 113 tests passing. Manual B.7 staging smoke (`modal serve` + ffprobe) is the user's.
+- Stage C — IN PROGRESS. Agent-side dispatcher + snapshot-storage-key contract (see §6 C-Q1, C-Q2 resolved 2026-04-21).
+- Stages D–F — pending.
 
 ---
 
@@ -149,19 +150,30 @@ Each stage independently shippable + reviewable. Same per-phase rhythm as Phase 
 
 **Acceptance**: real `SerializedEditorState` (multi-track composite with text overlay) → 5–10s playable MP4 in R2. Render <8s on Modal T4 for a 5s clip. Out-of-scope features either silently degrade (animations → first-keyframe value) or get logged as "skipped" (effect/sticker tracks).
 
-### Stage C — Agent-side dispatcher (0.75d)
+### Stage C — Agent dispatcher + snapshot-storage-key contract (1.5d, increased from 0.75d)
 
-**Goal**: agent calls Modal instead of HeadlessRenderer. Worker compiles, mock-tested.
+**Goal**: agent calls Modal via `gpu-service-client`. The GPU endpoint contract is rewritten so render_preview accepts `snapshotStorageKey` (R2 key) instead of an inline `timeline` dict — Modal-side fetches the snapshot itself, eliminating multi-MB request bodies for big projects.
+
+**Decisions resolved 2026-04-21** (see §6):
+- **C-Q1 (CHOSEN: snapshotStorageKey)**: ExplorationEngine already pre-uploads each candidate's serialized snapshot to R2. The pg-boss job payload now carries that storage_key instead of the raw timelineSnapshot. Renderer fetches from R2 inside `_do_render` via the same R2Uploader used for the output upload.
+- **C-Q2 (CHOSEN: client unwraps `detail`)**: FastAPI's HTTPException wraps body under `{"detail": ...}`. The gpu-service-client unwraps `body.detail.{error,phase}` in its typed error mapping for 4xx/5xx; the agent never sees the FastAPI envelope.
 
 | # | Task | Location |
 |---|---|---|
-| C.1 | `apps/agent/src/services/gpu-service-client.ts` — `enqueueRender(args)`, `getJobStatus(jobId)`, typed response shapes. Uses `fetch`, `X-API-Key` from env. Throws typed errors on 4xx/5xx. | new |
-| C.2 | `apps/agent/src/services/__tests__/gpu-service-client.test.ts` — mock fetch, verify wire shape, auth header, error mapping | new test |
-| C.3 | `apps/agent/src/index.ts` preview-render worker: replace HeadlessRenderer.exportVideo branch with gpu-service-client.enqueueRender. Worker now expects to poll. | edit |
-| C.4 | Env vars added to `apps/agent/src/env.ts` (or wherever): `GPU_SERVICE_BASE_URL`, `GPU_SERVICE_API_KEY`. Boot warning if missing. | edit |
-| C.5 | Worker test: mock client returns synthetic jobId + status sequence, assert worker handles full lifecycle | new test |
+| C.0 | Plan rewrite (this commit) — surface C-Q1 / C-Q2 decisions, restructure tasks | docs |
+| C.1 | ExplorationEngine: capture R2 storage_key from `objectStorage.upload(...)` return + thread `snapshotStorageKey` into `jobQueue.enqueue("preview-render", ...)` payload (replaces raw `timelineSnapshot`) | edit `apps/agent/src/exploration/exploration-engine.ts` + tests |
+| C.2 | GPU service contract: render_preview endpoint payload changes from `{timeline}` to `{snapshotStorageKey}`. `_do_render` fetches JSON via R2Uploader.download_bytes (NEW helper), parses, then proceeds. handlers.handle_render_preview validates snapshotStorageKey shape. | edit `services/gpu/modal_app.py` + `src/handlers.py` + `src/r2.py` + tests |
+| C.3 | `apps/agent/src/services/gpu-service-client.ts` (NEW) — `enqueueRender({explorationId, candidateId, snapshotStorageKey})`, `getJobStatus(jobId)`, typed response shapes. Uses `fetch`, `X-API-Key` from env. Throws typed errors on 4xx/5xx, unwrapping FastAPI `detail` envelope. | new |
+| C.4 | gpu-service-client tests — mock fetch, verify wire shape, auth header, 4xx/5xx error mapping including 501-detail unwrap | new test |
+| C.5 | `apps/agent/src/index.ts` preview-render worker: replace HeadlessRenderer scaffold path with gpu-service-client.enqueueRender; worker holds open until polled-to-done (Stage D wires the real polling). | edit |
+| C.6 | Env vars: `GPU_SERVICE_BASE_URL`, `GPU_SERVICE_API_KEY`. Boot warning if missing. | edit `apps/agent/src/env.ts` |
+| C.7 | Worker integration test: mock gpu-service-client returns synthetic jobId + status sequence, assert worker handles enqueue → poll → complete lifecycle | new test |
 
-**Acceptance**: agent unit tests green. Worker boot logs `[boot] gpu-service-client wired (URL=...)`.
+**Acceptance**:
+- Agent + GPU service unit tests green.
+- Worker boot logs `[boot] gpu-service-client wired (URL=...)`.
+- ExplorationEngine emits a job payload with `snapshotStorageKey` (verified via integration test against in-memory job queue).
+- HeadlessRenderer scaffold remains untouched (deletion is Stage F).
 
 ### Stage D — Progress polling + SSE forwarding (0.5d)
 
@@ -212,12 +224,12 @@ Each stage independently shippable + reviewable. Same per-phase rhythm as Phase 
 
 - Stage A: 1d
 - Stage B: 3d (MLT translator + asset fetcher + image rebuild + e2e tests; was 1.5d before MLT pivot)
-- Stage C: 0.75d
+- Stage C: 1.5d (was 0.75d; +0.75 for snapshotStorageKey contract change spanning agent + GPU service)
 - Stage D: 0.5d
 - Stage E: 0.75d
 - Stage F: 0.5d
 
-**Total: ~6.5d** (Stage B grew +1.5d for MLT translator + image rebuild; trade-off is multi-track NLE compositing without reinventing it)
+**Total: ~7.25d** (Stage B grew +1.5d for MLT pivot; Stage C grew +0.75d for snapshotStorageKey contract — both buy real architectural simplicity)
 
 ---
 
