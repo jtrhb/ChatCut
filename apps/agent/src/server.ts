@@ -135,7 +135,7 @@ export function createMessageHandler(deps: {
 			}
 		}
 	};
-	return async (message, sessionId, identity) => {
+	return async (message, sessionId, identity, annotations, annotatedFrame) => {
 		deps.eventBus.emit({
 			type: "agent.turn_start",
 			timestamp: Date.now(),
@@ -274,6 +274,8 @@ export function createMessageHandler(deps: {
 						}
 					: undefined,
 				sessionSummary,
+				annotations,
+				annotatedFrame,
 			);
 
 		// Track turn on the per-request session (not a fixed default session)

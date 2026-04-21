@@ -32,6 +32,7 @@ import type { ServerEditorCore } from "../services/server-editor-core.js";
 import type { MemoryStore } from "../memory/memory-store.js";
 import type { MemoryLoader } from "../memory/memory-loader.js";
 import type { ParsedMemory, TaskContext, ConflictMarker } from "../memory/types.js";
+import type { Annotations, AnnotatedFrame } from "../routes/chat.js";
 import type { ContextSynchronizer } from "../context/context-sync.js";
 import { DeferredRegistry } from "../tools/deferred-registry.js";
 import { createResolveToolsTool } from "../tools/resolve-tools-tool.js";
@@ -240,6 +241,22 @@ export class MasterAgent {
 		 * even though pre-summary messages were dropped from `history`.
 		 */
 		sessionSummary?: string,
+		/**
+		 * Phase 5d: optional spatial/temporal/ghost-ref annotations the user
+		 * attached to this turn. runTurn serializes them as a structured
+		 * prefix in the user message text so the model can ground intent on
+		 * the same coords later code paths use programmatically.
+		 */
+		annotations?: Annotations,
+		/**
+		 * Phase 5d (Q1=d): optional annotated frame — the captured preview
+		 * frame with the user's overlay drawn on TOP, then base64-encoded.
+		 * When present, runTurn attaches it as an Anthropic vision block on
+		 * the user message so Claude can SEE what was circled instead of
+		 * reconstructing from coords-as-text. ~1.5K tokens; only paid when
+		 * an annotation actually rides this turn.
+		 */
+		annotatedFrame?: AnnotatedFrame,
 	): Promise<{ text: string; tokensUsed: { input: number; output: number } }> {
 		this.currentIdentity = identity;
 		// Reset per-turn memory injection lists; runTurn populates them if
@@ -247,7 +264,13 @@ export class MasterAgent {
 		this.currentInjectedMemoryIds = [];
 		this.currentInjectedSkillIds = [];
 		try {
-			return await this.runTurn(message, history, sessionSummary);
+			return await this.runTurn(
+				message,
+				history,
+				sessionSummary,
+				annotations,
+				annotatedFrame,
+			);
 		} finally {
 			this.currentIdentity = undefined;
 			this.currentInjectedMemoryIds = [];
@@ -428,10 +451,45 @@ export class MasterAgent {
 		return lines.join("\n").trimEnd();
 	}
 
+	/**
+	 * Phase 5d: serialize annotations as a structured prefix the model can
+	 * read deterministically. Coords are 0..1 normalized (Q4) so the LLM
+	 * sees the same numbers regardless of viewport — and the same numbers
+	 * downstream tool calls would use programmatically.
+	 *
+	 * Returns "" when no annotations of substance are present so callers
+	 * don't append an empty header.
+	 */
+	private formatAnnotationPrefix(annotations: Annotations): string {
+		if (!annotations) return "";
+		const lines: string[] = [];
+		if (annotations.spatial && annotations.spatial.length > 0) {
+			lines.push("Spatial (0..1 normalized to preview canvas):");
+			for (const s of annotations.spatial) {
+				const labelSuffix = s.label ? ` — "${s.label}"` : "";
+				lines.push(
+					`  - {x: ${s.x.toFixed(3)}, y: ${s.y.toFixed(3)}, w: ${s.w.toFixed(3)}, h: ${s.h.toFixed(3)}}${labelSuffix}`,
+				);
+			}
+		}
+		if (annotations.temporal) {
+			lines.push(
+				`Temporal: ${annotations.temporal.startSec.toFixed(2)}s → ${annotations.temporal.endSec.toFixed(2)}s`,
+			);
+		}
+		if (annotations.ghostRef) {
+			lines.push(`Ghost reference: ${annotations.ghostRef.ghostId}`);
+		}
+		if (lines.length === 0) return "";
+		return ["## User indication", ...lines, ""].join("\n");
+	}
+
 	private async runTurn(
 		message: string,
 		history?: Array<{ role: string; content: string }>,
 		sessionSummary?: string,
+		annotations?: Annotations,
+		annotatedFrame?: AnnotatedFrame,
 	): Promise<{ text: string; tokensUsed: { input: number; output: number } }> {
 		const ctx = this.contextManager.get();
 
@@ -545,10 +603,41 @@ export class MasterAgent {
 			}
 		}
 
+		// Phase 5d: prepend the annotation prefix BEFORE the user message
+		// (after any contextSynchronizer block). Coords + temporal + ghost
+		// refs ride as deterministic text the model can parse exactly the
+		// way downstream tools will. The annotated frame (if present) gets
+		// attached as a vision block via userContent below.
+		const annotationPrefix = this.formatAnnotationPrefix(annotations);
+		if (annotationPrefix) {
+			effectiveMessage = `${annotationPrefix}${effectiveMessage}`;
+		}
+
+		// Phase 5d (Q1=d): when an annotated frame ships with the turn,
+		// build an Anthropic content array (text + image) so Claude SEES
+		// what was circled instead of reconstructing from coords-as-text.
+		// Anthropic SDK accepts string OR array — we pass array only when
+		// we actually have an image, keeping the un-annotated path bit-
+		// for-bit identical to today.
+		const userContent = annotatedFrame
+			? [
+					{ type: "text" as const, text: effectiveMessage },
+					{
+						type: "image" as const,
+						source: {
+							type: "base64" as const,
+							media_type: annotatedFrame.mediaType,
+							data: annotatedFrame.base64,
+						},
+					},
+				]
+			: undefined;
+
 		const result = await this.runtime.run(
 			config,
 			effectiveMessage,
 			anthropicHistory,
+			userContent,
 		);
 		return { text: result.text, tokensUsed: result.tokensUsed };
 	}

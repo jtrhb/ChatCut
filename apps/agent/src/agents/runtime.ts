@@ -15,7 +15,19 @@ export interface SessionCallbacks {
 }
 
 export interface AgentRuntime {
-  run(config: AgentConfig, input: string, history?: Anthropic.MessageParam[]): Promise<AgentResult>;
+  /**
+   * Phase 5d: `userContent` lets the caller override the user-message body
+   * with a multi-block array (e.g. text + Anthropic vision block for an
+   * annotated frame). When provided, it replaces the string `input` in the
+   * outgoing first user message. When omitted, `input` is used as a plain
+   * string — same behavior as before Phase 5d.
+   */
+  run(
+    config: AgentConfig,
+    input: string,
+    history?: Anthropic.MessageParam[],
+    userContent?: Anthropic.MessageParam["content"],
+  ): Promise<AgentResult>;
   setToolExecutor(fn: (name: string, input: unknown) => Promise<unknown>): void;
   setToolRegistry?(registry: Map<string, ToolDefinition>): void;
   setOnTurnComplete?(fn: (tokens: { input: number; output: number }) => void): void;
@@ -59,16 +71,30 @@ export class NativeAPIRuntime implements AgentRuntime {
     this.deferredRegistry = registry;
   }
 
-  async run(config: AgentConfig, input: string, history?: Anthropic.MessageParam[]): Promise<AgentResult> {
+  async run(
+    config: AgentConfig,
+    input: string,
+    history?: Anthropic.MessageParam[],
+    userContent?: Anthropic.MessageParam["content"],
+  ): Promise<AgentResult> {
     const maxIterations = config.maxIterations ?? 10;
     const tokenBudget = config.tokenBudget ?? { input: 30_000, output: 4_000 };
+
+    // Phase 5d: when a multi-block userContent is provided (text + image
+    // for an annotated frame), it replaces the string `input` in the
+    // outgoing user message. Un-annotated turns pass `input` as a plain
+    // string and the wire format is bit-for-bit identical to pre-5d.
+    const firstUserContent = userContent ?? input;
 
     // Start from conversation history if provided (multi-turn session),
     // otherwise start fresh (single-turn or sub-agent dispatch)
     const messages: Anthropic.MessageParam[] = history
-      ? [...history, { role: "user" as const, content: input }]
-      : [{ role: "user", content: input }];
+      ? [...history, { role: "user" as const, content: firstUserContent }]
+      : [{ role: "user", content: firstUserContent }];
 
+    // Session callback always sees the textual `input` so transcripts /
+    // history slicing continue to operate on plain text. The image block
+    // is for the model only — it doesn't get persisted into session.messages.
     this.sessionCallbacks?.onMessage({ role: "user", content: input });
 
     const toolCalls: AgentResult["toolCalls"] = [];

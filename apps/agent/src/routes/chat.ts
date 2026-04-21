@@ -16,21 +16,88 @@ export interface RequestIdentity {
 }
 
 /**
+ * Phase 5d: spatial annotation rectangle in 0..1 normalized coords against
+ * the preview canvas (Q4 — resolution-independent so server-side handling
+ * doesn't break across viewport changes).
+ */
+export const SpatialAnnotationSchema = z.object({
+  x: z.number().min(0).max(1),
+  y: z.number().min(0).max(1),
+  w: z.number().min(0).max(1),
+  h: z.number().min(0).max(1),
+  /** Optional free-text label scribbled next to the box ("this", "remove"). */
+  label: z.string().max(200).optional(),
+});
+
+/** Phase 5d: temporal window the user wants the agent to focus on. */
+export const TemporalAnnotationSchema = z.object({
+  startSec: z.number().min(0),
+  endSec: z.number().min(0),
+});
+
+/**
+ * Phase 5d (Q3): schema supports 1..N spatial + 0..N temporal even though
+ * the v1 UI is single-shot. Lets a future multi-select UX land without a
+ * schema migration.
+ */
+export const AnnotationsSchema = z
+  .object({
+    spatial: z.array(SpatialAnnotationSchema).optional(),
+    temporal: TemporalAnnotationSchema.optional(),
+    /** Reference to a previously-emitted ghost element ("apply this to ghost-X"). */
+    ghostRef: z.object({ ghostId: z.string() }).optional(),
+  })
+  .optional();
+
+/**
+ * Phase 5d (Q1=d): the annotated frame — overlay drawn on the captured
+ * preview frame BEFORE base64 encoding. Carries the "I mean THIS one"
+ * signal directly. Cap at ~12MB encoded so a misbehaving client can't OOM
+ * the route. Anthropic vision blocks accept png/jpeg/webp/gif.
+ */
+export const AnnotatedFrameSchema = z
+  .object({
+    mediaType: z.enum([
+      "image/png",
+      "image/jpeg",
+      "image/webp",
+      "image/gif",
+    ]),
+    /** Raw base64 (NO `data:image/...;base64,` prefix). */
+    base64: z.string().min(1).max(12_000_000),
+  })
+  .optional();
+
+export type SpatialAnnotation = z.infer<typeof SpatialAnnotationSchema>;
+export type TemporalAnnotation = z.infer<typeof TemporalAnnotationSchema>;
+export type Annotations = z.infer<typeof AnnotationsSchema>;
+export type AnnotatedFrame = z.infer<typeof AnnotatedFrameSchema>;
+
+/**
  * Message handler function — decouples routing from agent execution.
  * In production, this wraps MasterAgent.handleUserMessage().
  * `identity` is optional during B1 migration; handlers wired after B1.b
  * may rely on it for tenant-scoped execution.
+ *
+ * Phase 5d: gained optional `annotations` (coords + ghost refs) and
+ * `annotatedFrame` (base64 image with the user's overlay drawn on it) so
+ * the model can ground spatial intent on what the user actually circled.
+ * Both optional — un-annotated messages cost nothing extra.
  */
 export type MessageHandler = (
   message: string,
   sessionId: string,
   identity?: RequestIdentity,
+  annotations?: Annotations,
+  annotatedFrame?: AnnotatedFrame,
 ) => Promise<string>;
 
 const chatSchema = z.object({
   projectId: z.string().uuid(),
   message: z.string().min(1),
   sessionId: z.string().uuid().optional(),
+  annotations: AnnotationsSchema,
+  annotatedFrame: AnnotatedFrameSchema,
 });
 
 function createChatRouter(deps: {
@@ -54,7 +121,13 @@ function createChatRouter(deps: {
       return c.json({ error: "Invalid request body", issues: result.error.issues }, 400);
     }
 
-    const { projectId, message, sessionId: incomingSessionId } = result.data;
+    const {
+      projectId,
+      message,
+      sessionId: incomingSessionId,
+      annotations,
+      annotatedFrame,
+    } = result.data;
 
     // Read identity from header during B1 migration. Auth middleware will
     // replace this in a later phase (B1.b+). Missing userId is accepted for
@@ -107,7 +180,13 @@ function createChatRouter(deps: {
     // Append messages AFTER handler completes to avoid history duplication
     // (handler reads history, then runtime adds current message)
     try {
-      const response = await messageHandler(message, session.sessionId, identity);
+      const response = await messageHandler(
+        message,
+        session.sessionId,
+        identity,
+        annotations,
+        annotatedFrame,
+      );
 
       sessionManager.appendMessage(session.sessionId, {
         role: "user",
