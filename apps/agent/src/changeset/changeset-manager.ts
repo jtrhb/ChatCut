@@ -162,12 +162,21 @@ export class ChangesetManager {
 		// Record boundary cursor (length - 1, or -1 if empty)
 		const boundaryCursor = this.changeLog.length - 1;
 
-		// Phase 5b: clamp confidence to [0, 1]. The route-layer Zod gate is
-		// the primary defense, but we re-clamp here so direct programmatic
-		// callers (sub-agent dispatch, tests) can't smuggle out-of-range
-		// values into the SSE payload and confuse the UI threshold logic.
+		// Phase 5b: clamp confidence to [0, 1]. The route-layer Zod gate
+		// REJECTS out-of-range values (z.number().min(0).max(1) is a
+		// validator, not a clamper) — this re-clamp only fires for
+		// in-process callers that bypass the route schema (sub-agent
+		// dispatch, tests, future direct-API consumers).
+		//
+		// Reviewer Phase 5b LOW-2 fix: handle NaN explicitly. `z.number()`
+		// at the route layer accepts NaN, and `Math.max(0, Math.min(1,
+		// NaN))` returns NaN, which serializes as `null` over JSON and
+		// poisons the UI threshold logic. Mirror createGhost's behavior
+		// (substitute 0.5 default).
 		const rawConfidence = params.confidence ?? 0.5;
-		const confidence = Math.max(0, Math.min(1, rawConfidence));
+		const confidence = Number.isNaN(rawConfidence)
+			? 0.5
+			: Math.max(0, Math.min(1, rawConfidence));
 
 		const proposedElements = params.proposedElements ?? [];
 
@@ -311,9 +320,20 @@ export class ChangesetManager {
 		// sessionId — without it, the per-session SSE filter at
 		// routes/events.ts drops the event (its `event.sessionId`
 		// strict-equality check against the subscriber's id is `false`
-		// for `undefined`). Cross-tab delivery for the same project will
-		// need a separate broadcast channel; out of scope for v1 (Q5
-		// confirmed).
+		// for `undefined`).
+		//
+		// Reviewer Phase 5b MED-2: known UX gap. Another browser tab
+		// (same project, different chat session) will NOT see the
+		// approve/reject SSE update because it filters on sessionId.
+		// Its ghosts stay in `proposed` style after another tab commits.
+		// Out of scope for v1 per Q5=a (undo + multi-tab deferred);
+		// Stage 2 / Phase 6 candidates:
+		//   - Add a `projectId:` filter fallback in routes/events.ts
+		//     that matches when the subscriber has no sessionId set but
+		//     owns the project, OR
+		//   - Emit a second broadcast event on a project-scoped channel.
+		// Documented here so the deferral is discoverable at the emit
+		// site rather than only in the plan doc.
 		this.eventBus?.emit({
 			type:
 				terminalStatus === "approved"

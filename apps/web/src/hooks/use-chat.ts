@@ -62,19 +62,24 @@ export type AgentStatus =
  * progress to a specific candidate card without parsing the synthetic
  * `preview-render:{exp}:{cand}` toolCallId. Both keys are optional so
  * non-render tool.progress events stay compatible.
+ *
+ * Reviewer Phase 5b CRIT-1 fix: the wire format flattens `data` onto
+ * the top-level JSON payload (see `apps/agent/src/events/event-protocol.ts`).
+ * Earlier shapes in this file declared a nested `data: { ... }` field
+ * matching the runtime-event ENVELOPE structure, but the over-the-wire
+ * payload omits the `data` wrapper. Reads accordingly use top-level
+ * properties (`evt.text`, not `evt.data.text`).
  */
 interface ToolProgressSseEvent {
 	type: "tool.progress";
-	data: {
-		toolName: string;
-		toolCallId?: string;
-		step: number;
-		totalSteps?: number;
-		text?: string;
-		estimatedRemainingMs?: number;
-		explorationId?: string;
-		candidateId?: string;
-	};
+	toolName: string;
+	toolCallId?: string;
+	step: number;
+	totalSteps?: number;
+	text?: string;
+	estimatedRemainingMs?: number;
+	explorationId?: string;
+	candidateId?: string;
 }
 
 /**
@@ -82,15 +87,16 @@ interface ToolProgressSseEvent {
  * `done`. The fast path carries a 24h presigned `previewUrl` minted in
  * the worker (Stage E.5); when that mint failed the event omits it and
  * the consumer falls back to GET /exploration/.../preview/... .
+ *
+ * Phase 5b CRIT-1: top-level fields per the flat wire shape (see note
+ * on `ToolProgressSseEvent` above).
  */
 interface CandidateReadySseEvent {
 	type: "exploration.candidate_ready";
-	data: {
-		explorationId: string;
-		candidateId: string;
-		storageKey: string;
-		previewUrl?: string;
-	};
+	explorationId: string;
+	candidateId: string;
+	storageKey: string;
+	previewUrl?: string;
 }
 
 export interface UseChatReturn {
@@ -264,10 +270,16 @@ export function useChat(projectId: string): UseChatReturn {
 					// (the indicator's STATUS_CONFIG[status] would crash on a
 					// free-form string). Fully typed against the agent-side
 					// emit shape.
+					//
+					// Phase 5b CRIT-1: read `text` as a top-level field — the
+					// SSE wire format flattens `data` (see event-protocol.ts).
+					// The previous `evt.data?.text` access was returning
+					// `undefined` because there is no `data` wrapper on the
+					// wire; this handler has been silently dead since the
+					// wire shape was set in Phase 3 Stage E.
 					const evt = data as unknown as ToolProgressSseEvent;
-					const text = evt.data?.text;
-					if (typeof text === "string" && text.length > 0) {
-						setProgressText(text);
+					if (typeof evt.text === "string" && evt.text.length > 0) {
+						setProgressText(evt.text);
 					}
 				} else if (type === "exploration.candidate_ready") {
 					// Phase 3 Stage E.6: preview-render done. Fast path uses
@@ -276,8 +288,11 @@ export function useChat(projectId: string): UseChatReturn {
 					// and we fall back to the /exploration route which mints
 					// on demand from the persisted storageKey (Stage E.3).
 					// MED-3 race guard: see fallbackFetchPreviewUrl.
+					//
+					// Phase 5b CRIT-1: top-level field reads, same as
+					// tool.progress above.
 					const evt = data as unknown as CandidateReadySseEvent;
-					const { explorationId, candidateId, previewUrl } = evt.data;
+					const { explorationId, candidateId, previewUrl } = evt;
 					if (previewUrl) {
 						applyPreviewUrl(setMessages, explorationId, candidateId, previewUrl);
 					} else {

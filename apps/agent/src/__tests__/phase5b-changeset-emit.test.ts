@@ -278,20 +278,95 @@ describe("Phase 5b — ChangesetManager EventBus emission", () => {
 			expect(sse.event).toBe("changeset.approved");
 		});
 
-		it("data field type does NOT shadow data sub-keys named `type`", () => {
-			// Defensive: if a future emit ever included `type` inside the
-			// data object, we want the top-level event type to win (it's
-			// the canonical identifier; sub-keys are just payload). Verify
-			// the spread order (`{ type, ...data, ...rest }`) preserves
-			// the canonical type.
+		it("envelope `type` wins when `data.type` collides (Phase 5b HIGH-1)", () => {
+			// Spread order is `{ ...data, ...rest, type }` so even a
+			// future emit that ships `data: { type: "shadow-attempt" }`
+			// cannot overwrite the canonical event type. Without this
+			// invariant, a downstream emitter that smuggles a `type`
+			// field would silently break SSE event routing.
 			const event: RuntimeEvent = {
 				type: "tool.called",
 				timestamp: 1,
-				data: { toolName: "x" },
+				data: { toolName: "x", type: "shadow-attempt" } as Record<
+					string,
+					unknown
+				>,
 			};
 			const sse = serializeEvent(event);
 			const parsed = JSON.parse(sse.data);
 			expect(parsed.type).toBe("tool.called");
+		});
+
+		it("envelope `sessionId` wins when `data.sessionId` collides", () => {
+			// Same defense for the other envelope keys (sessionId,
+			// timestamp, taskId). The per-session SSE filter at
+			// routes/events.ts reads `event.sessionId` (the envelope) —
+			// a colliding `data.sessionId` must not leak into the
+			// flattened wire payload's `sessionId` slot.
+			const event: RuntimeEvent = {
+				type: "tool.called",
+				timestamp: 1,
+				sessionId: "envelope-session",
+				data: { toolName: "x", sessionId: "data-session" } as Record<
+					string,
+					unknown
+				>,
+			};
+			const sse = serializeEvent(event);
+			const parsed = JSON.parse(sse.data);
+			expect(parsed.sessionId).toBe("envelope-session");
+		});
+
+		// Reviewer Phase 5b CRIT-1: lock in the FLAT wire shape contract
+		// against the existing web consumer pattern. The hook reads
+		// top-level fields (parsed.text, parsed.explorationId), NOT
+		// nested data fields. Round-trip via serializeEvent → JSON.parse
+		// must preserve that shape so the consumer doesn't get back
+		// `undefined` for fields that were on the original event's
+		// `data` object.
+		it("flattens `data` onto top level (web consumer contract)", () => {
+			const event: RuntimeEvent = {
+				type: "tool.progress",
+				timestamp: 1,
+				sessionId: "s",
+				data: {
+					toolName: "trim_element",
+					text: "trimming clip-3",
+					step: 2,
+					totalSteps: 5,
+					explorationId: "exp-1",
+					candidateId: "cand-2",
+				},
+			};
+			const sse = serializeEvent(event);
+			const parsed = JSON.parse(sse.data);
+			expect(parsed.text).toBe("trimming clip-3");
+			expect(parsed.toolName).toBe("trim_element");
+			expect(parsed.step).toBe(2);
+			expect(parsed.totalSteps).toBe(5);
+			expect(parsed.explorationId).toBe("exp-1");
+			expect(parsed.candidateId).toBe("cand-2");
+			// And no `data` wrapper survives the flattening:
+			expect(parsed.data).toBeUndefined();
+		});
+	});
+
+	describe("confidence NaN handling (Phase 5b LOW-2)", () => {
+		it("substitutes 0.5 for NaN confidence inside ChangesetManager", async () => {
+			const env = makeManager({ withEventBus: true });
+			await env.manager.propose({
+				summary: "x",
+				affectedElements: [],
+				confidence: Number.NaN,
+				sessionId: "s",
+			});
+			const proposed = env.captured.find(
+				(e) => e.type === "changeset.proposed",
+			);
+			// Without the NaN guard, Math.max(0, Math.min(1, NaN)) returns
+			// NaN, which serializes to JSON `null` and poisons the UI
+			// threshold. Mirror createGhost's behavior.
+			expect(proposed?.data.confidence).toBe(0.5);
 		});
 	});
 });

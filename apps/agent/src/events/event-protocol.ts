@@ -3,24 +3,30 @@ import type { RuntimeEvent } from "./types.js";
 /**
  * Serialize a RuntimeEvent into the SSE wire shape.
  *
- * The returned `event` field is consumed by `hono/streaming.writeSSE` and
- * becomes the SSE `event:` line — browsers route those events to
- * `EventSource.addEventListener(<type>, ...)`. They do NOT fire on
- * `EventSource.onmessage`, which only delivers messages with an empty
- * (default) event name.
+ * Wire format (since pre-Phase-5b): `data` is FLATTENED onto the top
+ * level of the JSON payload alongside the envelope fields (timestamp,
+ * sessionId, taskId). Web consumers (`apps/web/src/hooks/use-chat.ts`)
+ * read the data fields as top-level properties — `parsed.text` not
+ * `parsed.data.text`.
  *
- * Phase 5b: include `type` in the JSON payload so consumers reading via
- * `onmessage` (the existing `apps/web/src/hooks/use-chat.ts` pattern,
- * which discriminates on `data.type`) can still discriminate even if the
- * SSE pipe is later restructured to use the default channel — and so
- * downstream consumers logging the parsed payload have the type onhand
- * without re-correlating to the SSE event name. Keeps both delivery
- * idioms working off one serializer.
+ * Phase 5b: also include `type` in the JSON payload so consumers reading
+ * via `EventSource.onmessage` can discriminate on `parsed.type`. Without
+ * this, browsers route named-event SSE messages ONLY to
+ * `addEventListener(<type>, ...)` — `onmessage` would never fire, leaving
+ * the existing web hook unable to see typed events at all.
+ *
+ * Reviewer Phase 5b HIGH-1 fix: spread order is `{ ...data, ...rest, type }`
+ * so the canonical envelope `type` ALWAYS wins over a colliding key
+ * inside `data`. A future emit that ships `data: { type: "subtype" }`
+ * would otherwise silently overwrite the canonical event-type
+ * discriminator and break SSE event routing on the web client. Same
+ * principle applies to `timestamp`/`sessionId`/`taskId` — `rest` (the
+ * envelope) wins over `data`.
  */
 export function serializeEvent(event: RuntimeEvent): {
 	event: string;
 	data: string;
 } {
 	const { type, data, ...rest } = event;
-	return { event: type, data: JSON.stringify({ type, ...data, ...rest }) };
+	return { event: type, data: JSON.stringify({ ...data, ...rest, type }) };
 }

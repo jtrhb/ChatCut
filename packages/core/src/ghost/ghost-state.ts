@@ -69,9 +69,22 @@ export interface GhostRecord {
  * Allowed forward transitions. `proposed → invalidated` and `proposed →
  * stale` are reachable via the off-path branches; explicit allow-list
  * keeps the table easy to scan.
+ *
+ * Reviewer Phase 5b MED-1 fix: `proposed → accepted` is also allowed.
+ * `previewing` is a UI hover/preview state — not a domain prerequisite
+ * for acceptance. Without this shortcut, a fast user click (or a
+ * pre-opened changeset modal where the React effect that transitions
+ * ghosts to `previewing` hasn't fired yet) would silently no-op the
+ * approve, leaving the ghost stuck in `proposed` style even after the
+ * change committed.
  */
 const ALLOWED_TRANSITIONS: Record<GhostState, ReadonlySet<GhostState>> = {
-	proposed: new Set<GhostState>(["previewing", "invalidated", "stale"]),
+	proposed: new Set<GhostState>([
+		"previewing",
+		"accepted",
+		"invalidated",
+		"stale",
+	]),
 	previewing: new Set<GhostState>(["accepted", "invalidated", "stale"]),
 	accepted: new Set<GhostState>(["committed", "stale"]),
 	// Terminal states — no outgoing transitions. Listed explicitly so the
@@ -145,6 +158,15 @@ export function isTerminal(record: GhostRecord): boolean {
  * than building an explicit reverse-dependency graph and far easier to
  * reason about. If we ever need to scale past hundreds of ghosts this
  * is the obvious place to swap in a memoized reverse-dep cache.
+ *
+ * Reviewer Phase 5b LOW-1: termination is guaranteed because each
+ * iteration moves at least one ghost from active → stale, and stale
+ * ghosts are skipped on the next pass (the `!isActive(g)` guard). Upper
+ * bound is O(N) iterations × O(N) per scan = O(N²). Cyclic dependencies
+ * (A↔B with neither dead) are handled correctly: each cycle member
+ * checks the other, finds it not-dead, transitions nothing, and the
+ * loop exits unchanged. An unbroken cycle has no death source — staying
+ * `proposed` is the correct outcome.
  */
 export function propagateStale(
 	ghosts: ReadonlyMap<string, GhostRecord>,

@@ -13,6 +13,7 @@ import type {
 import type { ProjectWriteLock } from "../context/write-lock.js";
 import {
 	ExploreOptionsSchema,
+	ProposeChangesSchema,
 	masterToolDefinitions,
 } from "../tools/master-tools.js";
 import { TOKEN_BUDGETS, MAX_ITERATIONS } from "./types.js";
@@ -812,11 +813,21 @@ export class MasterAgent {
 
 			case "propose_changes": {
 				if (this.changesetManager) {
-					// Phase 5b: Zod schema (master-tools.ts ProposeChangesSchema) now
-					// applies defaults for `proposedElements` (default `[]`) and
-					// `confidence` (default 0.5) before this case runs. The cast is
-					// for shape only — runtime defaults are already populated.
-					const params = input as {
+					// Reviewer Phase 5b NIT-1: re-validate against the same
+					// Zod schema the model sees, mirroring explore_options
+					// (master-agent.ts:882). The tool pipeline normally
+					// gates input via formatToolsForApi → handleToolCall but
+					// a direct `callTool` invocation in tests bypasses that
+					// gate. Re-parsing here also applies the schema's
+					// defaults (`proposedElements: []`, `confidence: 0.5`)
+					// uniformly across both paths.
+					const parsed = ProposeChangesSchema.safeParse(input);
+					if (!parsed.success) {
+						return {
+							error: `propose_changes input failed schema validation: ${parsed.error.message}`,
+						};
+					}
+					const params = parsed.data as {
 						summary: string;
 						affectedElements: string[];
 						projectId?: string;

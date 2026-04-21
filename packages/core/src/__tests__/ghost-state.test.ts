@@ -119,6 +119,16 @@ describe("Phase 5b — ghost state machine", () => {
 			if (r.ok) expect(r.record.state).toBe("committed");
 		});
 
+		// Reviewer Phase 5b MED-1: fast-click race — user clicks approve
+		// before the React effect fires the proposed → previewing
+		// transition. Without this shortcut the approve silently no-ops
+		// and the ghost remains in `proposed` style after commit.
+		it("proposed → accepted (fast-click shortcut)", () => {
+			const r = transition(makeGhost({ state: "proposed" }), "accepted");
+			expect(r.ok).toBe(true);
+			if (r.ok) expect(r.record.state).toBe("accepted");
+		});
+
 		it("returns a fresh object (does not mutate input)", () => {
 			const before = makeGhost({ state: "proposed" });
 			const r = transition(before, "previewing");
@@ -134,7 +144,9 @@ describe("Phase 5b — ghost state machine", () => {
 
 	describe("transition() — illegal moves", () => {
 		const cases: Array<[GhostState, GhostState]> = [
-			["proposed", "accepted"],
+			// `proposed → accepted` was moved to legal moves per MED-1
+			// (fast-click shortcut). It still goes through the normal
+			// transition function, just from a different starting state.
 			["proposed", "committed"],
 			["previewing", "proposed"],
 			["previewing", "committed"],
@@ -306,6 +318,22 @@ describe("Phase 5b — ghost state machine", () => {
 			// "A" was previewing so it should accept; the other-changeset ghost is untouched.
 			expect(next.get("A")?.state).toBe("accepted");
 			expect(next.get("B")?.state).toBe("proposed");
+		});
+
+		// Reviewer Phase 5b MED-1: this test verifies the fast-click
+		// race fix end-to-end. Pre-fix, a `proposed` ghost passed to
+		// applyChangesetDecision('approve') stayed in `proposed` because
+		// the underlying transition table didn't allow `proposed →
+		// accepted` directly.
+		it("approve transitions ghosts still in `proposed` (fast-click race)", () => {
+			const ghosts = new Map<string, GhostRecord>([
+				[
+					"A",
+					makeGhost({ ghostId: "A", state: "proposed", changesetId: "cs-1" }),
+				],
+			]);
+			const next = applyChangesetDecision(ghosts, "cs-1", "approve");
+			expect(next.get("A")?.state).toBe("accepted");
 		});
 
 		it("approve preserves a ghost that's already accepted (re-delivery safe)", () => {
