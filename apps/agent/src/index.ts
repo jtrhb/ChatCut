@@ -308,9 +308,13 @@ async function main() {
 			}
 			if (handlePreviewRender) {
 				const handler = handlePreviewRender;
+				// Stage D.3: thread the EventBus into the worker so
+				// `tool.progress` + `exploration.candidate_ready` reach the
+				// SSE consumer on apps/web. Falls back to log-only when
+				// gpuClient is null (handler short-circuits before emitting).
 				jobQueue.registerWorker<
 					import("./services/preview-render-worker.js").PreviewRenderJobData
-				>("preview-render", (job) => handler(job, { gpuClient }));
+				>("preview-render", (job) => handler(job, { gpuClient, eventBus }));
 			}
 
 			if (r2) {
