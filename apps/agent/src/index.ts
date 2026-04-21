@@ -256,53 +256,81 @@ async function main() {
 		}
 
 		if (jobQueue) {
-			// Phase 3 (scaffold): the worker wires through to HeadlessRenderer
-			// when it can be constructed (RENDERER_BASE_URL + R2 + a real
-			// Playwright BrowserFactory all wired). The factory is null in
-			// this build because Playwright is not yet installed in the agent
-			// host — see the deferral note in
-			// .omc/plans/wiring-audit-remediation.md §3 (3.1, 3.3). Until that
-			// lands, the worker keeps the existing log-only fallback so
-			// enqueued jobs are still acknowledged.
-			let headlessRenderer:
-				| import("./services/headless-renderer.js").HeadlessRenderer
+			// Phase 3 Stage C.5: GPU service client replaces the deprecated
+			// HeadlessRenderer scaffold. The HeadlessRenderer module remains
+			// in src/services/ (Stage F deletes it). Today the worker wires
+			// to GpuServiceClient when GPU_SERVICE_BASE_URL + GPU_SERVICE_API_KEY
+			// are both set; otherwise the legacy stub-log path keeps the
+			// queue draining without errors.
+			let gpuClient:
+				| import("./services/gpu-service-client.js").GpuServiceClient
 				| null = null;
-			if (process.env.RENDERER_BASE_URL && r2) {
-				// browserFactory placeholder — wire to playwright.chromium.launch()
-				// when Phase 3.1 + 3.3 prerequisites are met. Today this branch
-				// stays inert: no factory is registered, no renderer constructed.
+			if (
+				process.env.GPU_SERVICE_BASE_URL &&
+				process.env.GPU_SERVICE_API_KEY
+			) {
+				const { GpuServiceClient } = await import(
+					"./services/gpu-service-client.js"
+				);
+				gpuClient = new GpuServiceClient({
+					baseUrl: process.env.GPU_SERVICE_BASE_URL,
+					apiKey: process.env.GPU_SERVICE_API_KEY,
+				});
+				console.log(
+					`[boot] gpu-service-client wired (URL=${process.env.GPU_SERVICE_BASE_URL})`,
+				);
+			} else {
 				console.warn(
-					"[boot] HeadlessRenderer not yet constructed: Playwright BrowserFactory not wired (Phase 3.1 deferred). RENDERER_BASE_URL is set but the renderer module (Phase 3.3) and Playwright install (Phase 3.1) are still missing.",
+					"[boot] gpu-service-client not configured: set GPU_SERVICE_BASE_URL + GPU_SERVICE_API_KEY to enable preview rendering",
 				);
 			}
 
 			jobQueue.registerWorker<{
 				explorationId: string;
 				candidateId: string;
+				snapshotStorageKey?: string;
+				// timelineSnapshot retained on the type for backwards-compat
+				// with legacy in-flight jobs; Stage C.5 reads snapshotStorageKey.
 				timelineSnapshot?: import("@opencut/core").SerializedEditorState;
 				durationSec?: number;
 			}>("preview-render", async (job) => {
-				if (!headlessRenderer) {
+				if (!gpuClient) {
 					console.log(
-						`[preview-render stub] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} (renderer not wired — Phase 3.1+3.3)`,
+						`[preview-render stub] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} (gpu-service-client not configured)`,
+					);
+					return;
+				}
+				if (!job.data.snapshotStorageKey) {
+					console.warn(
+						`[preview-render] missing snapshotStorageKey for ${job.data.explorationId}/${job.data.candidateId} — skipping (legacy payload)`,
 					);
 					return;
 				}
 				try {
-					const result = await headlessRenderer.exportVideo({
+					const enq = await gpuClient.enqueueRender({
 						explorationId: job.data.explorationId,
 						candidateId: job.data.candidateId,
-						timelineSnapshot:
-							job.data.timelineSnapshot ?? {
-								project: null,
-								scenes: [],
-								activeSceneId: null,
-							},
-						durationSec: job.data.durationSec ?? 5,
+						snapshotStorageKey: job.data.snapshotStorageKey,
 					});
 					console.log(
-						`[preview-render] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} → ${result.storageKey}`,
+						`[preview-render] enqueued explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} jobId=${enq.jobId}`,
 					);
+					// Poll until terminal. Stage D will replace the inline
+					// polling with proper progress emission via safeProgress
+					// + tool.progress events; for now we just wait + log.
+					const { pollUntilTerminal } = await import(
+						"./services/poll-job.js"
+					);
+					const final = await pollUntilTerminal(gpuClient, enq.jobId);
+					if (final.state === "done") {
+						console.log(
+							`[preview-render] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} → ${final.result?.storage_key ?? "<no key>"}`,
+						);
+					} else {
+						console.warn(
+							`[preview-render] failed: explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} — ${final.error ?? "no error msg"}`,
+						);
+					}
 				} catch (err) {
 					console.warn(
 						`[preview-render] failed: explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} — ${err instanceof Error ? err.message : String(err)}`,
