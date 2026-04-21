@@ -285,58 +285,16 @@ async function main() {
 				);
 			}
 
-			jobQueue.registerWorker<{
-				explorationId: string;
-				candidateId: string;
-				snapshotStorageKey?: string;
-				// timelineSnapshot retained on the type for backwards-compat
-				// with legacy in-flight jobs; Stage C.5 reads snapshotStorageKey.
-				timelineSnapshot?: import("@opencut/core").SerializedEditorState;
-				durationSec?: number;
-			}>("preview-render", async (job) => {
-				if (!gpuClient) {
-					console.log(
-						`[preview-render stub] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} (gpu-service-client not configured)`,
-					);
-					return;
-				}
-				if (!job.data.snapshotStorageKey) {
-					console.warn(
-						`[preview-render] missing snapshotStorageKey for ${job.data.explorationId}/${job.data.candidateId} — skipping (legacy payload)`,
-					);
-					return;
-				}
-				try {
-					const enq = await gpuClient.enqueueRender({
-						explorationId: job.data.explorationId,
-						candidateId: job.data.candidateId,
-						snapshotStorageKey: job.data.snapshotStorageKey,
-					});
-					console.log(
-						`[preview-render] enqueued explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} jobId=${enq.jobId}`,
-					);
-					// Poll until terminal. Stage D will replace the inline
-					// polling with proper progress emission via safeProgress
-					// + tool.progress events; for now we just wait + log.
-					const { pollUntilTerminal } = await import(
-						"./services/poll-job.js"
-					);
-					const final = await pollUntilTerminal(gpuClient, enq.jobId);
-					if (final.state === "done") {
-						console.log(
-							`[preview-render] explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} → ${final.result?.storage_key ?? "<no key>"}`,
-						);
-					} else {
-						console.warn(
-							`[preview-render] failed: explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} — ${final.error ?? "no error msg"}`,
-						);
-					}
-				} catch (err) {
-					console.warn(
-						`[preview-render] failed: explorationId=${job.data.explorationId} candidateId=${job.data.candidateId} — ${err instanceof Error ? err.message : String(err)}`,
-					);
-				}
-			});
+			// Worker handler extracted to src/services/preview-render-worker.ts
+			// for unit-testability of the full enqueue → poll → log lifecycle.
+			const { handlePreviewRender } = await import(
+				"./services/preview-render-worker.js"
+			);
+			jobQueue.registerWorker<
+				import("./services/preview-render-worker.js").PreviewRenderJobData
+			>("preview-render", (job) =>
+				handlePreviewRender(job, { gpuClient }),
+			);
 
 			if (r2) {
 				const { ExplorationEngine } = await import(
