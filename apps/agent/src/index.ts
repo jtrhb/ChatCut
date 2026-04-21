@@ -256,12 +256,10 @@ async function main() {
 		}
 
 		if (jobQueue) {
-			// Phase 3 Stage C.5: GPU service client replaces the deprecated
-			// HeadlessRenderer scaffold. The HeadlessRenderer module remains
-			// in src/services/ (Stage F deletes it). Today the worker wires
-			// to GpuServiceClient when GPU_SERVICE_BASE_URL + GPU_SERVICE_API_KEY
-			// are both set; otherwise the legacy stub-log path keeps the
-			// queue draining without errors.
+			// Phase 3: GpuServiceClient is the preview-render path. The
+			// worker wires when GPU_SERVICE_BASE_URL + GPU_SERVICE_API_KEY
+			// are both set; otherwise the stub-log path keeps the queue
+			// draining without errors.
 			let gpuClient:
 				| import("./services/gpu-service-client.js").GpuServiceClient
 				| null = null;

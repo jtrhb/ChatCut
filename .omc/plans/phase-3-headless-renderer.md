@@ -11,11 +11,11 @@ Date: 2026-04-21
 - Stage B — CLOSED + APPROVED. 7 commits (incl. 2nd pivot to MLT, see §0.b). 113 tests passing. Manual B.7 staging smoke (`modal serve` + ffprobe) is the user's.
 - Stage C — CLOSED + APPROVED. 11 commits. 1156 agent + 120 gpu = 1276 tests passing.
 - Stage D — CLOSED + APPROVED WITH NITS. 2 commits. 1170 agent tests passing (+14). Reviewer carried-over notes folded into Stage E:
-   - MEDIUM #1: extend web `ToolProgressSseEvent` to declare `explorationId/candidateId` (lands in E.6)
-   - MEDIUM #2: candidate_ready has no web handler (lands in E.6)
+   - MEDIUM #1: extend web `ToolProgressSseEvent` to declare `explorationId/candidateId` (closed in E.6)
+   - MEDIUM #2: candidate_ready has no web handler (closed in E.6)
    - LOW #3: `safeForLog` not applied to synthetic toolCallId (defense-in-depth, defer to user-supplied-ID future path)
-- Stage E — IN PROGRESS. DB writeback + signed-URL `candidate_ready` + route DB lookup + web SSE wiring + e2e test.
-- Stage F — pending.
+- Stage E — CLOSED + APPROVED. 6 commits (5 stage + 1 reviewer-fix). 1213 agent tests passing (+43). All 10 reviewer findings (1 HIGH + 4 MED + 3 LOW + 2 NIT) FIXED in bd0d7f7a; re-review verdict: APPROVE.
+- Stage F — IN PROGRESS. Cleanup, deprecation, decisions: HeadlessRenderer deletion + R2 lifecycle docs + Daytona supersession + Phase 3 closure.
 
 ---
 

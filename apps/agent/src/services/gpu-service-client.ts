@@ -2,8 +2,7 @@
  * GPU service client (Phase 3 Stage C.3).
  *
  * HTTP client wrapping the Modal-deployed `services/gpu` endpoints. The
- * agent's preview-render worker uses this in place of the deprecated
- * HeadlessRenderer scaffold.
+ * agent's preview-render worker uses this for all preview rendering.
  *
  * Wire shape (matches services/gpu/modal_app.py):
  *   POST /render_preview  body: { explorationId, candidateId, snapshotStorageKey }
