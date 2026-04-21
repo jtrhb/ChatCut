@@ -24,12 +24,18 @@ function CandidateCard({ candidate, onSelect }: CandidateCardProps) {
     >
       {candidate.previewUrl && (
         <div className="w-full overflow-hidden rounded-md aspect-video bg-muted">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
+          {/* Phase 3 Stage E.6: previewUrl is the rendered MP4 from the
+              GPU service (signed R2 GET, 24h TTL). Pre-Stage-E this was
+              an <img> placeholder; switching to <video> lets the user
+              actually play the candidate. */}
+          <video
             src={candidate.previewUrl}
-            alt={candidate.label}
+            controls
+            preload="metadata"
             className="h-full w-full object-cover"
-          />
+          >
+            <track kind="captions" />
+          </video>
         </div>
       )}
 

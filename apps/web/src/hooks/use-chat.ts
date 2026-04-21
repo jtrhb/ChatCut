@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+	type Dispatch,
+	type SetStateAction,
+	useCallback,
+	useEffect,
+	useRef,
+	useState,
+} from "react";
 import { useSession } from "@/lib/auth/client";
 
 const AGENT_URL = process.env.NEXT_PUBLIC_AGENT_URL ?? "http://localhost:4000";
@@ -49,6 +56,12 @@ export type AgentStatus =
  * service (mirrors the agent-side `tool-pipeline.ts:298-309` emit). Lives
  * in this hook because it's the single SSE consumer; if a second
  * consumer ever needs it we'll move it to a shared module.
+ *
+ * Phase 3 Stage E (closes Stage D MEDIUM #1): preview-render's emit also
+ * stamps `explorationId` + `candidateId` so the consumer can correlate
+ * progress to a specific candidate card without parsing the synthetic
+ * `preview-render:{exp}:{cand}` toolCallId. Both keys are optional so
+ * non-render tool.progress events stay compatible.
  */
 interface ToolProgressSseEvent {
 	type: "tool.progress";
@@ -59,6 +72,24 @@ interface ToolProgressSseEvent {
 		totalSteps?: number;
 		text?: string;
 		estimatedRemainingMs?: number;
+		explorationId?: string;
+		candidateId?: string;
+	};
+}
+
+/**
+ * Phase 3 Stage E.6: emitted by the preview-render worker on terminal
+ * `done`. The fast path carries a 24h presigned `previewUrl` minted in
+ * the worker (Stage E.5); when that mint failed the event omits it and
+ * the consumer falls back to GET /exploration/.../preview/... .
+ */
+interface CandidateReadySseEvent {
+	type: "exploration.candidate_ready";
+	data: {
+		explorationId: string;
+		candidateId: string;
+		storageKey: string;
+		previewUrl?: string;
 	};
 }
 
@@ -73,6 +104,32 @@ export interface UseChatReturn {
 	approveChangeset: (changesetId: string) => void;
 	rejectChangeset: (changesetId: string) => void;
 	selectCandidate: (explorationId: string, candidateId: string) => void;
+}
+
+/**
+ * Phase 3 Stage E.6 helper. Locates the message that owns the named
+ * exploration and patches the matching candidate's previewUrl. Updates
+ * are idempotent: a second event for the same candidate just overwrites
+ * the url (e.g. fallback fetch finishes after a fresh URL came through).
+ */
+function applyPreviewUrl(
+	setMessages: Dispatch<SetStateAction<Message[]>>,
+	explorationId: string,
+	candidateId: string,
+	previewUrl: string,
+): void {
+	setMessages((prev) =>
+		prev.map((m) => {
+			if (m.exploration?.explorationId !== explorationId) return m;
+			const nextCandidates = m.exploration.candidates.map((c) =>
+				c.candidateId === candidateId ? { ...c, previewUrl } : c,
+			);
+			return {
+				...m,
+				exploration: { ...m.exploration, candidates: nextCandidates },
+			};
+		}),
+	);
 }
 
 export function useChat(projectId: string): UseChatReturn {
@@ -148,6 +205,34 @@ export function useChat(projectId: string): UseChatReturn {
 					const text = evt.data?.text;
 					if (typeof text === "string" && text.length > 0) {
 						setProgressText(text);
+					}
+				} else if (type === "exploration.candidate_ready") {
+					// Phase 3 Stage E.6: preview-render done. Fast path uses
+					// the presigned URL minted in the worker (Stage E.5); if
+					// the mint failed the worker emits without `previewUrl`
+					// and we fall back to the /exploration route which mints
+					// on demand from the persisted storageKey (Stage E.3).
+					const evt = data as unknown as CandidateReadySseEvent;
+					const { explorationId, candidateId, previewUrl } = evt.data;
+					if (previewUrl) {
+						applyPreviewUrl(setMessages, explorationId, candidateId, previewUrl);
+					} else {
+						// Best-effort fallback. Errors are swallowed — the card
+						// stays in its current "rendering" state and the user
+						// can refresh to retry.
+						fetch(
+							`${AGENT_URL}/exploration/${encodeURIComponent(
+								explorationId,
+							)}/preview/${encodeURIComponent(candidateId)}`,
+						)
+							.then(async (res) => {
+								if (!res.ok) return;
+								const body = (await res.json()) as { url?: string };
+								if (body.url) {
+									applyPreviewUrl(setMessages, explorationId, candidateId, body.url);
+								}
+							})
+							.catch(() => {});
 					}
 				} else if (type === "changeset_update") {
 					const changesetId = data.changesetId as string;
