@@ -9,8 +9,9 @@ Date: 2026-04-21
 **Status:**
 - Stage A — CLOSED + APPROVED. 4 commits.
 - Stage B — CLOSED + APPROVED. 7 commits (incl. 2nd pivot to MLT, see §0.b). 113 tests passing. Manual B.7 staging smoke (`modal serve` + ffprobe) is the user's.
-- Stage C — IN PROGRESS. Agent-side dispatcher + snapshot-storage-key contract (see §6 C-Q1, C-Q2 resolved 2026-04-21).
-- Stages D–F — pending.
+- Stage C — CLOSED + APPROVED. 11 commits. 1156 agent + 120 gpu = 1276 tests passing.
+- Stage D — IN PROGRESS. Progress polling backoff + EventBus emission for `tool.progress` + `exploration.candidate_ready`.
+- Stages E–F — pending.
 
 ---
 
