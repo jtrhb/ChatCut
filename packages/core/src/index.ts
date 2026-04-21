@@ -196,3 +196,22 @@ export {
 	getBookmarkAtTime,
 	findBookmarkIndex,
 } from "./utils/bookmarks";
+
+// Phase 5b: ghost preview state machine — pure-TS module shared by the
+// agent (emits proposed-element diffs) and the web client (renders
+// ghosts and folds SSE decisions through the state machine). Lives in
+// core because the underlying `proposed → previewing → accepted →
+// committed` lifecycle is timeline-domain truth, not a web rendering
+// detail.
+export {
+	type GhostState,
+	type GhostRecord,
+	type TransitionResult,
+	type NewGhostInput,
+	transition,
+	isActive,
+	isTerminal,
+	createGhost,
+	propagateStale,
+	applyChangesetDecision,
+} from "./ghost/ghost-state";

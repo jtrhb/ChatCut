@@ -176,11 +176,16 @@ async function main() {
 		);
 	}
 
-	// Create ChangesetManager for propose/approve/reject workflow
+	// Create ChangesetManager for propose/approve/reject workflow.
+	// Phase 5b: inject the same EventBus the SSE route subscribes to so
+	// `changeset.proposed | .approved | .rejected` reach the web ghost
+	// preview state machine. Without this dep the manager's emits become
+	// no-ops and the ghost flow can't transition off `proposed`.
 	const changeLog = new ChangeLog();
 	const changesetManager = new ChangesetManager({
 		changeLog,
 		serverCore: serverEditorCore,
+		eventBus,
 	});
 
 	// ── Memory infrastructure (audit §B.MemoryStore/Loader/Extractor/PatternObserver) ──
@@ -230,20 +235,22 @@ async function main() {
 	// boot lands when all consumers (changesetManager, ExplorationEngine,
 	// Master tool exec) take projectId-scoped cores instead of the
 	// singleton — tracked as a follow-up to this phase.
-	let coreRegistry:
-		| import("./services/core-registry.js").CoreRegistry
-		| null = null;
-	let mutationDB:
-		| import("./services/commit-mutation.js").MutationDB
-		| null = null;
+	let coreRegistry: import("./services/core-registry.js").CoreRegistry | null =
+		null;
+	let mutationDB: import("./services/commit-mutation.js").MutationDB | null =
+		null;
 	if (process.env.DATABASE_URL) {
-		const [{ CoreRegistry }, { DrizzleSnapshotSource }, { DrizzleMutationDB }, { db }] =
-			await Promise.all([
-				import("./services/core-registry.js"),
-				import("./services/drizzle-snapshot-source.js"),
-				import("./services/drizzle-mutation-db.js"),
-				import("./db/index.js"),
-			]);
+		const [
+			{ CoreRegistry },
+			{ DrizzleSnapshotSource },
+			{ DrizzleMutationDB },
+			{ db },
+		] = await Promise.all([
+			import("./services/core-registry.js"),
+			import("./services/drizzle-snapshot-source.js"),
+			import("./services/drizzle-mutation-db.js"),
+			import("./db/index.js"),
+		]);
 		coreRegistry = new CoreRegistry({
 			source: new DrizzleSnapshotSource(db),
 		});
@@ -291,10 +298,7 @@ async function main() {
 			let gpuClient:
 				| import("./services/gpu-service-client.js").GpuServiceClient
 				| null = null;
-			if (
-				process.env.GPU_SERVICE_BASE_URL &&
-				process.env.GPU_SERVICE_API_KEY
-			) {
+			if (process.env.GPU_SERVICE_BASE_URL && process.env.GPU_SERVICE_API_KEY) {
 				const { GpuServiceClient } = await import(
 					"./services/gpu-service-client.js"
 				);
@@ -494,9 +498,7 @@ async function main() {
 			sessionId?: string;
 			userId?: string;
 		},
-		onProgress?: (
-			event: import("./tools/types.js").ToolProgressEvent,
-		) => void,
+		onProgress?: (event: import("./tools/types.js").ToolProgressEvent) => void,
 	) => {
 		if (editorToolExecutor.hasToolName(name)) {
 			return editorToolExecutor.execute(
@@ -641,7 +643,11 @@ async function main() {
 		afterTurn: (() => {
 			const observer = patternObserver;
 			if (!observer) return undefined;
-			return async (identity: { projectId: string; sessionId: string; userId?: string }) => {
+			return async (identity: {
+				projectId: string;
+				sessionId: string;
+				userId?: string;
+			}) => {
 				const mapping = contextManager.getBrandForProject(identity.projectId);
 				if (!mapping) return;
 				maybeTriggerAnalysis(observer, mapping.brand, mapping.series);
@@ -688,11 +694,9 @@ async function main() {
 		| import("./services/exploration-lookup.js").ExplorationLookup
 		| undefined;
 	if (process.env.DATABASE_URL) {
-		const [{ DrizzleExplorationLookup }, { db: drizzleDb }] =
-			await Promise.all([
-				import("./services/exploration-lookup.js"),
-				import("./db/index.js"),
-			]);
+		const [{ DrizzleExplorationLookup }, { db: drizzleDb }] = await Promise.all(
+			[import("./services/exploration-lookup.js"), import("./db/index.js")],
+		);
 		explorationLookup = new DrizzleExplorationLookup(drizzleDb);
 	}
 

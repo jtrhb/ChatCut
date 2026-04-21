@@ -65,9 +65,44 @@ export const ExploreOptionsSchema = z.object({
   candidates: z.array(CandidateSchema).min(3).max(4),
 });
 
+/**
+ * Phase 5b: per-element ghost diff carried on a propose call. Mirrors
+ * the `ProposedElement` runtime type in changeset/changeset-types.ts.
+ * `payload` is `unknown` at the agent layer — the web client owns the
+ * TimelineElement schema. Keeping this loose lets the agent forward
+ * arbitrary shapes (insert vs. update vs. delete carry very different
+ * payloads) without dragging the editor type system into the tool
+ * schema and re-encoding it for every element variant.
+ */
+export const ProposedElementSchema = z.object({
+  ghostId: z.string().min(1),
+  kind: z.enum(["insert", "update", "delete"]),
+  trackId: z.string().optional(),
+  targetId: z.string().optional(),
+  payload: z.unknown().optional(),
+  dependsOn: z.array(z.string()).optional(),
+});
+
 export const ProposeChangesSchema = z.object({
   summary: z.string(),
   affectedElements: z.array(z.string()),
+  /**
+   * Phase 5b: prospective timeline diff. Optional with `[]` default so
+   * a model trained before this field landed doesn't trip the schema
+   * mid-turn — but the prompt-side delegation contract should ask the
+   * model to populate it whenever it's destructive enough to require
+   * propose_changes. Propose without elements is a smoke signal that
+   * the model is hand-waving the spec.
+   */
+  proposedElements: z.array(ProposedElementSchema).optional().default([]),
+  /**
+   * Phase 5b (Q4=a): LLM self-reported confidence ∈ [0, 1]. The web
+   * client maps this to ghost border styling. Optional with default
+   * 0.5 so model omissions don't hard-fail propose; the manager re-
+   * clamps defensively in case the model emits a value just outside
+   * the bound.
+   */
+  confidence: z.number().min(0).max(1).optional().default(0.5),
 });
 
 export const ExportVideoSchema = z.object({

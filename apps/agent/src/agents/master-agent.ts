@@ -31,7 +31,11 @@ import type { TaskRegistry } from "../tasks/task-registry.js";
 import type { ServerEditorCore } from "../services/server-editor-core.js";
 import type { MemoryStore } from "../memory/memory-store.js";
 import type { MemoryLoader } from "../memory/memory-loader.js";
-import type { ParsedMemory, TaskContext, ConflictMarker } from "../memory/types.js";
+import type {
+	ParsedMemory,
+	TaskContext,
+	ConflictMarker,
+} from "../memory/types.js";
 import type { Annotations, AnnotatedFrame } from "../routes/chat.js";
 import type { ContextSynchronizer } from "../context/context-sync.js";
 import { DeferredRegistry } from "../tools/deferred-registry.js";
@@ -808,10 +812,16 @@ export class MasterAgent {
 
 			case "propose_changes": {
 				if (this.changesetManager) {
+					// Phase 5b: Zod schema (master-tools.ts ProposeChangesSchema) now
+					// applies defaults for `proposedElements` (default `[]`) and
+					// `confidence` (default 0.5) before this case runs. The cast is
+					// for shape only — runtime defaults are already populated.
 					const params = input as {
 						summary: string;
 						affectedElements: string[];
 						projectId?: string;
+						proposedElements?: import("../changeset/changeset-types.js").ProposedElement[];
+						confidence?: number;
 					};
 					// Thread the current turn's userId so ChangesetManager can stamp
 					// the owner on the pending changeset (B5 IDOR closure). Falls back
@@ -824,6 +834,13 @@ export class MasterAgent {
 					// reinforceRelatedMemories and skill usage-count updates per
 					// spec §9.4. A defensive slice ensures the pending changeset
 					// holds its own copies — later-turn resets won't mutate it.
+					//
+					// Phase 5b: forward the proposing-turn's sessionId so
+					// ChangesetManager can echo `changeset.proposed | .approved |
+					// .rejected` SSE events with that sessionId. Without it the
+					// per-session SSE filter at routes/events.ts drops the events
+					// (their `event.sessionId` strict-equality check against the
+					// subscriber's id is `false` for `undefined`).
 					return this.changesetManager.propose({
 						...params,
 						userId: this.currentIdentity?.userId ?? "unscoped",
@@ -831,6 +848,7 @@ export class MasterAgent {
 							params.projectId ?? this.currentIdentity?.projectId ?? "default",
 						injectedMemoryIds: [...this.currentInjectedMemoryIds],
 						injectedSkillIds: [...this.currentInjectedSkillIds],
+						sessionId: this.currentIdentity?.sessionId,
 					});
 				}
 				return {
