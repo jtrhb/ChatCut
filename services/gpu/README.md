@@ -39,7 +39,7 @@ modal deploy modal_app.py
 ## Tests
 
 ```bash
-uv run pytest        # 29 unit tests across auth, jobs, r2, handlers
+uv run pytest        # unit tests across auth, jobs, r2, handlers
 uv run ruff check .  # lint
 ```
 

@@ -8,10 +8,43 @@ exceptions to HTTPException responses.
 from __future__ import annotations
 
 from collections.abc import MutableMapping
-from typing import Any
+from typing import Any, Protocol
 
 from src.auth import verify_api_key
-from src.jobs import JobState, initial_state, new_job_id
+from src.jobs import (
+    JobState,
+    initial_state,
+    mark_done,
+    mark_failed,
+    new_job_id,
+    update_progress,
+)
+from src.r2 import preview_storage_key
+
+# Stage A placeholder — an MP4-shaped 'ftyp' box prefix + zero-padding so
+# the upload path is exercised end-to-end. NOT a playable MP4. Stage B's
+# real renderer replaces these bytes via the body_bytes parameter on
+# do_render_body.
+PLACEHOLDER_MP4_BYTES = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00" + b"\x00" * 1000
+
+
+class _UploaderLike(Protocol):
+    def upload_preview(
+        self,
+        *,
+        exploration_id: str,
+        candidate_id: str,
+        body: bytes,
+        content_type: str = ...,
+    ) -> str: ...
+
+
+class StubNotImplementedError(Exception):
+    """Raised by handle_stub. modal_app translates to HTTP 501."""
+
+    def __init__(self, phase: str):
+        super().__init__(f"not implemented; planned for phase {phase}")
+        self.phase = phase
 
 
 def handle_render_preview(
@@ -22,13 +55,16 @@ def handle_render_preview(
 ) -> dict[str, str]:
     """Validate + create initial job state. Returns {jobId}.
 
-    The Modal endpoint spawns the actual render after this returns.
-    Raises AuthError on bad key, ValueError on bad payload.
+    Validates id segments at the handler boundary (not deferred to R2
+    upload) so a malicious caller can't allocate Dict slots / spawn
+    budget on bad input. preview_storage_key raises ValueError on
+    path-traversal; modal_app translates to HTTP 400.
     """
     verify_api_key(api_key, expected_keys)
     _require(payload, "explorationId")
     _require(payload, "candidateId")
     _require(payload, "timeline")
+    preview_storage_key(payload["explorationId"], payload["candidateId"])
     job_id = new_job_id()
     job_dict[job_id] = initial_state(job_id).model_dump()
     return {"jobId": job_id}
@@ -51,10 +87,69 @@ def handle_stub(
     api_key: str | None,
     expected_keys: list[str | None],
     phase: str,
-) -> dict[str, str]:
-    """Generic 501-shape body for stub endpoints."""
+) -> None:
+    """Validates auth, then raises StubNotImplementedError → HTTP 501.
+
+    The stub endpoints accept a payload (so Phase 5 implementations can
+    read it without changing the wire shape), but Stage A returns 501
+    regardless of payload contents.
+    """
     verify_api_key(api_key, expected_keys)
-    return {"error": "not implemented", "phase": phase}
+    raise StubNotImplementedError(phase)
+
+
+def do_render_body(
+    *,
+    uploader: _UploaderLike,
+    job_dict: MutableMapping[str, dict],
+    job_id: str,
+    exploration_id: str,
+    candidate_id: str,
+    timeline: dict[str, Any],
+    body_bytes: bytes = PLACEHOLDER_MP4_BYTES,
+) -> None:
+    """Stage A render body. Lives here (not in modal_app) for testability.
+
+    On success: writes done state with the R2 storage key.
+    On render failure: best-effort writes failed state. If the failed-
+    state Dict.put ALSO fails, the original render error is re-raised so
+    Modal logs it visibly. The agent's poll cap (Stage D.3, 90s) is the
+    final recovery — by design, not silently swallowed.
+
+    If the Dict entry for job_id is missing entirely (TTL eviction, race),
+    the function returns without writing — the agent will treat the
+    missing entry as failure and retry via pg-boss.
+
+    Stage B replaces body_bytes with the real renderer output and inserts
+    its own progress milestones.
+    """
+    try:
+        s = JobState.model_validate(job_dict[job_id])
+        # "Started" signal only. Stage B owns the real progress vocabulary;
+        # emitting a fake 50% here would train the agent on a misleading
+        # cadence that Stage B silently changes.
+        s = update_progress(s, 1)
+        try:
+            job_dict[job_id] = s.model_dump()
+        except Exception:
+            # Intermediate progress is non-critical; render still proceeds.
+            pass
+
+        key = uploader.upload_preview(
+            exploration_id=exploration_id,
+            candidate_id=candidate_id,
+            body=body_bytes,
+        )
+        job_dict[job_id] = mark_done(s, key).model_dump()
+    except Exception as render_err:
+        try:
+            s = JobState.model_validate(job_dict[job_id])
+        except Exception:
+            return
+        try:
+            job_dict[job_id] = mark_failed(s, str(render_err)).model_dump()
+        except Exception:
+            raise render_err from None
 
 
 def _require(payload: dict, field: str) -> None:

@@ -10,7 +10,8 @@ Local:     modal serve modal_app.py
 
 Stage A status: render_preview produces a synthetic 1KB MP4 placeholder
 (stage acceptance is wire shape, not playable bytes). Stage B replaces
-_do_render with the real render pipeline per Q1 (chromium-in-modal).
+the body_bytes argument to do_render_body with the real render pipeline
+per Q1 (chromium-in-modal).
 """
 
 from __future__ import annotations
@@ -22,8 +23,12 @@ import modal
 from fastapi import HTTPException, Request
 
 from src.auth import AuthError
-from src.handlers import handle_render_preview, handle_status, handle_stub
-from src.jobs import JobState, mark_done, mark_failed, update_progress
+from src.handlers import (
+    StubNotImplementedError,
+    handle_render_preview,
+    handle_status,
+    handle_stub,
+)
 
 APP_NAME = "chatcut-gpu"
 
@@ -41,8 +46,10 @@ image = (
 )
 
 # Job state shared across endpoints + the spawned _do_render worker.
-# TTL handled implicitly by Modal Dict (keys live until evicted under memory pressure
-# or explicitly deleted). The agent's pg-boss row remains the canonical record.
+# Modal Dict has no native per-key TTL; entries persist until overwritten
+# (the next render with the same job_id) or until Dict.clear() is called.
+# The agent's pg-boss row is canonical; Stage D.3's 90s poll cap is the
+# recovery mechanism for stuck/missing entries (plan §5/R4).
 job_dict = modal.Dict.from_name(f"{APP_NAME}-jobs", create_if_missing=True)
 
 api_secret = modal.Secret.from_name(
@@ -71,6 +78,11 @@ def _api_keys() -> list[str | None]:
 def _to_http(exc: Exception) -> HTTPException:
     if isinstance(exc, AuthError):
         return HTTPException(status_code=401, detail=str(exc))
+    if isinstance(exc, StubNotImplementedError):
+        return HTTPException(
+            status_code=501,
+            detail={"error": "not implemented", "phase": exc.phase},
+        )
     if isinstance(exc, LookupError):
         return HTTPException(status_code=404, detail=str(exc))
     if isinstance(exc, ValueError):
@@ -79,7 +91,7 @@ def _to_http(exc: Exception) -> HTTPException:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# render_preview — real shape, Stage A placeholder body
+# render_preview — real wire shape, Stage A placeholder body
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -108,32 +120,18 @@ def _do_render(
     candidate_id: str,
     timeline: dict[str, Any],
 ) -> None:
-    """Background render. Stage A: synthetic placeholder bytes. Stage B
-    replaces this with the real renderer per Q1 (chromium-in-modal)."""
+    """Background render. Body in handlers.do_render_body for testability."""
+    from src.handlers import do_render_body
     from src.r2 import R2Config, R2Uploader
 
-    try:
-        s = JobState.model_validate(job_dict[job_id])
-        s = update_progress(s, 50)
-        job_dict[job_id] = s.model_dump()
-
-        # Stage A placeholder — just enough bytes to exercise the upload path.
-        # NOT a playable MP4; Stage B's render_timeline(timeline) replaces this.
-        synthetic = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00" + b"\x00" * 1000
-
-        uploader = R2Uploader(R2Config.from_env())
-        key = uploader.upload_preview(
-            exploration_id=exploration_id,
-            candidate_id=candidate_id,
-            body=synthetic,
-        )
-        job_dict[job_id] = mark_done(s, key).model_dump()
-    except Exception as e:
-        try:
-            s = JobState.model_validate(job_dict[job_id])
-        except Exception:
-            return
-        job_dict[job_id] = mark_failed(s, str(e)).model_dump()
+    do_render_body(
+        uploader=R2Uploader(R2Config.from_env()),
+        job_dict=job_dict,
+        job_id=job_id,
+        exploration_id=exploration_id,
+        candidate_id=candidate_id,
+        timeline=timeline,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -153,16 +151,17 @@ def status(job_id: str, request: Request) -> dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Stubs — Phase 5 fills these in. Each declares its eventual GPU tier
-# but kept as 501 stubs for now so deploy shape is final.
+# Stubs — Phase 5 fills these in. handle_stub raises
+# StubNotImplementedError → HTTP 501 (per plan §A.4).
 # ─────────────────────────────────────────────────────────────────────
 
 
 def _stub(request: Request) -> dict[str, str]:
     try:
-        return handle_stub(request.headers.get("x-api-key"), _api_keys(), phase="5")
+        handle_stub(request.headers.get("x-api-key"), _api_keys(), phase="5")
     except Exception as e:
         raise _to_http(e) from e
+    return {}  # unreachable: handle_stub always raises
 
 
 @app.function(image=image, secrets=[api_secret])
