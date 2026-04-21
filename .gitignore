@@ -40,3 +40,13 @@ apps/agent/dist/
 # Temp workspaces
 codex-review-workspace/
 state/
+
+# Python (services/gpu)
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Modal local artifacts
+.modal_volumes/

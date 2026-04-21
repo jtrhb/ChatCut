@@ -1,0 +1,269 @@
+# Plan: Phase 3 Full Implementation — Modal-Native GPU Service + Preview Pipeline
+
+Supersedes the prior Playwright/HeadlessRenderer-in-agent plan (see git history of this file before 2026-04-21). Architecture pivoted to a dedicated Python service on Modal per 2026-04-21 brainstorm.
+
+Source: `.omc/plans/wiring-audit-remediation.md` Phase 3 acceptance criteria. The audit's "browser pool inside agent" wording is treated as one valid implementation; this plan picks a different one.
+
+Date: 2026-04-21
+
+---
+
+## 0. Why this changed (vs prior plan)
+
+The prior plan (commit 33587efc landed the scaffold) wired a chromium pool inside `apps/agent` driving a Vite-bundled renderer host. That works but:
+
+- bloats every agent container with ~500MB chromium
+- forces every render to share agent CPU/RAM
+- only solves preview render — vision, generation, and transcription still need separate GPU plumbing
+- locks us out of horizontal GPU scale-out beyond a single agent process
+
+Modal credit availability (4× B200 + L4/A100 tiers) plus the fact that ChatCut needs GPU across multiple workloads (preview render, video generation, vision analysis, transcription) makes a dedicated Python GPU service the right primitive. Preview render becomes one workload of four; the others stub now and fill in during Phase 5+.
+
+The `HeadlessRenderer` scaffold (`apps/agent/src/services/headless-renderer.ts`) is **deprecated by this plan**. Stage F removes it cleanly.
+
+---
+
+## 1. Goal (audit acceptance criteria, unchanged)
+
+- User selects fan-out → 4–16 candidates render in <30s wall time
+- Each candidate card has a playable 5–10s MP4
+- R2 cleanup removes `previews/{explorationId}/` after 24h
+- §3.6 Daytona decision: **superseded by Modal** — documented in Stage F
+
+---
+
+## 2. Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  apps/agent (Bun/Hono)                                                   │
+│                                                                          │
+│   pg-boss preview-render worker                                          │
+│   ├─ gpu-service-client.enqueueRender({timeline, ids}) → {jobId}        │
+│   ├─ poll gpu-service-client.getJobStatus(jobId) every ~1.5s            │
+│   │    └─ forward progress → eventBus.emit(tool.progress) → SSE         │
+│   ├─ on done: write storageKey → exploration_sessions DB                │
+│   │           emit(candidate_ready)                                     │
+│   └─ on failed: write preview_render_failures + emit tool.error         │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │ HTTPS, X-API-Key header
+                             ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  services/gpu/  (NEW Python project, deployed via `modal deploy`)        │
+│                                                                          │
+│   modal_app.py — App + image (debian-slim + ffmpeg + py deps)           │
+│                                                                          │
+│   @app.function(gpu="T4", min_containers=1, secrets=[GPU_API_KEY])      │
+│   @web_endpoint(method="POST", label="render_preview")                  │
+│   def render_preview(req) → {jobId}    [returns immediately, spawns]    │
+│                                                                          │
+│   @app.function(gpu="L4", min_containers=0)                             │
+│   @web_endpoint(method="POST", label="generate_video")                  │
+│   def generate_video(req) → {jobId}    [STUB — Phase 5]                 │
+│                                                                          │
+│   @app.function(gpu="L4", min_containers=0)                             │
+│   @web_endpoint(method="POST", label="analyze_video")                   │
+│   def analyze_video(req) → {jobId}     [STUB — Phase 5]                 │
+│                                                                          │
+│   @app.function(gpu="L4", min_containers=0)                             │
+│   @web_endpoint(method="POST", label="transcribe")                      │
+│   def transcribe(req) → {jobId}        [STUB — Phase 5]                 │
+│                                                                          │
+│   @web_endpoint(method="GET", label="status")                           │
+│   def status(job_id) → {state, progress?, result?, error?}              │
+│                                                                          │
+│   Job state: Modal Dict (key=job_id, TTL=1h)                            │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │ Modal-side: subprocess + R2 boto3 client
+                             ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Cloudflare R2 — `previews/{explorationId}/{candidateId}.mp4`            │
+│  24h lifecycle policy on `previews/` prefix                              │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+Note: the agent never holds the canonical job state. Modal Dict holds it short-term so the agent can poll; the pg-boss row in our DB is canonical. If Modal Dict TTLs the entry while pg-boss still has work, the worker treats it as a failure and retries via pg-boss.
+
+---
+
+## 3. Stages
+
+Each stage independently shippable + reviewable. Same per-phase rhythm as Phase 2/4 (test → impl → smoke → commit → reviewer pass → fixes → commit).
+
+### Stage A — `services/gpu/` skeleton + Modal app shell (1d)
+
+**Goal**: a deployed Modal app exposing 4 web endpoints (3 stubs + 1 real-shaped render_preview that returns synthetic bytes), `X-API-Key` auth, status endpoint, Modal Dict job state, README, and Bun-side aliases.
+
+| # | Task | Location |
+|---|---|---|
+| A.1 | `services/gpu/` directory: `pyproject.toml`, `uv.lock`, `.python-version` (3.12), `ruff.toml`, `pytest.ini` | new |
+| A.2 | `services/gpu/modal_app.py` — App, image (`debian-slim` + `ffmpeg` + `boto3` + `pydantic`), shared `JobState` model, Modal Dict named `gpu_jobs` | new |
+| A.3 | Stub `render_preview` web_endpoint — accepts payload, generates job_id, writes `{state: "queued"}` to Dict, kicks off background `.spawn()` that synthesizes 1KB of placeholder bytes and uploads to R2. Returns `{jobId}`. | A.2 |
+| A.4 | Stub `generate_video`, `analyze_video`, `transcribe` web_endpoints — each returns HTTP 501 with `{error: "not implemented", phase: "5"}` | A.2 |
+| A.5 | `status` GET endpoint — reads job_id from Dict, returns shape `{state, progress?, result?, error?}` | A.2 |
+| A.6 | Auth: `Modal.Secret("gpu-api-key")` with `GPU_SERVICE_API_KEY` value; middleware verifies `X-API-Key` header on all endpoints, returns 401 on mismatch | A.2 |
+| A.7 | R2 client: `services/gpu/src/r2.py` wrapping boto3 (R2 endpoint URL, access key, secret) — Modal Secret pulls from env | new |
+| A.8 | Pytest: unit tests for auth, status shape, R2 client mocking. Run via `uv run pytest`. | new |
+| A.9 | `services/gpu/README.md` — `modal deploy`, `modal serve`, env var list, deploy URL pattern | new |
+| A.10 | Root `package.json`: `gpu:serve`, `gpu:deploy`, `gpu:test`, `gpu:lint` script aliases shelling into `services/gpu/` (uv-based) | edit |
+| A.11 | `.gitignore`: ignore `services/gpu/.venv`, `__pycache__`, `.modal_volumes` | edit |
+| A.12 | CI: skip `services/gpu/` tests when `MODAL_TOKEN_ID` not present (gated). Note in README. | CI config |
+
+**Acceptance**: `bun run gpu:serve` (Modal dev mode) yields a live URL. `curl -H "X-API-Key: $GPU_SERVICE_API_KEY" -X POST $URL/render_preview -d '{"explorationId":"x","candidateId":"y","timeline":{}}'` returns `{jobId: "..."}`. Polling `/status/...` cycles `queued → running → done` and the result includes a real (placeholder) R2 storage_key.
+
+### Stage B — `render_preview` real implementation (1.5d)
+
+**Goal**: render_preview produces a playable MP4 from a real timeline snapshot. Implementation chosen per Q1 (see §6).
+
+| # | Task | Location |
+|---|---|---|
+| B.1 | `services/gpu/src/render.py` — `render_timeline(timeline_json) → bytes` per the Q1 decision (chromium-in-modal vs ffmpeg-from-json) | new |
+| B.2 | Wire B.1 into `render_preview` function in `modal_app.py` — replace synthetic bytes with real call | edit |
+| B.3 | Progress reporting: render emits 10/30/60/90 milestones via Dict updates so /status returns `progress: number` | edit |
+| B.4 | GPU encoding: ffmpeg subprocess uses `h264_nvenc` when `gpu` available, falls back to `libx264` (for `modal serve` local dev without GPU) | edit |
+| B.5 | Pytest with a sample timeline fixture: assert produced bytes parse as MP4 (mediainfo or ffprobe) | new test |
+| B.6 | Smoke: deploy to Modal staging, render the fixture, download from R2, play in QuickTime/VLC | manual |
+
+**Acceptance**: real timeline JSON → 5–10s playable MP4 in R2. Render finishes in <8s on Modal T4 for a 5s clip.
+
+### Stage C — Agent-side dispatcher (0.75d)
+
+**Goal**: agent calls Modal instead of HeadlessRenderer. Worker compiles, mock-tested.
+
+| # | Task | Location |
+|---|---|---|
+| C.1 | `apps/agent/src/services/gpu-service-client.ts` — `enqueueRender(args)`, `getJobStatus(jobId)`, typed response shapes. Uses `fetch`, `X-API-Key` from env. Throws typed errors on 4xx/5xx. | new |
+| C.2 | `apps/agent/src/services/__tests__/gpu-service-client.test.ts` — mock fetch, verify wire shape, auth header, error mapping | new test |
+| C.3 | `apps/agent/src/index.ts` preview-render worker: replace HeadlessRenderer.exportVideo branch with gpu-service-client.enqueueRender. Worker now expects to poll. | edit |
+| C.4 | Env vars added to `apps/agent/src/env.ts` (or wherever): `GPU_SERVICE_BASE_URL`, `GPU_SERVICE_API_KEY`. Boot warning if missing. | edit |
+| C.5 | Worker test: mock client returns synthetic jobId + status sequence, assert worker handles full lifecycle | new test |
+
+**Acceptance**: agent unit tests green. Worker boot logs `[boot] gpu-service-client wired (URL=...)`.
+
+### Stage D — Progress polling + SSE forwarding (0.5d)
+
+**Goal**: per-candidate progress reaches the web UI through the existing tool.progress pipeline (Phase 4).
+
+| # | Task | Location |
+|---|---|---|
+| D.1 | Worker polls `getJobStatus(jobId)` every 1.5s with backoff cap 5s after 30s no-change | edit `index.ts` |
+| D.2 | Map `{state, progress}` → `safeProgress({toolName: "render_preview", pct, message})` per existing helper | edit |
+| D.3 | Timeout: hard cap 90s per render. On timeout → mark failed, emit tool.error, do not block worker | edit |
+| D.4 | Test: poll loop with mock client that emits `running 0,25,50,75 → done`, assert SSE event sequence shape + final candidate_ready | new test |
+
+**Acceptance**: integration test asserts at least 4 progress events between enqueue and done, plus 1 candidate_ready.
+
+### Stage E — Fan-out e2e + DB + web wiring (0.75d)
+
+**Goal**: fan-out of 4 candidates produces 4 storage keys in DB and 4 SSE events to web. Same as old Stage C, retargeted at Modal client.
+
+| # | Task | Location |
+|---|---|---|
+| E.1 | Worker writes `exploration_sessions.preview_storage_keys[candidateId] = storageKey` on done | edit |
+| E.2 | Worker writes `exploration_sessions.preview_render_failures[candidateId] = {message, ts}` on failed | edit (schema migration) |
+| E.3 | `routes/exploration.ts`: replace hardcoded storageKey with DB lookup. Distinguish 404 (no row), 503 (R2 down), 422 (failed render). | edit |
+| E.4 | Mount `createExplorationRouter` in `server.ts` infrastructure block | edit |
+| E.5 | EventBus: emit `candidate_ready` carrying `{explorationId, candidateId, previewUrl}` (signed URL minted in worker before emit) | edit |
+| E.6 | Web: `apps/web/src/hooks/use-chat.ts` SSE switch handles `candidate_ready`, sets the card's video src directly (Q6a from old plan, retained) | edit |
+| E.7 | Integration test: simulated ExplorationEngine produces 4 candidates, mock GPU service end-to-end, assert all 4 storage keys in DB + 4 SSE candidate_ready + 4 progress streams | new test |
+
+**Acceptance**: with Modal staging deployment + real DB, manual fan-out produces 4 candidate_ready events within 30s. Each card plays a working MP4.
+
+### Stage F — Cleanup, deprecation, decisions (0.5d)
+
+| # | Task | Location |
+|---|---|---|
+| F.1 | Delete `apps/agent/src/services/headless-renderer.ts` and its tests | rm |
+| F.2 | Delete HeadlessRenderer boot wiring in `index.ts` (no fallback — see Q5) | edit |
+| F.3 | Remove RENDERER_BASE_URL env var references | edit |
+| F.4 | R2 lifecycle: doc the bucket-side 24h policy on `previews/` prefix in `services/gpu/README.md` + ops runbook | docs |
+| F.5 | §3.6 Daytona decision document — superseded by Modal; rationale in `.omc/plans/wiring-audit-remediation.md` | edit |
+| F.6 | Mark Phase 3 closed in `.omc/plans/wiring-audit-remediation.md` with "shipped via Modal-native architecture" | edit |
+| F.7 | Update top-level README to mention `services/gpu/` and how to set up Modal locally | edit |
+
+**Acceptance**: `grep -ri HeadlessRenderer apps/agent/` returns nothing. Phase 3 audit row reads "closed". Onboarding doc covers Modal setup.
+
+---
+
+## 4. Estimate
+
+- Stage A: 1d
+- Stage B: 1.5d (Q1 dependent — could be 2d if Q1b)
+- Stage C: 0.75d
+- Stage D: 0.5d
+- Stage E: 0.75d
+- Stage F: 0.5d
+
+**Total: ~5d** (was 3.5d for the in-agent plan; the +1.5d buys cross-phase GPU plumbing for vision/generation/transcription)
+
+---
+
+## 5. Risks
+
+- **R1: Modal cold-start.** First render after idle hits container cold-start (~10–30s for chromium image). Mitigation: `min_containers=1` for `render_preview` (~$5/mo per kept-warm container); $0 for stubbed workloads.
+- **R2: SceneExporter parity (Q1a path).** mediabunny + SceneExporter currently lives in apps/web. Pulling it into a chromium-in-Modal container means bundling apps/web's renderer code as a static asset. Risk: Next.js-coupled imports. Mitigation: spike B.1 first; if Next coupling blocks, escalate to Q1b.
+- **R3: ffmpeg filtergraph parity (Q1b path).** Re-implementing SceneExporter's compositing/transitions/effects in pure ffmpeg is weeks of work + parity testing per project type. Mitigation: surface as Q1, lean Q1c (ship Q1a, defer Q1b).
+- **R4: Modal Dict TTL race.** If Dict TTLs the job_state while the agent is mid-poll, the worker sees a missing entry and must distinguish "job done long ago" from "job lost". Mitigation: TTL=1h (longer than any render), and worker treats missing-entry as "consult R2 for the storage_key directly before giving up".
+- **R5: Auth secret rotation.** Shared API key in env. Rotation requires coordinated deploys. Mitigation: support two valid keys at once during rotation window (Modal-side accepts either); document the rotation procedure.
+- **R6: R2 egress.** Modal pulls source assets from R2 (multi-MB clips) and pushes MP4 back. Cost: ~$0.01/GB egress between Modal (AWS) and Cloudflare (R2 has no egress fee). For 16 candidates × 50MB each ≈ $0.008 per fan-out. Acceptable.
+
+---
+
+## 6. Decision points (need your answers before Stage A)
+
+Same defaults-with-explicit-confirmation pattern as the prior plan. Lean noted; call out anything to override.
+
+### Q1. `render_preview` rendering approach inside Modal
+
+- **Q1a**: Chromium + Playwright + the existing `apps/web/src/services/renderer/` SceneExporter pipeline, packaged as a static bundle inside the Modal container. Reuses 100% of existing renderer code; container is heavier (~500MB chromium).
+- Q1b: Pure ffmpeg subprocess with filtergraph derived from timeline JSON. Lighter container, faster runtime, but requires re-implementing SceneExporter's compositing in ffmpeg filter language — weeks of work + parity testing.
+- **Q1c (Lean)**: Ship Q1a now to unblock the audit. Document Q1b as a future optimization on the backlog with explicit cost-trigger ("when monthly Modal spend > $X, revisit").
+
+### Q2. GPU tier for `render_preview`
+
+- **Q2a (Lean)**: T4 — cheapest GPU, plenty for h264_nvenc 1080p encode. ~$0.59/hr on Modal. B200 is overkill for video encoding (saved for future generation workload).
+- Q2b: L4 — mid-tier, faster cold-start (~$1.10/hr), better if we ever bump to 4K previews.
+- Q2c: CPU-only — works with libx264; renders ~3× slower; no GPU billing. Use if Modal credit runs out.
+
+### Q3. Job state storage on Modal side
+
+- **Q3a (Lean)**: Modal Dict — built-in, free, TTL configurable. Agent's pg-boss row remains canonical.
+- Q3b: Direct write to our Postgres from Modal (cross-service write, requires DB credential in Modal).
+- Q3c: Redis sidecar in Modal. Adds infra; no clear win over Dict.
+
+### Q4. Agent ↔ Modal job lifecycle
+
+- **Q4a (Lean)**: pg-boss worker enqueues Modal job, then polls until done within the same job handler. Simpler; pg-boss handles retries on worker crash. Worker holds a connection for ≤90s per render.
+- Q4b: pg-boss worker fires-and-forgets to Modal. Modal webhooks back when done; agent reconciles in a second handler. More moving parts; better for renders >5min.
+
+### Q5. HeadlessRenderer scaffold disposition
+
+- **Q5a (Lean)**: Delete in Stage F. Clean break, no dual paths.
+- Q5b: Keep behind a feature flag as a fallback. Defensive but invites stagnation; the unused path will rot.
+
+### Q6. Stage gating
+
+- **Q6a (Lean)**: Per-stage commits with reviewer pass after each, matching Phase 2 + Phase 4 rhythm.
+- Q6b: Single bundled push at the end (5d batch).
+
+### Q7. CI gating for `services/gpu/`
+
+- **Q7a (Lean)**: Skip `services/gpu/` tests in CI when `MODAL_TOKEN_ID` is unset. Local dev runs them via `uv run pytest`. Set up a separate Modal CI token only when we have a billing model for CI minutes.
+- Q7b: Always run; require CI to have a Modal token. Shifts cost calculus to "every PR pays for Modal CI minutes".
+
+---
+
+## 7. After your answers
+
+Once Q1–Q7 land, I start Stage A. If any answer changes the architecture diagram, I re-circulate this doc before any code lands.
+
+If a question turns out to require an answer I don't have during execution (e.g. Modal-specific quirk we didn't anticipate), I stop and ask rather than improvise.
+
+---
+
+## 8. Out of scope for Phase 3
+
+- Implementing `generate_video`, `analyze_video`, `transcribe` (stubs only). Those are Phase 5.
+- Authoring the bucket-side R2 lifecycle policy via IaC (this plan documents the manual step; IaC is Phase 5+).
+- Multi-region Modal deployments. Single region (closest to R2) for now.
+- GPU autoscaling tuning — `min_containers=1` on render, `min_containers=0` on stubs is the starting baseline.
