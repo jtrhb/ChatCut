@@ -19,6 +19,9 @@ import type { DispatchInput, DispatchOutput } from "./agents/types.js";
 import { ServerEditorCore } from "./services/server-editor-core.js";
 import { EditorToolExecutor } from "./tools/editor-tools.js";
 import { AssetToolExecutor } from "./tools/asset-tool-executor.js";
+import { VisionToolExecutor } from "./tools/vision-tool-executor.js";
+import { VisionClient } from "./services/vision-client.js";
+import { VisionCache } from "./services/vision-cache.js";
 import { EmbeddingClient } from "./services/embedding-client.js";
 import { CharacterStore } from "./assets/character-store.js";
 import { ChangesetManager } from "./changeset/changeset-manager.js";
@@ -145,6 +148,27 @@ async function main() {
 		console.warn(
 			"[boot] AssetToolExecutor disabled: DATABASE_URL and R2_BUCKET must both be set " +
 				"alongside EMBEDDING_API_URL for asset tools to load.",
+		);
+	}
+
+	// Phase 5a: VisionToolExecutor wires the three vision tools to a real
+	// Gemini Files API + analyze pipeline backed by the DB-side VisionCache.
+	// Gated on GEMINI_API_KEY (the actual call) + DATABASE_URL (the cache);
+	// without the cache, every tool call would hit Gemini fresh — defeats
+	// the SCHEMA_VERSION-keyed dedup that the cache exists for.
+	let visionToolExecutor: VisionToolExecutor | null = null;
+	if (process.env.GEMINI_API_KEY && process.env.DATABASE_URL) {
+		const { db } = await import("./db/index.js");
+		visionToolExecutor = new VisionToolExecutor({
+			visionClient: new VisionClient(process.env.GEMINI_API_KEY),
+			visionCache: new VisionCache(db),
+		});
+		console.log(
+			"[boot] vision-tool-executor wired (Gemini Files API + DB-cached)",
+		);
+	} else {
+		console.warn(
+			"[boot] VisionToolExecutor disabled: GEMINI_API_KEY + DATABASE_URL must both be set for analyze_video to reach Gemini.",
 		);
 	}
 
@@ -432,6 +456,14 @@ async function main() {
 		if (creatorToolExecutor?.hasToolName(name)) {
 			return creatorToolExecutor.execute(name, input, {
 				agentType: (context?.agentType as any) ?? "creator",
+				taskId: context?.taskId ?? "default",
+				sessionId: context?.sessionId,
+				userId: context?.userId,
+			});
+		}
+		if (visionToolExecutor?.hasToolName(name)) {
+			return visionToolExecutor.execute(name, input, {
+				agentType: (context?.agentType as any) ?? "vision",
 				taskId: context?.taskId ?? "default",
 				sessionId: context?.sessionId,
 				userId: context?.userId,
