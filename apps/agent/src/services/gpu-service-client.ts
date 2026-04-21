@@ -1,0 +1,131 @@
+/**
+ * GPU service client (Phase 3 Stage C.3).
+ *
+ * HTTP client wrapping the Modal-deployed `services/gpu` endpoints. The
+ * agent's preview-render worker uses this in place of the deprecated
+ * HeadlessRenderer scaffold.
+ *
+ * Wire shape (matches services/gpu/modal_app.py):
+ *   POST /render_preview  body: { explorationId, candidateId, snapshotStorageKey }
+ *                         200:  { jobId }
+ *   GET  /status?job_id=  200:  { job_id, state, progress, result?, error? }
+ *
+ * Auth: every request carries an `X-API-Key` header. Errors come back
+ * wrapped in FastAPI's `{"detail": ...}` envelope; we unwrap that on
+ * the way out so callers see clean GpuServiceError instances.
+ */
+
+export interface EnqueueRenderArgs {
+  explorationId: string;
+  candidateId: string;
+  snapshotStorageKey: string;
+}
+
+export interface EnqueueRenderResult {
+  jobId: string;
+}
+
+export type JobState = "queued" | "running" | "done" | "failed";
+
+export interface JobStatusResult {
+  job_id: string;
+  state: JobState;
+  progress: number;
+  result?: { storage_key: string };
+  error?: string;
+}
+
+/**
+ * Thrown for any non-2xx response. Carries the HTTP status, a unwrapped
+ * message, the raw FastAPI `detail` value, and (for stub 501s) the
+ * `phase` field that names the future stage that will implement the
+ * endpoint.
+ */
+export class GpuServiceError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+    public readonly detail?: unknown,
+    public readonly phase?: string,
+  ) {
+    super(message);
+    this.name = "GpuServiceError";
+  }
+}
+
+export interface GpuServiceClientDeps {
+  baseUrl: string;
+  apiKey: string;
+  /** Injected for tests; defaults to globalThis.fetch. */
+  fetch?: typeof globalThis.fetch;
+}
+
+export class GpuServiceClient {
+  private readonly baseUrl: string;
+  private readonly apiKey: string;
+  private readonly _fetch: typeof globalThis.fetch;
+
+  constructor(deps: GpuServiceClientDeps) {
+    this.baseUrl = deps.baseUrl.replace(/\/+$/, "");
+    this.apiKey = deps.apiKey;
+    this._fetch = deps.fetch ?? globalThis.fetch.bind(globalThis);
+  }
+
+  async enqueueRender(args: EnqueueRenderArgs): Promise<EnqueueRenderResult> {
+    const response = await this._fetch(`${this.baseUrl}/render_preview`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": this.apiKey,
+      },
+      body: JSON.stringify({
+        explorationId: args.explorationId,
+        candidateId: args.candidateId,
+        snapshotStorageKey: args.snapshotStorageKey,
+      }),
+    });
+    return await this._unwrap<EnqueueRenderResult>(response, "render_preview");
+  }
+
+  async getJobStatus(jobId: string): Promise<JobStatusResult> {
+    const url = `${this.baseUrl}/status?job_id=${encodeURIComponent(jobId)}`;
+    const response = await this._fetch(url, {
+      method: "GET",
+      headers: { "X-API-Key": this.apiKey },
+    });
+    return await this._unwrap<JobStatusResult>(response, "status");
+  }
+
+  private async _unwrap<T>(response: Response, op: string): Promise<T> {
+    if (response.ok) {
+      return (await response.json()) as T;
+    }
+    // FastAPI's HTTPException wraps the body under {"detail": ...}.
+    // detail can be a string OR an object (e.g. our 501 stub returns
+    // {error, phase}); unwrap both shapes into a clean GpuServiceError.
+    // Read body once as text — failed JSON parse can't replay a fetch
+    // body (it's a one-shot stream).
+    const text = await response.text();
+    let body: { detail?: unknown } = { detail: text };
+    if (text) {
+      try {
+        body = JSON.parse(text) as { detail?: unknown };
+      } catch {
+        // non-JSON (e.g. gateway HTML) — keep text as detail
+      }
+    }
+    const detail = body?.detail;
+    let message: string;
+    let phase: string | undefined;
+    if (detail && typeof detail === "object") {
+      const d = detail as { error?: string; phase?: string };
+      message = d.error ?? `${op} failed (HTTP ${response.status})`;
+      phase = d.phase;
+    } else if (typeof detail === "string" && detail.length > 0) {
+      message = detail;
+    } else {
+      message = `${op} failed (HTTP ${response.status})`;
+    }
+    throw new GpuServiceError(response.status, message, detail, phase);
+  }
+}
