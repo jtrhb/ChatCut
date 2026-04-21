@@ -29,7 +29,11 @@ function makeMockDb() {
   mockFrom.mockReturnValue({ where: mockWhere });
   mockSelect.mockReturnValue({ from: mockFrom });
 
-  mockValues.mockResolvedValue(undefined);
+  // Phase 5a MED-2: insert().values().onConflictDoNothing() chain.
+  // The outermost awaitable is .onConflictDoNothing(), so its mock
+  // resolves the promise; .values() returns the chain object.
+  const mockOnConflictDoNothing = vi.fn().mockResolvedValue(undefined);
+  mockValues.mockReturnValue({ onConflictDoNothing: mockOnConflictDoNothing });
   mockInsert.mockReturnValue({ values: mockValues });
 
   // delete().from().where()
@@ -48,6 +52,7 @@ function makeMockDb() {
       limit: mockLimit,
       insert: mockInsert,
       values: mockValues,
+      onConflictDoNothing: mockOnConflictDoNothing,
       delete: mockDelete,
       deleteFrom: mockDeleteFrom,
       deleteWhere: mockDeleteWhere,
@@ -132,10 +137,16 @@ describe("VisionCache", () => {
     });
 
     it("resolves without a value when caching", async () => {
-      db._mocks.values.mockResolvedValueOnce(undefined);
+      // Phase 5a MED-2: the chain terminator is now onConflictDoNothing.
+      db._mocks.onConflictDoNothing.mockResolvedValueOnce(undefined);
       await expect(
         cache.set(MEDIA_HASH, SCHEMA_VERSION, MOCK_ANALYSIS)
       ).resolves.toBeUndefined();
+    });
+
+    it("uses onConflictDoNothing to absorb the concurrent-INSERT race (MED-2)", async () => {
+      await cache.set(MEDIA_HASH, SCHEMA_VERSION, MOCK_ANALYSIS);
+      expect(db._mocks.onConflictDoNothing).toHaveBeenCalledTimes(1);
     });
   });
 

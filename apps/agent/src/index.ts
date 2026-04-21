@@ -424,9 +424,63 @@ async function main() {
 		);
 	}
 
+	// Phase 5a LOW-2: assert no two registered executors share a tool
+	// name. Tool names must be globally unique across executors because
+	// the router below is a first-match-wins linear scan; a future
+	// collision would silently route to the earlier executor and the
+	// later registration's handler would never fire. This guard runs
+	// once at boot and fails fast if a developer ever ships a duplicate.
+	{
+		const seen = new Map<string, string>();
+		const announce = (
+			label: string,
+			exec: { hasToolName(name: string): boolean } | null,
+			names: string[],
+		) => {
+			if (!exec) return;
+			for (const n of names) {
+				if (!exec.hasToolName(n)) continue;
+				const prior = seen.get(n);
+				if (prior) {
+					throw new Error(
+						`[boot] tool name collision: "${n}" registered by both ${prior} and ${label}`,
+					);
+				}
+				seen.set(n, label);
+			}
+		};
+		const allNames = [
+			...(await import("./tools/editor-tools.js")).EDITOR_TOOL_DEFINITIONS.map(
+				(t) => t.name,
+			),
+			...(await import("./tools/asset-tools.js")).assetToolDefinitions.map(
+				(t) => t.name,
+			),
+			...(await import("./tools/creator-tools.js")).creatorToolDefinitions.map(
+				(t) => t.name,
+			),
+			...(await import("./tools/vision-tools.js")).visionToolDefinitions.map(
+				(t) => t.name,
+			),
+		];
+		announce("editor", editorToolExecutor, allNames);
+		announce("asset", assetToolExecutor, allNames);
+		announce("creator", creatorToolExecutor, allNames);
+		announce("vision", visionToolExecutor, allNames);
+	}
+
 	// Tool executor for sub-agents — routes to real implementations when available.
 	// Accepts optional ToolContext from the pipeline so identity (sessionId/userId)
 	// reaches the underlying executor for tenant-scoped operations.
+	//
+	// ORDER MATTERS: this is a first-match-wins linear scan via
+	// `hasToolName`. A startup assertion above guarantees tool names are
+	// globally unique across executors, so the order is observably
+	// equivalent to a name → executor map; sequencing is preserved for
+	// dev clarity (most-edited surfaces first). Phase 5a HIGH-1 fix:
+	// `onProgress` is now threaded as the 4th arg so long-running tools
+	// (analyze_video and future generation/transcription) can emit
+	// `tool.progress` events through the EventBus → SSE → web pipeline.
 	const toolExecutor = async (
 		name: string,
 		input: unknown,
@@ -436,38 +490,61 @@ async function main() {
 			sessionId?: string;
 			userId?: string;
 		},
+		onProgress?: (
+			event: import("./tools/types.js").ToolProgressEvent,
+		) => void,
 	) => {
 		if (editorToolExecutor.hasToolName(name)) {
-			return editorToolExecutor.execute(name, input, {
-				agentType: (context?.agentType as any) ?? "editor",
-				taskId: context?.taskId ?? "default",
-				sessionId: context?.sessionId,
-				userId: context?.userId,
-			});
+			return editorToolExecutor.execute(
+				name,
+				input,
+				{
+					agentType: (context?.agentType as any) ?? "editor",
+					taskId: context?.taskId ?? "default",
+					sessionId: context?.sessionId,
+					userId: context?.userId,
+				},
+				onProgress as any,
+			);
 		}
 		if (assetToolExecutor?.hasToolName(name)) {
-			return assetToolExecutor.execute(name, input, {
-				agentType: (context?.agentType as any) ?? "asset",
-				taskId: context?.taskId ?? "default",
-				sessionId: context?.sessionId,
-				userId: context?.userId,
-			});
+			return assetToolExecutor.execute(
+				name,
+				input,
+				{
+					agentType: (context?.agentType as any) ?? "asset",
+					taskId: context?.taskId ?? "default",
+					sessionId: context?.sessionId,
+					userId: context?.userId,
+				},
+				onProgress as any,
+			);
 		}
 		if (creatorToolExecutor?.hasToolName(name)) {
-			return creatorToolExecutor.execute(name, input, {
-				agentType: (context?.agentType as any) ?? "creator",
-				taskId: context?.taskId ?? "default",
-				sessionId: context?.sessionId,
-				userId: context?.userId,
-			});
+			return creatorToolExecutor.execute(
+				name,
+				input,
+				{
+					agentType: (context?.agentType as any) ?? "creator",
+					taskId: context?.taskId ?? "default",
+					sessionId: context?.sessionId,
+					userId: context?.userId,
+				},
+				onProgress as any,
+			);
 		}
 		if (visionToolExecutor?.hasToolName(name)) {
-			return visionToolExecutor.execute(name, input, {
-				agentType: (context?.agentType as any) ?? "vision",
-				taskId: context?.taskId ?? "default",
-				sessionId: context?.sessionId,
-				userId: context?.userId,
-			});
+			return visionToolExecutor.execute(
+				name,
+				input,
+				{
+					agentType: (context?.agentType as any) ?? "vision",
+					taskId: context?.taskId ?? "default",
+					sessionId: context?.sessionId,
+					userId: context?.userId,
+				},
+				onProgress as any,
+			);
 		}
 		return {
 			success: false,

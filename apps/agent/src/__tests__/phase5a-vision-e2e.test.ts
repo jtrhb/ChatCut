@@ -242,6 +242,69 @@ describe("Phase 5a — Vision Agent end-to-end", () => {
     expect(second.cacheHit).toBe(true);
     // Gemini hit only once across both calls.
     expect(fetchSpy).toHaveBeenCalledTimes(2); // upload + analyze (first call only)
+    // Phase 5a LOW-3: pin the URL-didn't-enter-the-hash invariant.
+    // mediaFetcher fired twice — once per executor call — proving the
+    // cache key was computed from the (identical) bytes, not from the
+    // (different) URLs.
+    expect(mediaFetcher).toHaveBeenCalledTimes(2);
+    expect(mediaFetcher).toHaveBeenNthCalledWith(1, "https://r2.example/x?sig=A");
+    expect(mediaFetcher).toHaveBeenNthCalledWith(2, "https://r2.example/x?sig=B-rotated");
+  });
+
+  // Phase 5a HIGH-1: onProgress survives the full pipeline → executor →
+  // client chain end-to-end. The unit test pins the executor seam; this
+  // pins the wire-shape Phase 4 acceptance ("≥2 tool.progress per call").
+  it("HIGH-1: pipeline-level tool.progress events surface from analyze_video", async () => {
+    const fetchSpy = makeStubFetch();
+    const visionClient = new VisionClient(
+      "test-key",
+      fetchSpy as unknown as typeof fetch,
+    );
+    const visionCache = makeInMemoryCache();
+    const visionExecutor = new VisionToolExecutor({
+      visionClient,
+      visionCache,
+      mediaFetcher: vi.fn(async () => ({
+        bytes: new Uint8Array([1, 2, 3]),
+        mimeType: "video/mp4",
+      })),
+    });
+
+    const { pipeline } = createAgentPipeline(
+      async (name, input, ctx, onProgress) =>
+        visionExecutor.execute(
+          name,
+          input,
+          ctx ?? { agentType: "vision", taskId: "t" },
+          onProgress,
+        ),
+      visionToolDefinitions,
+      "vision",
+    );
+
+    const events: any[] = [];
+    const onProgress = (e: any) => events.push(e);
+
+    await pipeline.execute(
+      "analyze_video",
+      { video_url: "https://r2.example/clip.mp4" },
+      { agentType: "vision", taskId: "t-1", toolCallId: "tc-1" },
+      undefined,
+      onProgress,
+    );
+
+    // VisionClient emits 3 progress steps per call (request → parse →
+    // complete). At least 2 of them must surface as tool.progress
+    // events through the pipeline (Phase 4 acceptance).
+    expect(events.length).toBeGreaterThanOrEqual(2);
+    // Pipeline-side wrappedProgress overrides toolName + toolCallId
+    // from ctx — verify the threading actually happened.
+    for (const e of events) {
+      expect(e.toolName).toBe("analyze_video");
+      expect(e.toolCallId).toBe("tc-1");
+      expect(typeof e.step).toBe("number");
+      expect(typeof e.text).toBe("string");
+    }
   });
 
   it("ToolPipeline rejects analyze_video from a non-vision agent", async () => {

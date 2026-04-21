@@ -4,6 +4,7 @@ import type {
   ToolCallResult,
   ToolContext,
   ToolDefinition,
+  ToolProgressEvent,
 } from "./types.js";
 
 export abstract class ToolExecutor {
@@ -57,7 +58,8 @@ export abstract class ToolExecutor {
   async execute(
     toolName: string,
     input: unknown,
-    context: ToolContext
+    context: ToolContext,
+    onProgress?: (event: ToolProgressEvent) => void
   ): Promise<ToolCallResult> {
     const tool = this.tools.get(toolName);
     if (!tool) {
@@ -88,16 +90,23 @@ export abstract class ToolExecutor {
     }
 
     // Execute the concrete implementation
-    const result = await this.executeImpl(toolName, parsed.data, context);
+    const result = await this.executeImpl(toolName, parsed.data, context, onProgress);
     this._log(toolName, parsed.data, result, context);
     return result;
   }
 
-  /** Concrete subclasses provide the actual tool execution logic. */
+  /**
+   * Concrete subclasses provide the actual tool execution logic.
+   * `onProgress` is the pipeline-supplied progress sink — pass through
+   * to long-running clients (Gemini, generation, etc) so `tool.progress`
+   * events reach the EventBus → SSE → web. Sub-classes that don't need
+   * progress emission can ignore the param.
+   */
   protected abstract executeImpl(
     toolName: string,
     input: unknown,
-    context: ToolContext
+    context: ToolContext,
+    onProgress?: (event: ToolProgressEvent) => void
   ): Promise<ToolCallResult>;
 
   /** Return all tools available to the given agent type. */

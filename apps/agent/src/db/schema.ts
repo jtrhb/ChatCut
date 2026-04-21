@@ -121,7 +121,13 @@ export const visionCache = pgTable(
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => [
-    index("vision_cache_media_hash_schema_idx").on(
+    // Phase 5a MED-2 race fix: unique index on (mediaHash, schemaVersion)
+    // so the executor's onConflictDoNothing INSERT actually fires. Pre-
+    // Phase 5a this was a non-unique index and concurrent analyzers of
+    // the same media would silently create duplicate rows. The analysis
+    // for a given (hash, version) is deterministic, so first-writer-wins
+    // is correct.
+    uniqueIndex("vision_cache_media_hash_schema_uniq").on(
       table.mediaHash,
       table.schemaVersion
     ),

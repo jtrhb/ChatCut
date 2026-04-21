@@ -158,12 +158,15 @@ describe("VisionToolExecutor", () => {
       // Cache read SKIPPED for focus-narrowed (mirrors set-skips-focus
       // semantics — focus responses can't trust canonical cache).
       expect(getSpy).not.toHaveBeenCalled();
-      // Real Gemini calls fire.
+      // Real Gemini calls fire. Phase 5a HIGH-1: analyze receives a
+      // 4th onProgress arg (undefined here — no pipeline-side
+      // onProgress was supplied to the executor).
       expect(uploadSpy).toHaveBeenCalledTimes(1);
       expect(analyzeSpy).toHaveBeenCalledWith(
         expect.any(String),
         "video/mp4",
         "action sequences",
+        undefined,
       );
       // VisionCache.set is called (focus arg passed) but the cache impl
       // itself no-ops on focus — that's vision-cache.ts's contract,
@@ -296,6 +299,155 @@ describe("VisionToolExecutor", () => {
       expect(result.error).toContain("model overloaded");
     });
 
+    // Phase 5a HIGH-1: onProgress threading from pipeline → executor → client.
+    it("threads onProgress through to VisionClient.analyzeVideo (HIGH-1 fix)", async () => {
+      const bytes = new Uint8Array([1, 2, 3]);
+      const fetcher = fakeFetcher(bytes);
+      const { client, analyzeSpy } = fakeClient();
+      const { cache } = fakeCache();
+      const exec = new VisionToolExecutor({
+        visionClient: client,
+        visionCache: cache,
+        mediaFetcher: fetcher,
+      });
+
+      const onProgress = vi.fn();
+      await exec.execute(
+        "analyze_video",
+        { video_url: "https://r2.example/x.mp4" },
+        CTX,
+        onProgress,
+      );
+
+      // analyzeVideo received a 4th arg that is a function (the
+      // VisionProgressUpdate adapter), not undefined.
+      expect(analyzeSpy).toHaveBeenCalledTimes(1);
+      const callArgs = analyzeSpy.mock.calls[0]!;
+      expect(typeof callArgs[3]).toBe("function");
+    });
+
+    it("threaded progress adapter forwards to onProgress as ToolProgressEvent", async () => {
+      const bytes = new Uint8Array([1, 2, 3]);
+      const fetcher = fakeFetcher(bytes);
+      // Custom client whose analyzeVideo invokes its 4th-arg progress
+      // callback so we can verify the adapter shape.
+      const analyzeSpy = vi.fn(
+        async (_uri, _mime, _focus, onProg) => {
+          onProg?.({ step: 50, totalSteps: 100, text: "halfway" });
+          return ANALYSIS;
+        },
+      );
+      const client = {
+        uploadVideo: vi.fn(async () => ({
+          fileUri: "u",
+          mimeType: "video/mp4",
+          name: "files/x",
+        })),
+        analyzeVideo: analyzeSpy,
+        locateScene: () => [],
+      } as unknown as VisionClient;
+      const { cache } = fakeCache();
+      const exec = new VisionToolExecutor({
+        visionClient: client,
+        visionCache: cache,
+        mediaFetcher: fetcher,
+      });
+
+      const events: any[] = [];
+      const onProgress = vi.fn((e) => events.push(e));
+      await exec.execute(
+        "analyze_video",
+        { video_url: "https://r2.example/x.mp4" },
+        CTX,
+        onProgress,
+      );
+
+      expect(events.length).toBe(1);
+      // The adapter wraps the simple {step, totalSteps, text} shape into
+      // a full ToolProgressEvent. toolName/toolCallId are placeholders
+      // because the pipeline (tool-pipeline.ts:289-310) overrides them
+      // from the surrounding ctx.
+      expect(events[0]).toMatchObject({
+        type: "tool.progress",
+        step: 50,
+        totalSteps: 100,
+        text: "halfway",
+      });
+    });
+
+    // Phase 5a MED-1: SSRF guard on the default media fetcher.
+    it("default mediaFetcher rejects localhost URLs (SSRF guard)", async () => {
+      // Construct an executor with the default fetcher (no override).
+      const { client } = fakeClient();
+      const { cache } = fakeCache();
+      const exec = new VisionToolExecutor({
+        visionClient: client,
+        visionCache: cache,
+        // NB: no mediaFetcher override — exercises defaultMediaFetcher.
+      });
+      const result = await exec.execute(
+        "analyze_video",
+        { video_url: "http://localhost:8080/internal" },
+        CTX,
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/blocked host|private network/);
+    });
+
+    it("default mediaFetcher rejects RFC1918 private IPs (SSRF guard)", async () => {
+      const { client } = fakeClient();
+      const { cache } = fakeCache();
+      const exec = new VisionToolExecutor({
+        visionClient: client,
+        visionCache: cache,
+      });
+      const result = await exec.execute(
+        "analyze_video",
+        { video_url: "http://10.0.0.1/internal" },
+        CTX,
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/private network/);
+    });
+
+    it("default mediaFetcher rejects non-http(s) protocols", async () => {
+      const { client } = fakeClient();
+      const { cache } = fakeCache();
+      const exec = new VisionToolExecutor({
+        visionClient: client,
+        visionCache: cache,
+      });
+      const result = await exec.execute(
+        "analyze_video",
+        { video_url: "file:///etc/passwd" },
+        CTX,
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/protocol .* not allowed/);
+    });
+
+    // Phase 5a MED-4: runtime shape guard for context.analysis.
+    it("rejects locate_scene when context.analysis has malformed scenes", async () => {
+      const { client } = fakeClient();
+      const { cache } = fakeCache();
+      const exec = new VisionToolExecutor({
+        visionClient: client,
+        visionCache: cache,
+        mediaFetcher: fakeFetcher(new Uint8Array([1])),
+      });
+      const result = await exec.execute(
+        "locate_scene",
+        {
+          query: "beach",
+          // Hallucinated shape — `description` is a number, not a string.
+          context: { analysis: { scenes: [{ description: 42, start: 0, end: 1 }] } },
+        },
+        CTX,
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("call analyze_video first");
+    });
+
     it("rejects calls from non-vision agents (ToolExecutor permission check)", async () => {
       const { client } = fakeClient();
       const { cache } = fakeCache();
@@ -359,7 +511,7 @@ describe("VisionToolExecutor", () => {
   // ── describe_frame (stubbed for 5a follow-up) ────────────────────────
 
   describe("describe_frame", () => {
-    it("returns a clear 'not yet wired' error", async () => {
+    it("returns a clear LLM-actionable fallback error (NIT-2)", async () => {
       const { client } = fakeClient();
       const { cache } = fakeCache();
       const exec = new VisionToolExecutor({
@@ -369,7 +521,10 @@ describe("VisionToolExecutor", () => {
       });
       const result = await exec.execute("describe_frame", { time: 5 }, CTX);
       expect(result.success).toBe(false);
-      expect(result.error).toContain("not yet wired");
+      // Message tells the model exactly what to do instead of a vague
+      // "not implemented" string.
+      expect(result.error).toContain("describe_frame is unavailable");
+      expect(result.error).toContain("Fall back to analyze_video");
     });
   });
 
