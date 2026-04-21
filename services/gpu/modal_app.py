@@ -122,7 +122,7 @@ def render_preview(payload: dict[str, Any], request: Request) -> dict[str, str]:
     return result
 
 
-@app.function(image=image, secrets=[r2_secret], timeout=120)
+@app.function(image=image, secrets=[r2_secret], timeout=300)
 def _do_render(
     job_id: str,
     exploration_id: str,
@@ -136,6 +136,12 @@ def _do_render(
     `render_timeline(use_gpu=False)` skips the h264_nvenc attempt
     accordingly. When MODAL_IMAGE.md gets a CUDA-ffmpeg variant,
     re-add `gpu="T4"` here and flip `use_gpu=True`.
+
+    Timeout budget split (reviewer Stage B HIGH #4):
+    - Modal envelope: 300s — covers fetch + render + upload + state writes
+    - Inner melt subprocess: 120s (RenderOpts default) — encode-only
+    Leaves ~3 minutes for asset fetch + R2 upload + Dict writes around
+    the encode, so a slow R2 fetch can't kill the container mid-render.
     """
     from src.handlers import do_render_body
     from src.r2 import R2Config, R2Uploader

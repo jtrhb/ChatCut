@@ -181,18 +181,45 @@ class TestMultiTrackComposite:
         xml = timeline_to_mlt(state, {"bg": "/tmp/bg.mp4", "fg": "/tmp/fg.mp4"})
         root = ET.fromstring(xml)
         tractor = root.find("tractor")
-        # 2 tracks in multitrack, 1 composite transition
         assert len(tractor.find("multitrack").findall("track")) == 2
         transitions = tractor.findall("transition")
         assert len(transitions) == 1
-        # composite uses qtblend
+        # mlt_service must be "composite" (qtblend is a filter, not a transition,
+        # and melt rejects it in transition position) — reviewer Stage B HIGH #2
         svc = transitions[0].find("./property[@name='mlt_service']")
-        assert svc is not None
-        assert svc.text == "qtblend"
+        assert svc.text == "composite"
+        # composite uses geometry, not compositing
+        geom = transitions[0].find("./property[@name='geometry']")
+        assert geom is not None
+        assert geom.text == "0/0:100%x100%"
         a_track = transitions[0].find("./property[@name='a_track']")
         b_track = transitions[0].find("./property[@name='b_track']")
         assert a_track.text == "0"
         assert b_track.text == "1"
+
+    def test_three_visual_tracks_chain_composites(self):
+        # Reviewer Stage B CRITICAL #1: each overlay must composite onto
+        # the previous result, not always onto the base. With [bg, mid, fg]
+        # the second transition's a_track must equal the first's b_track.
+        state = _state(
+            [
+                _video_track([_video_clip(media_id="bg", duration=5)], id="vt-bg"),
+                _video_track([_video_clip(media_id="mid", duration=5)], id="vt-mid", is_main=False),
+                _video_track([_video_clip(media_id="fg", duration=5)], id="vt-fg", is_main=False),
+            ]
+        )
+        xml = timeline_to_mlt(state, {"bg": "/b.mp4", "mid": "/m.mp4", "fg": "/f.mp4"})
+        root = ET.fromstring(xml)
+        transitions = root.find("tractor").findall("transition")
+        assert len(transitions) == 2
+        # Chain: composite1 composites track[1] onto track[0]; composite2
+        # composites track[2] onto track[1] (the result of composite1).
+        a0 = transitions[0].find("./property[@name='a_track']").text
+        b0 = transitions[0].find("./property[@name='b_track']").text
+        a1 = transitions[1].find("./property[@name='a_track']").text
+        b1 = transitions[1].find("./property[@name='b_track']").text
+        assert (a0, b0) == ("0", "1")
+        assert (a1, b1) == ("1", "2")
 
 
 class TestTextOverlay:
@@ -231,6 +258,67 @@ class TestTextOverlay:
         assert color_prop.text == "0xFF0000FF"  # red, opaque
         weight_prop = producer.find("./property[@name='weight']")
         assert weight_prop.text == "700"  # bold
+
+    def test_text_disables_pango_markup(self):
+        # Reviewer Stage B HIGH #3: explicit markup="0" so accidental
+        # `<span>` tags in agent-generated content render as literal text
+        # rather than tripping Pango's markup parser.
+        text_el = {
+            "id": "t1", "name": "x", "type": "text",
+            "content": "<span foreground='red'>x</span>",
+            "fontFamily": "Sans", "fontSize": 32, "color": "#ffffff",
+            "background": {"enabled": False, "color": "#000000"},
+            "textAlign": "center", "fontWeight": "normal",
+            "fontStyle": "normal", "textDecoration": "none",
+            "startTime": 0, "duration": 1, "trimStart": 0, "trimEnd": 0,
+            "transform": {"scale": 1.0, "position": {"x": 0, "y": 0}, "rotate": 0},
+            "opacity": 1.0,
+        }
+        state = _state([_text_track([text_el])])
+        xml = timeline_to_mlt(state, {})
+        root = ET.fromstring(xml)
+        markup = root.find("producer/property[@name='markup']")
+        assert markup is not None
+        assert markup.text == "0"
+
+    def test_text_strips_c0_control_chars(self):
+        text_el = {
+            "id": "t1", "name": "x", "type": "text",
+            "content": "Hello\x00\x07World",
+            "fontFamily": "Sans", "fontSize": 32, "color": "#ffffff",
+            "background": {"enabled": False, "color": "#000000"},
+            "textAlign": "center", "fontWeight": "normal",
+            "fontStyle": "normal", "textDecoration": "none",
+            "startTime": 0, "duration": 1, "trimStart": 0, "trimEnd": 0,
+            "transform": {"scale": 1.0, "position": {"x": 0, "y": 0}, "rotate": 0},
+            "opacity": 1.0,
+        }
+        state = _state([_text_track([text_el])])
+        xml = timeline_to_mlt(state, {})
+        root = ET.fromstring(xml)
+        text_prop = root.find("producer/property[@name='text']")
+        # \x00 and \x07 stripped; "Hello" + "World" remain
+        assert "\x00" not in text_prop.text
+        assert "\x07" not in text_prop.text
+        assert "HelloWorld" == text_prop.text
+
+    def test_text_caps_excessive_length(self):
+        text_el = {
+            "id": "t1", "name": "x", "type": "text",
+            "content": "X" * 10000,
+            "fontFamily": "Sans", "fontSize": 32, "color": "#ffffff",
+            "background": {"enabled": False, "color": "#000000"},
+            "textAlign": "center", "fontWeight": "normal",
+            "fontStyle": "normal", "textDecoration": "none",
+            "startTime": 0, "duration": 1, "trimStart": 0, "trimEnd": 0,
+            "transform": {"scale": 1.0, "position": {"x": 0, "y": 0}, "rotate": 0},
+            "opacity": 1.0,
+        }
+        state = _state([_text_track([text_el])])
+        xml = timeline_to_mlt(state, {})
+        root = ET.fromstring(xml)
+        text_prop = root.find("producer/property[@name='text']")
+        assert len(text_prop.text) == 4096
 
     def test_text_with_background_emits_bgcolour(self):
         text_el = {
@@ -285,20 +373,30 @@ class TestAudioTrack:
         resource = root.find("producer/property[@name='resource']")
         assert resource.text == "/tmp/music.mp3"
 
-    def test_volume_below_one_attaches_volume_filter(self):
+    def test_volume_below_one_attaches_volume_filter_in_db(self):
+        # MLT volume gain is dB, not linear — reviewer Stage B MED #4.
+        # 20*log10(0.5) ≈ -6.02 dB
         state = _state([_audio_track([self._audio_el(volume=0.5)])])
         xml = timeline_to_mlt(state, {"music": "/tmp/music.mp3"})
         root = ET.fromstring(xml)
         gain = root.find("producer/filter/property[@name='gain']")
         assert gain is not None
-        assert gain.text == "0.5"
+        assert gain.text == "-6.02"
 
-    def test_muted_audio_sets_gain_zero(self):
+    def test_muted_audio_sets_gain_to_floor(self):
+        # Mute uses -120 dB floor (NOT "0", which would be unity gain).
         state = _state([_audio_track([self._audio_el(muted=True, volume=0.8)])])
         xml = timeline_to_mlt(state, {"music": "/tmp/music.mp3"})
         root = ET.fromstring(xml)
         gain = root.find("producer/filter/property[@name='gain']")
-        assert gain.text == "0"
+        assert gain.text == "-120"
+
+    def test_default_volume_emits_no_filter(self):
+        state = _state([_audio_track([self._audio_el(volume=1.0)])])
+        xml = timeline_to_mlt(state, {"music": "/tmp/music.mp3"})
+        root = ET.fromstring(xml)
+        # Default volume (1.0) → no filter overhead in XML
+        assert root.find("producer/filter") is None
 
     def test_library_audio_uses_resolver_for_source_url(self):
         state = _state([_audio_track([self._audio_el(sourceType="library", sourceUrl="https://lib/track.mp3")])])
@@ -382,6 +480,33 @@ class TestSkipsAndWarnings:
         state = {"project": {}, "scenes": [], "activeSceneId": None}
         with pytest.raises(TranslateError, match="no scenes"):
             timeline_to_mlt(state, {})
+
+    def test_invalid_canvas_size_raises_translate_error(self):
+        # Reviewer Stage B MED #5: malformed canvasSize (e.g. "1280px"
+        # string) used to raise raw ValueError → 400; should be a
+        # typed TranslateError so callers can distinguish payload defects.
+        state = _state([_video_track([_video_clip()])])
+        state["project"]["settings"]["canvasSize"] = {"width": "1280px", "height": 720}
+        with pytest.raises(TranslateError, match="invalid canvasSize"):
+            timeline_to_mlt(state, {"media-1": "/tmp/x.mp4"})
+
+    def test_overlap_logs_warning(self, caplog):
+        # Reviewer Stage B MED #1: overlapping clips on a single track
+        # are undefined; we append concatenated and log so Stage E
+        # parity reviews see the divergence.
+        state = _state(
+            [
+                _video_track(
+                    [
+                        _video_clip(id="a", media_id="m1", start=0, duration=3),
+                        _video_clip(id="b", media_id="m2", start=1, duration=3),
+                    ]
+                )
+            ]
+        )
+        with caplog.at_level(logging.WARNING):
+            timeline_to_mlt(state, {"m1": "/tmp/a.mp4", "m2": "/tmp/b.mp4"})
+        assert any("overlap" in r.message for r in caplog.records)
 
     def test_picks_active_scene_when_specified(self):
         state = {

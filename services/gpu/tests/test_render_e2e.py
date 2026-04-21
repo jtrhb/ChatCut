@@ -263,7 +263,7 @@ class TestE2ERenderPipeline:
                 return
         raise AssertionError("overlay-source producer not found in MLT XML")
 
-    def test_xml_audio_track_has_volume_filter(self):
+    def test_xml_audio_track_has_volume_filter_in_db(self):
         captured: dict = {}
         render_timeline(
             _fixture_state(),
@@ -276,7 +276,8 @@ class TestE2ERenderPipeline:
             resource = producer.find("./property[@name='resource']")
             if resource is not None and "music-source" in resource.text:
                 gain = producer.find("./filter/property[@name='gain']")
-                assert gain.text == "0.6"
+                # 20*log10(0.6) ≈ -4.44 dB (reviewer Stage B MED #4)
+                assert gain.text == "-4.44"
                 return
         raise AssertionError("music-source producer not found")
 
@@ -303,7 +304,10 @@ class TestE2ERenderPipeline:
                 return
         raise AssertionError("pango (text) producer not found")
 
-    def test_xml_tractor_composites_visual_tracks(self):
+    def test_xml_tractor_composites_visual_tracks_in_chain(self):
+        # Reviewer Stage B CRITICAL #1: 3 visual tracks (bg, overlay, text)
+        # must chain — composite[1].a_track == composite[0].b_track —
+        # otherwise the overlay is silently dropped during text overlap.
         captured: dict = {}
         render_timeline(
             _fixture_state(),
@@ -313,12 +317,28 @@ class TestE2ERenderPipeline:
         )
         root = ET.fromstring(captured["xml"])
         tractor = root.find("tractor")
-        # All 4 tracks are bound (incl. audio + text)
+        # All 4 tracks bound (incl. audio + text). Track order in the
+        # multitrack: vt-bg(0), vt-overlay(1), at-music(2), tt-title(3).
         assert len(tractor.find("multitrack").findall("track")) == 4
-        # Composite transitions between visual tracks (bg, overlay, text =
-        # 3 visual tracks → 2 composite transitions over the base)
         transitions = tractor.findall("transition")
+        # 3 visual tracks (bg, overlay, text) → 2 composite transitions.
+        # Audio track at index 2 is skipped from visual_indices.
         assert len(transitions) == 2
+        # composite uses mlt_service="composite" (NOT qtblend, which is a
+        # filter not a transition — reviewer Stage B HIGH #2)
+        for t in transitions:
+            svc = t.find("./property[@name='mlt_service']").text
+            assert svc == "composite"
+        # Chain: composite1 = (bg=0, overlay=1); composite2 = (overlay=1, text=3)
+        a0 = transitions[0].find("./property[@name='a_track']").text
+        b0 = transitions[0].find("./property[@name='b_track']").text
+        a1 = transitions[1].find("./property[@name='a_track']").text
+        b1 = transitions[1].find("./property[@name='b_track']").text
+        assert (a0, b0) == ("0", "1")
+        # a_track of the second transition MUST equal b_track of the first
+        # — that's the chaining invariant the bug was eating
+        assert a1 == b0
+        assert b1 == "3"  # text track at multitrack index 3
 
     def test_downloader_called_for_each_unique_media_id(self):
         downloader = _CapturingDownloader()

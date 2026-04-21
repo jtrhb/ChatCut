@@ -23,8 +23,10 @@ from src.r2 import preview_storage_key
 
 # Stage A placeholder — an MP4-shaped 'ftyp' box prefix + zero-padding so
 # the upload path is exercised end-to-end. NOT a playable MP4. Stage B's
-# real renderer replaces these bytes via the body_bytes parameter on
-# do_render_body.
+# real renderer is wired via the render_fn callable on do_render_body
+# (modal_app's _do_render closes over render.render_timeline). The
+# placeholder remains the default for unit tests calling do_render_body
+# without render_fn.
 PLACEHOLDER_MP4_BYTES = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00" + b"\x00" * 1000
 
 
@@ -128,9 +130,10 @@ def do_render_body(
     actual_render = render_fn or (lambda _: PLACEHOLDER_MP4_BYTES)
     try:
         s = JobState.model_validate(job_dict[job_id])
-        # "Started" signal only. The render_fn owns its own progress
-        # milestones (Stage B's MLT path emits at 10/30/60/90 via Modal
-        # Dict updates done from inside render_timeline).
+        # "Started" signal only — progress jumps 1 → 100 at done. Granular
+        # 10/30/60/90 milestones are deferred to a later stage (would need
+        # a progress_cb threaded through render.render_timeline). Reviewer
+        # Stage B HIGH #5: docstring previously claimed milestones existed.
         s = update_progress(s, 1)
         try:
             job_dict[job_id] = s.model_dump()

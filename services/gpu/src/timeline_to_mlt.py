@@ -27,6 +27,8 @@ any divergence is logged so Stage E reviews observe parity gaps.
 from __future__ import annotations
 
 import logging
+import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -60,11 +62,16 @@ def timeline_to_mlt(
     settings = project.get("settings") or {}
     canvas = settings.get("canvasSize") or {}
 
-    p = profile or Profile(
-        width=int(canvas.get("width") or 1280),
-        height=int(canvas.get("height") or 720),
-        fps=int(settings.get("fps") or 30),
-    )
+    try:
+        p = profile or Profile(
+            width=int(canvas.get("width") or 1280),
+            height=int(canvas.get("height") or 720),
+            fps=int(settings.get("fps") or 30),
+        )
+    except (ValueError, TypeError) as e:
+        raise TranslateError(
+            f"invalid canvasSize/fps in project settings: {e}"
+        ) from e
 
     mlt = ET.Element("mlt", attrib={"LC_NUMERIC": "C", "version": "7.0.0"})
     ET.SubElement(
@@ -97,23 +104,43 @@ def timeline_to_mlt(
     for playlist, _ttype in track_playlists:
         ET.SubElement(multitrack, "track", attrib={"producer": playlist.get("id", "")})
 
-    # Composite each video track above the previous via mlt_service=composite.
-    # First video track is the base (a_track=0), subsequent are b_track=N.
+    # Composite chain: each visual overlay composites onto the PREVIOUS
+    # composited result, not always onto the base. With 3 visual tracks
+    # [bg, overlay, text] this yields: bg+overlay → tmp; tmp+text → final.
+    # Earlier code mis-emitted both transitions with a_track=0 which
+    # silently dropped overlay during the text overlap window
+    # (reviewer Stage B CRITICAL #1).
+    #
+    # mlt_service is "composite" — qtblend is a FILTER in MLT 7, not a
+    # transition; melt rejects qtblend in transition position
+    # (reviewer Stage B HIGH #2). composite uses geometry="x/y:WxH" to
+    # describe how b_track maps onto a_track; "0/0:100%x100%" = full frame.
+    # Note: total_frames here is the longest track including audio — a
+    # 60s audio track over 5s visual will hold the last visual frame
+    # for 55s. Documented behavior; switch to visual-only frames if a
+    # different policy is needed later.
     visual_indices = [i for i, (_, t) in enumerate(track_playlists) if t in ("video", "text")]
-    base_visual = visual_indices[0] if visual_indices else None
-    if base_visual is not None:
+    if visual_indices:
         out_frames = max(builder.total_frames - 1, 0)
-        for b_idx in visual_indices[1:]:
+        prev = visual_indices[0]
+        for n, b_idx in enumerate(visual_indices[1:], start=1):
             transition = ET.SubElement(
                 tractor,
                 "transition",
-                attrib={"id": f"composite_{b_idx}", "in": "0", "out": str(out_frames)},
+                attrib={
+                    "id": f"composite{n}",
+                    "in": "0",
+                    "out": str(out_frames),
+                },
             )
-            _set_property(transition, "a_track", str(base_visual))
+            _set_property(transition, "a_track", str(prev))
             _set_property(transition, "b_track", str(b_idx))
-            _set_property(transition, "mlt_service", "qtblend")
-            _set_property(transition, "compositing", "0")  # 0 = normal blend mode
+            _set_property(transition, "mlt_service", "composite")
+            _set_property(transition, "geometry", "0/0:100%x100%")
+            prev = b_idx
 
+    # xml_declaration with encoding="unicode" works on Python 3.8+: emits
+    # `<?xml version='1.0' encoding='utf-8'?>` even though we get a str back.
     return ET.tostring(mlt, encoding="unicode", xml_declaration=True)
 
 
@@ -181,6 +208,17 @@ class _Builder:
             if start_f > cursor:
                 ET.SubElement(playlist, "blank", attrib={"length": str(start_f - cursor)})
                 cursor = start_f
+            elif start_f < cursor:
+                # Overlapping clips on a single track: undefined v1 behavior,
+                # we append concatenated. Logged so the divergence is visible
+                # in Stage E parity reviews. Reviewer Stage B MED #1.
+                logger.warning(
+                    "element %s overlaps previous (start_f=%d cursor=%d)"
+                    " — appending without gap fix",
+                    el.get("id"),
+                    start_f,
+                    cursor,
+                )
             etype = el.get("type")
             if etype not in ("video", "image"):
                 logger.warning("unexpected element type %r in visual track", etype)
@@ -221,6 +259,17 @@ class _Builder:
             if start_f > cursor:
                 ET.SubElement(playlist, "blank", attrib={"length": str(start_f - cursor)})
                 cursor = start_f
+            elif start_f < cursor:
+                # Overlapping clips on a single track: undefined v1 behavior,
+                # we append concatenated. Logged so the divergence is visible
+                # in Stage E parity reviews. Reviewer Stage B MED #1.
+                logger.warning(
+                    "element %s overlaps previous (start_f=%d cursor=%d)"
+                    " — appending without gap fix",
+                    el.get("id"),
+                    start_f,
+                    cursor,
+                )
             resource = self._resolve_audio(el)
             if not resource:
                 continue
@@ -256,6 +305,17 @@ class _Builder:
             if start_f > cursor:
                 ET.SubElement(playlist, "blank", attrib={"length": str(start_f - cursor)})
                 cursor = start_f
+            elif start_f < cursor:
+                # Overlapping clips on a single track: undefined v1 behavior,
+                # we append concatenated. Logged so the divergence is visible
+                # in Stage E parity reviews. Reviewer Stage B MED #1.
+                logger.warning(
+                    "element %s overlaps previous (start_f=%d cursor=%d)"
+                    " — appending without gap fix",
+                    el.get("id"),
+                    start_f,
+                    cursor,
+                )
             producer = self._make_pango_producer(el, duration_f)
             self._apply_visual_filters(producer, el)
             ET.SubElement(
@@ -304,8 +364,14 @@ class _Builder:
             },
         )
         _set_property(producer, "mlt_service", "pango")
-        _set_property(producer, "text", str(el.get("content", "")))
-        _set_property(producer, "family", str(el.get("fontFamily", "Sans")))
+        # Sanitize untrusted text from agent payload: cap length, strip C0
+        # control chars (XML-illegal), and explicitly disable Pango markup
+        # parsing so accidental `<span>` tags in user content render as
+        # literal text rather than tripping the parser
+        # (reviewer Stage B HIGH #3).
+        _set_property(producer, "markup", "0")
+        _set_property(producer, "text", _sanitize_text(str(el.get("content", ""))))
+        _set_property(producer, "family", _sanitize_text(str(el.get("fontFamily", "Sans"))))
         _set_property(producer, "size", str(int(el.get("fontSize", 48))))
         _set_property(producer, "fgcolour", _color_to_mlt(el.get("color", "#ffffff")))
         bg = el.get("background") or {}
@@ -362,16 +428,21 @@ class _Builder:
             )
 
     def _apply_audio_filters(self, producer: ET.Element, el: dict[str, Any]) -> None:
+        # MLT's volume filter takes `gain` in dB by default, NOT linear.
+        # Web UI sends linear 0..1 — convert. Mute floors at -120 dB
+        # rather than 0 dB (which would actually be unity gain — silent
+        # bug if we sent literal "0"). Reviewer Stage B MED #4.
         if el.get("muted"):
             f = ET.SubElement(producer, "filter")
             _set_property(f, "mlt_service", "volume")
-            _set_property(f, "gain", "0")
+            _set_property(f, "gain", "-120")
             return
         volume = float(el.get("volume", 1.0))
-        if volume != 1.0:
-            f = ET.SubElement(producer, "filter")
-            _set_property(f, "mlt_service", "volume")
-            _set_property(f, "gain", str(volume))
+        if abs(volume - 1.0) < 1e-6:
+            return  # default volume — no filter needed
+        f = ET.SubElement(producer, "filter")
+        _set_property(f, "mlt_service", "volume")
+        _set_property(f, "gain", _linear_to_db(volume))
 
     def _resolve_media(self, el: dict[str, Any]) -> str | None:
         media_id = el.get("mediaId")
@@ -431,3 +502,29 @@ def _color_to_mlt(color: str) -> str:
     if c.startswith("#") and len(c) == 9:
         return f"0x{c[1:].upper()}"
     return color
+
+
+_C0_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_MAX_TEXT_LEN = 4096
+
+
+def _sanitize_text(s: str) -> str:
+    """Strip XML-illegal C0 control chars and cap length for safety.
+
+    Pango text may contain anything the agent emitted; an empty string is
+    fine, NUL bytes would trip ElementTree, and a 1MB text would balloon
+    the MLT XML and wedge melt. Reviewer Stage B HIGH #3.
+    """
+    if not s:
+        return ""
+    cleaned = _C0_CONTROL_RE.sub("", s)
+    if len(cleaned) > _MAX_TEXT_LEN:
+        cleaned = cleaned[:_MAX_TEXT_LEN]
+    return cleaned
+
+
+def _linear_to_db(linear: float) -> str:
+    """Convert linear gain (0..1+) to MLT volume's dB units. Floor at -120."""
+    if linear <= 1e-4:
+        return "-120"
+    return f"{20 * math.log10(linear):.2f}"
