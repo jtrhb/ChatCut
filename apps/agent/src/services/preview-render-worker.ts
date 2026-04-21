@@ -24,6 +24,16 @@ import {
 import { pollUntilTerminal, type PollJobOpts } from "./poll-job.js";
 import type { PreviewWriteback } from "./preview-writeback.js";
 
+/**
+ * Minimal interface ObjectStorage needs to satisfy for Stage E.5 signed
+ * URL minting. Declared here so unit tests can stand up a fake without
+ * dragging in the AWS SDK. The production ObjectStorage class
+ * (apps/agent/src/services/object-storage.ts) implements this naturally.
+ */
+export interface PreviewSigner {
+  getSignedUrl(key: string, expiresIn?: number): Promise<string>;
+}
+
 // Reviewer Stage C MED #9 (defense-in-depth log-injection guard): all
 // IDs that flow into log lines pass through this. Server-generated
 // UUIDs always pass; a future code path that lets users supply IDs
@@ -84,7 +94,25 @@ export interface PreviewRenderHandlerDeps {
    * without DATABASE_URL pass `null` and the handler simply logs.
    */
   writeback?: PreviewWriteback | null;
+  /**
+   * Optional signed-URL minter (Stage E.5). When supplied, the worker
+   * mints a 24h presigned GET URL for the rendered preview and includes
+   * it in the `exploration.candidate_ready` event payload, so the web
+   * SSE consumer can drop it straight into the candidate card without
+   * a follow-up GET to the /exploration route. When omitted (no R2 in
+   * boot, unit tests), the event still fires with `storageKey` only
+   * and the web client falls back to the route.
+   */
+  signer?: PreviewSigner | null;
+  /**
+   * Signed URL TTL in seconds. Default 24h, matching the R2 lifecycle
+   * policy on the previews/ prefix — a longer TTL would point at an
+   * already-deleted object.
+   */
+  signedUrlTtlSec?: number;
 }
+
+const DEFAULT_SIGNED_URL_TTL_SEC = 24 * 60 * 60;
 
 export async function handlePreviewRender(
   job: { data: PreviewRenderJobData },
@@ -196,6 +224,28 @@ export async function handlePreviewRender(
           );
         }
       }
+      // Stage E.5: mint a signed URL up front so the web SSE consumer
+      // can populate the candidate card's <video src> without a
+      // follow-up round-trip. If signing fails (R2 hiccup, missing
+      // creds, signer absent in tests/dev), the event still fires with
+      // storageKey only and the web client falls back to the
+      // /exploration route to mint on-demand.
+      let previewUrl: string | undefined;
+      if (deps.signer) {
+        const ttl = deps.signedUrlTtlSec ?? DEFAULT_SIGNED_URL_TTL_SEC;
+        try {
+          previewUrl = await deps.signer.getSignedUrl(
+            final.result.storage_key,
+            ttl,
+          );
+        } catch (signErr) {
+          warn(
+            `[preview-render] signed URL mint failed (web will fall back to /exploration route): ${tag} — ${
+              signErr instanceof Error ? signErr.message : String(signErr)
+            }`,
+          );
+        }
+      }
       // Stage D.2 / Stage E.5: emit candidate_ready so apps/web swaps
       // the card to the playable preview. Note: the final tool.progress
       // (100%) was already emitted synchronously inside pollUntilTerminal
@@ -210,6 +260,7 @@ export async function handlePreviewRender(
               explorationId,
               candidateId,
               storageKey: final.result.storage_key,
+              ...(previewUrl ? { previewUrl } : {}),
             },
           });
         } catch {

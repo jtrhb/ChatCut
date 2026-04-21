@@ -903,6 +903,196 @@ describe("handlePreviewRender", () => {
     });
   });
 
+  // ── Stage E.5: signed URL mint + enriched candidate_ready ────────────
+
+  describe("signed URL mint (E.5)", () => {
+    function fakeSigner(opts?: {
+      url?: string;
+      throws?: Error;
+    }): { getSignedUrl: ReturnType<typeof vi.fn> } {
+      return {
+        getSignedUrl: vi.fn(async () => {
+          if (opts?.throws) throw opts.throws;
+          return opts?.url ?? "https://r2.example/signed-url";
+        }),
+      };
+    }
+
+    it("mints signed URL with default 24h TTL on done + enriches candidate_ready", async () => {
+      const bus = new EventBus();
+      const events: RuntimeEvent[] = [];
+      bus.onAll((e) => events.push(e));
+      const signer = fakeSigner({ url: "https://r2.example/signed?sig=abc" });
+      const client = fakeClient({
+        enqueueResult: { jobId: "j" },
+        statuses: [
+          {
+            job_id: "j",
+            state: "done",
+            progress: 100,
+            result: { storage_key: "previews/exp-1/cand-1.mp4" },
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: PAYLOAD },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          signer,
+          eventBus: bus,
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      expect(signer.getSignedUrl).toHaveBeenCalledWith(
+        "previews/exp-1/cand-1.mp4",
+        24 * 60 * 60,
+      );
+      const ready = events.filter(
+        (e) => e.type === "exploration.candidate_ready",
+      );
+      expect(ready.length).toBe(1);
+      expect(ready[0]!.data).toMatchObject({
+        explorationId: "exp-1",
+        candidateId: "cand-1",
+        storageKey: "previews/exp-1/cand-1.mp4",
+        previewUrl: "https://r2.example/signed?sig=abc",
+      });
+    });
+
+    it("respects custom signedUrlTtlSec", async () => {
+      const signer = fakeSigner();
+      const client = fakeClient({
+        enqueueResult: { jobId: "j" },
+        statuses: [
+          {
+            job_id: "j",
+            state: "done",
+            progress: 100,
+            result: { storage_key: "previews/x/y.mp4" },
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: PAYLOAD },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          signer,
+          signedUrlTtlSec: 3600,
+          eventBus: new EventBus(),
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      expect(signer.getSignedUrl).toHaveBeenCalledWith(
+        "previews/x/y.mp4",
+        3600,
+      );
+    });
+
+    it("does not call signer on failed states", async () => {
+      const signer = fakeSigner();
+      const client = fakeClient({
+        enqueueResult: { jobId: "j" },
+        statuses: [
+          {
+            job_id: "j",
+            state: "failed",
+            progress: 30,
+            error: "boom",
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: PAYLOAD },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          signer,
+          eventBus: new EventBus(),
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      expect(signer.getSignedUrl).not.toHaveBeenCalled();
+    });
+
+    it("emits candidate_ready WITHOUT previewUrl when signing throws", async () => {
+      const bus = new EventBus();
+      const events: RuntimeEvent[] = [];
+      bus.onAll((e) => events.push(e));
+      const warn = vi.fn();
+      const signer = fakeSigner({ throws: new Error("R2 down") });
+      const client = fakeClient({
+        enqueueResult: { jobId: "j" },
+        statuses: [
+          {
+            job_id: "j",
+            state: "done",
+            progress: 100,
+            result: { storage_key: "previews/x/y.mp4" },
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: PAYLOAD },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn,
+          signer,
+          eventBus: bus,
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("signed URL mint failed"),
+      );
+      const ready = events.filter(
+        (e) => e.type === "exploration.candidate_ready",
+      );
+      expect(ready.length).toBe(1);
+      // storageKey present, previewUrl ABSENT — web falls back to route.
+      expect(ready[0]!.data.previewUrl).toBeUndefined();
+      expect(ready[0]!.data.storageKey).toBe("previews/x/y.mp4");
+    });
+
+    it("emits candidate_ready WITHOUT previewUrl when signer is null", async () => {
+      const bus = new EventBus();
+      const events: RuntimeEvent[] = [];
+      bus.onAll((e) => events.push(e));
+      const client = fakeClient({
+        enqueueResult: { jobId: "j" },
+        statuses: [
+          {
+            job_id: "j",
+            state: "done",
+            progress: 100,
+            result: { storage_key: "previews/x/y.mp4" },
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: PAYLOAD },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          signer: null,
+          eventBus: bus,
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      const ready = events.filter(
+        (e) => e.type === "exploration.candidate_ready",
+      );
+      expect(ready.length).toBe(1);
+      expect(ready[0]!.data.previewUrl).toBeUndefined();
+    });
+  });
+
   // Reviewer Stage C MED #9: log-injection defense.
   it("scrubs unsafe characters in IDs from log lines", async () => {
     const log = vi.fn();

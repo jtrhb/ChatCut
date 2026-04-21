@@ -322,8 +322,12 @@ async function main() {
 
 			if (handlePreviewRender) {
 				const handler = handlePreviewRender;
-				// Stage D.3 + E.2: thread EventBus + writeback into worker
-				// deps so the lifecycle (poll → SSE → DB row) is complete.
+				// Stage D.3 + E.2 + E.5: thread EventBus + writeback +
+				// signer (R2 satisfies PreviewSigner via getSignedUrl) so
+				// the candidate_ready event carries a 24h presigned URL
+				// when R2 is configured. With no R2, the event still fires
+				// with storageKey only and the route fallback handles
+				// signing on demand (E.3).
 				jobQueue.registerWorker<
 					import("./services/preview-render-worker.js").PreviewRenderJobData
 				>("preview-render", (job) =>
@@ -331,6 +335,7 @@ async function main() {
 						gpuClient,
 						eventBus,
 						writeback: previewWriteback,
+						signer: r2 ?? null,
 					}),
 				);
 			}
