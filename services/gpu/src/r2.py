@@ -54,14 +54,24 @@ class _S3LikeClient(Protocol):
 
     def get_object(self, *, Bucket: str, Key: str) -> dict: ...
 
+    def head_object(self, *, Bucket: str, Key: str) -> dict: ...
+
 
 def _build_client(cfg: R2Config) -> _S3LikeClient:
+    # Reviewer Stage C MED #6: explicit timeouts so a slow R2 read can't
+    # consume the entire Modal envelope. Defaults are 60s connect + 60s
+    # read; we tighten to 10 + 20 so the 300s _do_render budget retains
+    # headroom for melt + asset fetches even if R2 is throttling.
     return boto3.client(
         "s3",
         endpoint_url=cfg.endpoint_url,
         aws_access_key_id=cfg.access_key_id,
         aws_secret_access_key=cfg.secret_access_key,
-        config=Config(signature_version="s3v4"),
+        config=Config(
+            signature_version="s3v4",
+            connect_timeout=10,
+            read_timeout=20,
+        ),
     )
 
 
@@ -100,13 +110,29 @@ class R2Uploader:
         """
         self._client.download_file(self._cfg.bucket, key, dest_path)
 
-    def download_bytes(self, *, key: str) -> bytes:
+    def download_bytes(
+        self,
+        *,
+        key: str,
+        max_bytes: int = 50 * 1024 * 1024,
+    ) -> bytes:
         """Download an R2 object's contents as in-memory bytes.
 
         Used by Stage C.2 to fetch the candidate's serialized snapshot
         without writing a temp file. For larger blobs (source clips)
         prefer download_to_path which streams to disk.
+
+        Reviewer Stage C MED #4: HEAD-checks ContentLength against
+        max_bytes (default 50 MiB) before fetching, so a hostile or
+        buggy snapshot can't OOM-kill the Modal container. JSON
+        timelines for any plausible project sit well under 5 MiB.
         """
+        head = self._client.head_object(Bucket=self._cfg.bucket, Key=key)
+        size = int(head.get("ContentLength", 0))
+        if size > max_bytes:
+            raise ValueError(
+                f"object {key!r} too large: {size} bytes > {max_bytes} bytes cap"
+            )
         response = self._client.get_object(Bucket=self._cfg.bucket, Key=key)
         return response["Body"].read()
 

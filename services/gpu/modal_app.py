@@ -153,14 +153,32 @@ def _do_render(
     import json
 
     from src.handlers import do_render_body
+    from src.jobs import JobState, mark_failed
     from src.r2 import R2Config, R2Uploader
     from src.render import RenderOpts
     from src.render import render_timeline as _render_timeline
 
     r2 = R2Uploader(R2Config.from_env())
 
-    snapshot_bytes = r2.download_bytes(key=snapshot_storage_key)
-    timeline = json.loads(snapshot_bytes)
+    # Reviewer Stage C MED #5: wrap the snapshot fetch + parse so a
+    # NoSuchKey, oversize-rejection (ValueError from MED #4 cap),
+    # connection drop, or malformed JSON propagates a clean failed
+    # state to the agent's poll loop instead of escaping the spawned
+    # function and leaving the job stuck on `running` until the agent
+    # times out at 90s.
+    try:
+        snapshot_bytes = r2.download_bytes(key=snapshot_storage_key)
+        timeline = json.loads(snapshot_bytes)
+    except Exception as fetch_err:
+        try:
+            s = JobState.model_validate(job_dict[job_id])
+            job_dict[job_id] = mark_failed(
+                s, f"snapshot fetch failed: {fetch_err}"
+            ).model_dump()
+        except Exception:
+            # Eviction race: nothing we can do. Agent's 90s poll cap recovers.
+            pass
+        return
 
     def render_fn(state: dict[str, Any]) -> bytes:
         return _render_timeline(

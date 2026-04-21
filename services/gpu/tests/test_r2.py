@@ -32,11 +32,14 @@ class TestPreviewStorageKey:
 
 
 class _FakeS3Client:
-    def __init__(self, get_object_body: bytes = b""):
+    def __init__(self, get_object_body: bytes = b"", head_size: int | None = None):
         self.calls: list[dict] = []
         self.downloads: list[dict] = []
         self.get_object_calls: list[dict] = []
+        self.head_object_calls: list[dict] = []
         self._get_object_body = get_object_body
+        # If head_size is None, default to len(body) so HEAD matches the body
+        self._head_size = head_size if head_size is not None else len(get_object_body)
 
     def put_object(self, *, Bucket, Key, Body, ContentType):
         self.calls.append(
@@ -58,6 +61,10 @@ class _FakeS3Client:
                 return self._b
 
         return {"Body": _Body(self._get_object_body)}
+
+    def head_object(self, *, Bucket, Key):
+        self.head_object_calls.append({"Bucket": Bucket, "Key": Key})
+        return {"ContentLength": self._head_size}
 
 
 def _cfg() -> R2Config:
@@ -122,6 +129,44 @@ class TestR2Uploader:
         assert client.get_object_calls == [
             {"Bucket": "chatcut", "Key": "explorations/exp1/snap.json"}
         ]
+
+    def test_download_bytes_head_checks_size_first(self):
+        # Reviewer Stage C MED #4: HEAD before GET so we don't load
+        # huge objects into memory.
+        client = _FakeS3Client(get_object_body=b"abc")
+        uploader = R2Uploader(_cfg(), client=client)
+        uploader.download_bytes(key="explorations/x/snap.json")
+        assert client.head_object_calls == [
+            {"Bucket": "chatcut", "Key": "explorations/x/snap.json"}
+        ]
+
+    def test_download_bytes_rejects_oversize_object(self):
+        # head_size set to 100MB, max_bytes default is 50MB
+        client = _FakeS3Client(
+            get_object_body=b"x" * 100,
+            head_size=100 * 1024 * 1024,
+        )
+        uploader = R2Uploader(_cfg(), client=client)
+        with pytest.raises(ValueError, match="too large"):
+            uploader.download_bytes(key="explorations/big/snap.json")
+        # And critically: get_object was NOT called (HEAD-then-skip)
+        assert client.get_object_calls == []
+
+    def test_download_bytes_respects_custom_max_bytes(self):
+        client = _FakeS3Client(get_object_body=b"x" * 100, head_size=200)
+        uploader = R2Uploader(_cfg(), client=client)
+        with pytest.raises(ValueError, match="too large"):
+            uploader.download_bytes(
+                key="explorations/x/snap.json", max_bytes=150
+            )
+        assert client.get_object_calls == []
+
+    def test_download_bytes_accepts_zero_byte_object(self):
+        # Edge: head_size=0 (empty object) should NOT raise
+        client = _FakeS3Client(get_object_body=b"", head_size=0)
+        uploader = R2Uploader(_cfg(), client=client)
+        result = uploader.download_bytes(key="explorations/empty.json")
+        assert result == b""
 
 
 class TestR2ConfigFromEnv:
