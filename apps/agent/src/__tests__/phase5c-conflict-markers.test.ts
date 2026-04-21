@@ -395,10 +395,15 @@ describe("Phase 5c — MemoryLoader.loadConflictMarkers", () => {
       "not a valid frontmatter file at all",
     );
 
+    // Phase 5c NEW-4: silence the LOW-2 warn so test stdout stays clean.
+    // The dedicated "LOW-2: per-file parse failure logs a warn" test below
+    // is the one that asserts the warn behavior.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const loader = new MemoryLoader(store);
     const markers = await loader.loadConflictMarkers();
     expect(markers).toHaveLength(1);
     expect(markers[0].reason).toBe("valid one");
+    warn.mockRestore();
   });
 });
 
