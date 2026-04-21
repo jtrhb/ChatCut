@@ -7,7 +7,7 @@ exceptions to HTTPException responses.
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from typing import Any, Protocol
 
 from src.auth import verify_api_key
@@ -106,9 +106,14 @@ def do_render_body(
     exploration_id: str,
     candidate_id: str,
     timeline: dict[str, Any],
-    body_bytes: bytes = PLACEHOLDER_MP4_BYTES,
+    render_fn: Callable[[dict[str, Any]], bytes] | None = None,
 ) -> None:
-    """Stage A render body. Lives here (not in modal_app) for testability.
+    """Stage A/B render body. Lives here (not in modal_app) for testability.
+
+    `render_fn(timeline) → bytes` is the actual render. Defaults to a
+    closure that returns PLACEHOLDER_MP4_BYTES so Stage A tests and
+    legacy callers keep working. modal_app wires render.render_timeline
+    (curried with the R2 downloader) for real renders.
 
     On success: writes done state with the R2 storage key.
     On render failure: best-effort writes failed state. If the failed-
@@ -119,21 +124,21 @@ def do_render_body(
     If the Dict entry for job_id is missing entirely (TTL eviction, race),
     the function returns without writing — the agent will treat the
     missing entry as failure and retry via pg-boss.
-
-    Stage B replaces body_bytes with the real renderer output and inserts
-    its own progress milestones.
     """
+    actual_render = render_fn or (lambda _: PLACEHOLDER_MP4_BYTES)
     try:
         s = JobState.model_validate(job_dict[job_id])
-        # "Started" signal only. Stage B owns the real progress vocabulary;
-        # emitting a fake 50% here would train the agent on a misleading
-        # cadence that Stage B silently changes.
+        # "Started" signal only. The render_fn owns its own progress
+        # milestones (Stage B's MLT path emits at 10/30/60/90 via Modal
+        # Dict updates done from inside render_timeline).
         s = update_progress(s, 1)
         try:
             job_dict[job_id] = s.model_dump()
         except Exception:
             # Intermediate progress is non-critical; render still proceeds.
             pass
+
+        body_bytes = actual_render(timeline)
 
         key = uploader.upload_preview(
             exploration_id=exploration_id,

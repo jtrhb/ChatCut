@@ -8,10 +8,12 @@ responses and wires Modal-native infrastructure (Image, Secret, Dict,
 Deploy:    modal deploy modal_app.py
 Local:     modal serve modal_app.py
 
-Stage A status: render_preview produces a synthetic 1KB MP4 placeholder
-(stage acceptance is wire shape, not playable bytes). Stage B replaces
-the body_bytes argument to do_render_body with the real render pipeline
-per Q1 (chromium-in-modal).
+Stage B status (post-MLT pivot, Q1d): render_preview produces a real
+playable MP4 via render.render_timeline (translator → asset fetcher →
+melt subprocess). Stage A's placeholder bytes survive as the default
+when handlers.do_render_body is called with render_fn=None — that path
+is exercised only by tests now; production deploys wire the real
+render_fn below.
 """
 
 from __future__ import annotations
@@ -36,7 +38,14 @@ app = modal.App(APP_NAME)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("ffmpeg")
+    .apt_install(
+        # Stage B MLT pivot — see services/gpu/MODAL_IMAGE.md for lineage
+        "ffmpeg",
+        "melt",
+        "libmlt-7",
+        "libmlt-data",
+        "frei0r-plugins",
+    )
     .pip_install(
         "boto3>=1.35",
         "pydantic>=2.9",
@@ -113,24 +122,43 @@ def render_preview(payload: dict[str, Any], request: Request) -> dict[str, str]:
     return result
 
 
-@app.function(image=image, gpu="T4", secrets=[r2_secret], timeout=120)
+@app.function(image=image, secrets=[r2_secret], timeout=120)
 def _do_render(
     job_id: str,
     exploration_id: str,
     candidate_id: str,
     timeline: dict[str, Any],
 ) -> None:
-    """Background render. Body in handlers.do_render_body for testability."""
+    """Background render. Body in handlers.do_render_body for testability.
+
+    GPU is currently not declared (no `gpu=` arg) because the Stage B
+    Modal image ships stock Debian ffmpeg, which lacks NVENC support.
+    `render_timeline(use_gpu=False)` skips the h264_nvenc attempt
+    accordingly. When MODAL_IMAGE.md gets a CUDA-ffmpeg variant,
+    re-add `gpu="T4"` here and flip `use_gpu=True`.
+    """
     from src.handlers import do_render_body
     from src.r2 import R2Config, R2Uploader
+    from src.render import RenderOpts
+    from src.render import render_timeline as _render_timeline
+
+    r2 = R2Uploader(R2Config.from_env())
+
+    def render_fn(state: dict[str, Any]) -> bytes:
+        return _render_timeline(
+            state,
+            downloader=r2,
+            opts=RenderOpts(use_gpu=False),
+        )
 
     do_render_body(
-        uploader=R2Uploader(R2Config.from_env()),
+        uploader=r2,
         job_dict=job_dict,
         job_id=job_id,
         exploration_id=exploration_id,
         candidate_id=candidate_id,
         timeline=timeline,
+        render_fn=render_fn,
     )
 
 

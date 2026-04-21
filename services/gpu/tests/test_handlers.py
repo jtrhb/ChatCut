@@ -194,7 +194,7 @@ class TestDoRenderBody:
         assert store == {}
         assert uploader.calls == []
 
-    def test_uploads_placeholder_bytes_by_default(self):
+    def test_uploads_placeholder_bytes_when_no_render_fn(self):
         store = self._seed()
         uploader = _FakeUploader()
         do_render_body(
@@ -207,7 +207,7 @@ class TestDoRenderBody:
         )
         assert uploader.calls[0]["body"] == PLACEHOLDER_MP4_BYTES
 
-    def test_accepts_custom_body_bytes_for_stage_b(self):
+    def test_accepts_render_fn_for_stage_b(self):
         store = self._seed()
         uploader = _FakeUploader()
         custom = b"REAL MP4 BYTES"
@@ -217,10 +217,43 @@ class TestDoRenderBody:
             job_id="j1",
             exploration_id="exp",
             candidate_id="cand",
-            timeline={},
-            body_bytes=custom,
+            timeline={"foo": "bar"},
+            render_fn=lambda _: custom,
         )
         assert uploader.calls[0]["body"] == custom
+
+    def test_render_fn_receives_timeline(self):
+        store = self._seed()
+        captured: list = []
+
+        def render_fn(state):
+            captured.append(state)
+            return b"OUT"
+
+        do_render_body(
+            uploader=_FakeUploader(),
+            job_dict=store,
+            job_id="j1",
+            exploration_id="exp",
+            candidate_id="cand",
+            timeline={"scenes": [{"id": "s1"}]},
+            render_fn=render_fn,
+        )
+        assert captured == [{"scenes": [{"id": "s1"}]}]
+
+    def test_render_fn_failure_marks_job_failed(self):
+        store = self._seed()
+        do_render_body(
+            uploader=_FakeUploader(),
+            job_dict=store,
+            job_id="j1",
+            exploration_id="exp",
+            candidate_id="cand",
+            timeline={},
+            render_fn=lambda _: (_ for _ in ()).throw(RuntimeError("render boom")),
+        )
+        assert store["j1"]["state"] == "failed"
+        assert "render boom" in store["j1"]["error"]
 
 
 class TestPlaceholderBytes:

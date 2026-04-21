@@ -44,11 +44,46 @@ unused at this stage (placeholder bytes don't need encoding).
 
 ---
 
-## (next) Stage B — MLT pivot
+## 2026-04-21 — Stage B MLT integration (commit pending)
 
-Pending — will land in Stage B.4 commit. Adds:
-- `apt_install("melt", "libmlt++7", "libmlt-data", "frei0r-plugins")` for the
-  MLT NLE engine + standard plugin set
-- ffmpeg-cuda variant (replacing the plain `ffmpeg` apt) for `h264_nvenc`
-  hardware encoding via melt's avformat consumer
-- Estimated +100MB; reviewer to confirm actual size delta on first deploy
+**Image:**
+```python
+modal.Image.debian_slim(python_version="3.12")
+    .apt_install(
+        "ffmpeg",
+        "melt",
+        "libmlt-7",
+        "libmlt-data",
+        "frei0r-plugins",
+    )
+    .pip_install(
+        "boto3>=1.35",
+        "pydantic>=2.9",
+        "fastapi[standard]>=0.115",
+    )
+    .add_local_python_source("src")
+```
+
+**What changed:** added 4 apt packages for the MLT NLE engine:
+- `melt` — CLI used by `render.render_timeline` to render MLT XML → MP4
+- `libmlt-7` — runtime library (Debian bookworm package name)
+- `libmlt-data` — MLT data files (presets, schemas)
+- `frei0r-plugins` — standard MLT plugin set (filters, transitions)
+
+**Why:** Stage B.5 wires the MLT-based render pipeline. `_do_render`
+now invokes `render.render_timeline` which writes MLT XML and shells
+out to `melt`. Without these packages the subprocess would 127.
+
+**Approx size delta:** ~+100MB estimated (melt + libmlt + frei0r ≈ 50MB,
+shared deps ≈ 50MB). Reviewer to confirm against first staging deploy.
+
+**GPU:** Still none. Stock Debian ffmpeg lacks NVENC support (it's not
+built with `--enable-nvenc --enable-cuda`). `_do_render` currently sets
+`use_gpu=False` in RenderOpts so the h264_nvenc retry is skipped, going
+straight to libx264 software encode. Acceptable for v1 preview-grade
+rendering (5–10s clips at 720p encode in <8s on CPU).
+
+**Next image change (deferred):** swap base to `nvcr.io/nvidia/cuda` +
+custom-built ffmpeg with NVENC, then re-add `gpu="T4"` to the
+`@app.function(...)` for `_do_render` and flip `use_gpu=True`. Tracked
+as a Stage F backlog item; gives ~10× encode speedup.
