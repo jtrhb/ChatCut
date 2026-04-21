@@ -32,6 +32,7 @@ function makeJobQueueMock() {
 function makeObjectStorageMock() {
   return {
     upload: vi.fn(async () => "explorations/snapshot-key"),
+    delete: vi.fn(async (_key: string) => {}),
   };
 }
 
@@ -208,6 +209,34 @@ describe("ExplorationEngine", () => {
       expect(payload).toHaveProperty("timelineSnapshot");
       expect(payload.timelineSnapshot).toBe(BASE_PARAMS.timelineSnapshot);
     }
+  });
+
+  // Reviewer Stage C HIGH #1: orphan snapshot cleanup when enqueue fails.
+
+  it("deletes uploaded snapshot if enqueue throws (no orphan)", async () => {
+    jobQueue.enqueue.mockRejectedValueOnce(new Error("queue down"));
+    await expect(engine.explore(BASE_PARAMS)).rejects.toThrow("queue down");
+    expect(objectStorage.delete).toHaveBeenCalledWith(
+      "explorations/snapshot-key",
+    );
+  });
+
+  it("propagates the original enqueue error even if delete also throws", async () => {
+    jobQueue.enqueue.mockRejectedValueOnce(new Error("queue down"));
+    objectStorage.delete.mockRejectedValueOnce(new Error("R2 down"));
+    // Should still surface the ORIGINAL error, not the cleanup error
+    await expect(engine.explore(BASE_PARAMS)).rejects.toThrow("queue down");
+  });
+
+  it("does not call delete when enqueue succeeds", async () => {
+    await engine.explore(BASE_PARAMS);
+    expect(objectStorage.delete).not.toHaveBeenCalled();
+  });
+
+  it("does not call delete when upload itself fails (nothing to clean up)", async () => {
+    objectStorage.upload.mockRejectedValueOnce(new Error("R2 upload failed"));
+    await expect(engine.explore(BASE_PARAMS)).rejects.toThrow("R2 upload failed");
+    expect(objectStorage.delete).not.toHaveBeenCalled();
   });
 
   // --- State machine ---

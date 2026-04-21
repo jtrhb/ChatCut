@@ -151,27 +151,53 @@ export class ExplorationEngine {
       // preview-render job payload can carry just the key — the GPU
       // renderer fetches the snapshot from R2 instead of receiving a
       // multi-MB inline copy.
+      //
+      // Reviewer Stage C HIGH #1: wrap (upload → enqueue) in a try/catch.
+      // If the enqueue fails after a successful upload, best-effort
+      // delete the orphan snapshot before propagating. The
+      // `explorations/` prefix has no R2 lifecycle policy (preview MP4s
+      // do, snapshots don't), so without this every queue blip leaks
+      // a JSON object indefinitely.
       const serialized = clone.serialize();
-      const snapshotStorageKey = await this.objectStorage.upload(
-        Buffer.from(JSON.stringify(serialized)),
-        {
-          contentType: "application/json",
-          prefix: `explorations/${explorationId}`,
-          extension: ".json",
-        }
-      );
+      let snapshotStorageKey: string | undefined;
+      try {
+        snapshotStorageKey = await this.objectStorage.upload(
+          Buffer.from(JSON.stringify(serialized)),
+          {
+            contentType: "application/json",
+            prefix: `explorations/${explorationId}`,
+            extension: ".json",
+          }
+        );
 
-      // 5. Enqueue preview-render job. snapshotStorageKey is the new
-      // canonical reference; timelineSnapshot is kept for backwards-
-      // compat with the legacy worker path until Stage C.5 rewires it.
-      await this.jobQueue.enqueue("preview-render", {
-        explorationId,
-        candidateId,
-        label: skeleton.label,
-        commands: skeleton.commands,
-        snapshotStorageKey,
-        timelineSnapshot: params.timelineSnapshot,
-      });
+        // 5. Enqueue preview-render job. snapshotStorageKey is the new
+        // canonical reference; timelineSnapshot is kept for backwards-
+        // compat with the legacy worker path until Stage C.5 rewires it.
+        await this.jobQueue.enqueue("preview-render", {
+          explorationId,
+          candidateId,
+          label: skeleton.label,
+          commands: skeleton.commands,
+          snapshotStorageKey,
+          timelineSnapshot: params.timelineSnapshot,
+        });
+      } catch (err) {
+        if (snapshotStorageKey) {
+          // Best-effort delete; if THIS fails too, accept the orphan
+          // — the original error is still what we propagate.
+          try {
+            const objStore = this.objectStorage as {
+              delete?: (key: string) => Promise<void>;
+            };
+            if (typeof objStore.delete === "function") {
+              await objStore.delete(snapshotStorageKey);
+            }
+          } catch {
+            // swallowed — original error wins
+          }
+        }
+        throw err;
+      }
 
       const result: CandidateResult = {
         candidateId,

@@ -287,14 +287,31 @@ async function main() {
 
 			// Worker handler extracted to src/services/preview-render-worker.ts
 			// for unit-testability of the full enqueue → poll → log lifecycle.
-			const { handlePreviewRender } = await import(
-				"./services/preview-render-worker.js"
-			);
-			jobQueue.registerWorker<
-				import("./services/preview-render-worker.js").PreviewRenderJobData
-			>("preview-render", (job) =>
-				handlePreviewRender(job, { gpuClient }),
-			);
+			//
+			// Reviewer Stage C MED #10: dynamic-import failure (build artifact
+			// missing, typo) used to crash the entire boot. Wrap and degrade
+			// gracefully — preview rendering disabled, but other subsystems
+			// (chat, changeset, memory) still come up.
+			let handlePreviewRender:
+				| typeof import("./services/preview-render-worker.js").handlePreviewRender
+				| null = null;
+			try {
+				({ handlePreviewRender } = await import(
+					"./services/preview-render-worker.js"
+				));
+			} catch (err) {
+				console.warn(
+					`[boot] preview-render-worker import failed; preview rendering disabled. Error: ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+				);
+			}
+			if (handlePreviewRender) {
+				const handler = handlePreviewRender;
+				jobQueue.registerWorker<
+					import("./services/preview-render-worker.js").PreviewRenderJobData
+				>("preview-render", (job) => handler(job, { gpuClient }));
+			}
 
 			if (r2) {
 				const { ExplorationEngine } = await import(
