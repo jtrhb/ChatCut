@@ -6,6 +6,11 @@ Source: `.omc/plans/wiring-audit-remediation.md` Phase 3 acceptance criteria. Th
 
 Date: 2026-04-21
 
+**Status:**
+- Stage A — CLOSED. 4 commits on `main` (e335a39f, b45f137f, f00835d5, 58cd2ca8). 47 unit tests, ruff clean, reviewer APPROVED.
+- Stage B — IN PROGRESS, with **second pivot to MLT** (server-side multi-track NLE engine; see §0.b).
+- Stages C–F — pending.
+
 ---
 
 ## 0. Why this changed (vs prior plan)
@@ -20,6 +25,22 @@ The prior plan (commit 33587efc landed the scaffold) wired a chromium pool insid
 Modal credit availability (4× B200 + L4/A100 tiers) plus the fact that ChatCut needs GPU across multiple workloads (preview render, video generation, vision analysis, transcription) makes a dedicated Python GPU service the right primitive. Preview render becomes one workload of four; the others stub now and fill in during Phase 5+.
 
 The `HeadlessRenderer` scaffold (`apps/agent/src/services/headless-renderer.ts`) is **deprecated by this plan**. Stage F removes it cleanly.
+
+### 0.b Second pivot (2026-04-21) — MLT instead of chromium-in-Modal
+
+Stage A leaned Q1c (chromium-in-Modal reusing the apps/web SceneExporter). During Stage B planning we questioned whether we needed chromium at all. After confirming compositing matters and the exporter must be fast, we surveyed open-source options and chose **MLT Framework** (`libmlt` / `melt`) — the multi-track NLE engine behind Shotcut, Kdenlive, and Flowblade.
+
+Why MLT:
+- 20+ years mature, proven in 3 production OSS NLEs
+- Multi-track compositing, transitions, filters, audio mixing built-in
+- GPU acceleration via Movit (OpenGL renderer) + h264_nvenc (ffmpeg backend)
+- Python bindings (`python3-mlt`) and CLI (`melt`)
+- Container weight: ~100MB (vs ~500MB for chromium)
+- We write a thin `SerializedEditorState → MLT XML` translator (~200 LOC) and let melt do the rendering
+
+Q1 closes with **Q1d** (see §6) and supersedes the prior Q1a/Q1b/Q1c options.
+
+Asset URL resolution (`mediaId` → R2 URL) and the candidate snapshot's storage_key in the job payload are Stage C concerns, surfaced from the B.0 spike.
 
 ---
 
@@ -111,20 +132,22 @@ Each stage independently shippable + reviewable. Same per-phase rhythm as Phase 
 
 **Acceptance**: `bun run gpu:serve` (Modal dev mode) yields a live URL. `curl -H "X-API-Key: $GPU_SERVICE_API_KEY" -X POST $URL/render_preview -d '{"explorationId":"x","candidateId":"y","timeline":{}}'` returns `{jobId: "..."}`. Polling `/status/...` cycles `queued → running → done` and the result includes a real (placeholder) R2 storage_key.
 
-### Stage B — `render_preview` real implementation (1.5d)
+### Stage B — `render_preview` via MLT (3d, increased from 1.5d)
 
-**Goal**: render_preview produces a playable MP4 from a real timeline snapshot. Implementation chosen per Q1 (see §6).
+**Goal**: render_preview produces a playable MP4 from a real `SerializedEditorState`. v1 feature scope (from B.0 spike): multi-track video compositing, hard cuts, single audio track, static text overlays, static transforms. Out-of-scope for v1: animation keyframes (use first-keyframe value), effect tracks, sticker tracks, crossfade transitions, BlendMode beyond normal.
 
 | # | Task | Location |
 |---|---|---|
-| B.1 | `services/gpu/src/render.py` — `render_timeline(timeline_json) → bytes` per the Q1 decision (chromium-in-modal vs ffmpeg-from-json) | new |
-| B.2 | Wire B.1 into `render_preview` function in `modal_app.py` — replace synthetic bytes with real call | edit |
-| B.3 | Progress reporting: render emits 10/30/60/90 milestones via Dict updates so /status returns `progress: number` | edit |
-| B.4 | GPU encoding: ffmpeg subprocess uses `h264_nvenc` when `gpu` available, falls back to `libx264` (for `modal serve` local dev without GPU) | edit |
-| B.5 | Pytest with a sample timeline fixture: assert produced bytes parse as MP4 (mediainfo or ffprobe) | new test |
-| B.6 | Smoke: deploy to Modal staging, render the fixture, download from R2, play in QuickTime/VLC | manual |
+| B.0 | Plan rewrite + MODAL_IMAGE.md seed (Stage B preamble) | docs |
+| B.1 | `services/gpu/src/timeline_to_mlt.py` — pure-Python `SerializedEditorState → MLT XML` translator covering v1 features | new |
+| B.2 | TDD fixtures: 4 sample SerializedEditorStates (single clip, multi-clip cut, multi-track composite, text overlay). Assert valid MLT XML. | new test |
+| B.3 | `services/gpu/src/render.py` — asset fetcher (R2 → local /tmp) + `render_timeline(state) → bytes` orchestrator: calls B.1, downloads assets, runs `melt timeline.xml -consumer avformat:... vcodec=h264_nvenc`, reads result | new |
+| B.4 | Modal image rebuild: add `apt_install("melt", "libmlt++7", "libmlt-data", "frei0r-plugins")` + ffmpeg-cuda variant. CPU `libx264` fallback for local dev. Append MODAL_IMAGE.md entry. | edit modal_app.py + MODAL_IMAGE.md |
+| B.5 | Wire `render.render_timeline` into `handlers.do_render_body` — replace placeholder `body_bytes` arg | edit handlers.py + modal_app.py |
+| B.6 | E2E test: real fixture → MLT XML → melt subprocess → MP4 → ffprobe asserts duration/codec/dimensions | new test |
+| B.7 | Smoke: deploy to Modal staging, render the fixture, download from R2, play in QuickTime/VLC | manual |
 
-**Acceptance**: real timeline JSON → 5–10s playable MP4 in R2. Render finishes in <8s on Modal T4 for a 5s clip.
+**Acceptance**: real `SerializedEditorState` (multi-track composite with text overlay) → 5–10s playable MP4 in R2. Render <8s on Modal T4 for a 5s clip. Out-of-scope features either silently degrade (animations → first-keyframe value) or get logged as "skipped" (effect/sticker tracks).
 
 ### Stage C — Agent-side dispatcher (0.75d)
 
@@ -188,21 +211,21 @@ Each stage independently shippable + reviewable. Same per-phase rhythm as Phase 
 ## 4. Estimate
 
 - Stage A: 1d
-- Stage B: 1.5d (Q1 dependent — could be 2d if Q1b)
+- Stage B: 3d (MLT translator + asset fetcher + image rebuild + e2e tests; was 1.5d before MLT pivot)
 - Stage C: 0.75d
 - Stage D: 0.5d
 - Stage E: 0.75d
 - Stage F: 0.5d
 
-**Total: ~5d** (was 3.5d for the in-agent plan; the +1.5d buys cross-phase GPU plumbing for vision/generation/transcription)
+**Total: ~6.5d** (Stage B grew +1.5d for MLT translator + image rebuild; trade-off is multi-track NLE compositing without reinventing it)
 
 ---
 
 ## 5. Risks
 
 - **R1: Modal cold-start.** First render after idle hits container cold-start (~10–30s for chromium image). Mitigation: `min_containers=1` for `render_preview` (~$5/mo per kept-warm container); $0 for stubbed workloads.
-- **R2: SceneExporter parity (Q1a path).** mediabunny + SceneExporter currently lives in apps/web. Pulling it into a chromium-in-Modal container means bundling apps/web's renderer code as a static asset. Risk: Next.js-coupled imports. Mitigation: spike B.1 first; if Next coupling blocks, escalate to Q1b.
-- **R3: ffmpeg filtergraph parity (Q1b path).** Re-implementing SceneExporter's compositing/transitions/effects in pure ffmpeg is weeks of work + parity testing per project type. Mitigation: surface as Q1, lean Q1c (ship Q1a, defer Q1b).
+- **R2: MLT XML translator parity (Q1d path).** `SerializedEditorState` has features MLT doesn't natively map (our pluggable `EffectDefinition` system, animation keyframes with arbitrary interpolation curves, custom BlendModes). v1 picks a strict subset (cuts + multi-track composite + static text + static transforms); anything outside silently degrades or is skipped. Mitigation: each non-v1 feature gets an explicit "skipped/degraded" log line so divergence between in-editor preview and rendered preview is observable. Stage E reviews divergence reports before declaring Phase 3 closed.
+- **R3: Modal image grows past container disk quota.** Adding melt + libmlt + frei0r + ffmpeg-cuda + (later) torch/whisper risks hitting Modal's image limits. Mitigation: `services/gpu/MODAL_IMAGE.md` tracks the lineage and recorded size at each change; if approaching limits, split per-workload images (render uses one image, generate uses another).
 - **R4: Modal Dict TTL race.** If Dict TTLs the job_state while the agent is mid-poll, the worker sees a missing entry and must distinguish "job done long ago" from "job lost". Mitigation: TTL=1h (longer than any render), and worker treats missing-entry as "consult R2 for the storage_key directly before giving up".
 - **R5: Auth secret rotation.** Shared API key in env. Rotation requires coordinated deploys. Mitigation: support two valid keys at once during rotation window (Modal-side accepts either); document the rotation procedure.
 - **R6: R2 egress.** Modal pulls source assets from R2 (multi-MB clips) and pushes MP4 back. Cost: ~$0.01/GB egress between Modal (AWS) and Cloudflare (R2 has no egress fee). For 16 candidates × 50MB each ≈ $0.008 per fan-out. Acceptable.
@@ -213,11 +236,12 @@ Each stage independently shippable + reviewable. Same per-phase rhythm as Phase 
 
 Same defaults-with-explicit-confirmation pattern as the prior plan. Lean noted; call out anything to override.
 
-### Q1. `render_preview` rendering approach inside Modal
+### Q1. `render_preview` rendering approach inside Modal — CLOSED 2026-04-21
 
-- **Q1a**: Chromium + Playwright + the existing `apps/web/src/services/renderer/` SceneExporter pipeline, packaged as a static bundle inside the Modal container. Reuses 100% of existing renderer code; container is heavier (~500MB chromium).
-- Q1b: Pure ffmpeg subprocess with filtergraph derived from timeline JSON. Lighter container, faster runtime, but requires re-implementing SceneExporter's compositing in ffmpeg filter language — weeks of work + parity testing.
-- **Q1c (Lean)**: Ship Q1a now to unblock the audit. Document Q1b as a future optimization on the backlog with explicit cost-trigger ("when monthly Modal spend > $X, revisit").
+- ~~Q1a: Chromium + Playwright + apps/web SceneExporter (~500MB)~~
+- ~~Q1b: Pure ffmpeg `filter_complex` (weeks to write a compositing compiler)~~
+- ~~Q1c: Ship Q1a now, defer Q1b~~
+- **Q1d (CHOSEN)**: MLT Framework (`libmlt` / `melt`) — server-side multi-track NLE engine used by Shotcut, Kdenlive, and Flowblade. We write a `SerializedEditorState → MLT XML` translator (~200 LOC) and let melt do the rendering with Movit GPU compositing + h264_nvenc encoding. Container ~100MB. v1 feature scope per §0.b. B.0 spike found the timeline shape, lineage tracked in `MODAL_IMAGE.md`.
 
 ### Q2. GPU tier for `render_preview`
 
