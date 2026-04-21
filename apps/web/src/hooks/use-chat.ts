@@ -111,6 +111,11 @@ export interface UseChatReturn {
  * exploration and patches the matching candidate's previewUrl. Updates
  * are idempotent: a second event for the same candidate just overwrites
  * the url (e.g. fallback fetch finishes after a fresh URL came through).
+ *
+ * Reviewer Stage E NIT-1: skip the spread if no message contains the
+ * exploration. Avoids allocating a fresh array per SSE event when the
+ * payload is irrelevant to the current chat (e.g. session id matches
+ * but the message has been pruned out of view).
  */
 function applyPreviewUrl(
 	setMessages: Dispatch<SetStateAction<Message[]>>,
@@ -118,8 +123,12 @@ function applyPreviewUrl(
 	candidateId: string,
 	previewUrl: string,
 ): void {
-	setMessages((prev) =>
-		prev.map((m) => {
+	setMessages((prev) => {
+		const owner = prev.find(
+			(m) => m.exploration?.explorationId === explorationId,
+		);
+		if (!owner) return prev;
+		return prev.map((m) => {
 			if (m.exploration?.explorationId !== explorationId) return m;
 			const nextCandidates = m.exploration.candidates.map((c) =>
 				c.candidateId === candidateId ? { ...c, previewUrl } : c,
@@ -128,8 +137,62 @@ function applyPreviewUrl(
 				...m,
 				exploration: { ...m.exploration, candidates: nextCandidates },
 			};
-		}),
-	);
+		});
+	});
+}
+
+/**
+ * Reviewer Stage E MED-3: a `candidate_ready` event without `previewUrl`
+ * triggers a fallback fetch. If a SECOND event with `previewUrl` arrives
+ * before the fetch settles (rare but possible: pg-boss retry that
+ * succeeds after the first reported state), the fetch overwrites the
+ * fresh URL. Guards: in-flight Set dedups concurrent firings; the
+ * functional setState inside `then()` re-checks `previewUrl` before
+ * applying so a fast-path event that landed during the fetch is never
+ * stomped.
+ */
+const inFlightFallbacks = new Set<string>();
+function fallbackFetchPreviewUrl(
+	setMessages: Dispatch<SetStateAction<Message[]>>,
+	agentUrl: string,
+	explorationId: string,
+	candidateId: string,
+): void {
+	const key = `${explorationId}:${candidateId}`;
+	if (inFlightFallbacks.has(key)) return;
+	inFlightFallbacks.add(key);
+	fetch(
+		`${agentUrl}/exploration/${encodeURIComponent(explorationId)}/preview/${encodeURIComponent(candidateId)}`,
+	)
+		.then(async (res) => {
+			if (!res.ok) return;
+			const body = (await res.json()) as { url?: string };
+			if (!body.url) return;
+			// Re-check inside the functional setState — a fast-path
+			// candidate_ready may have raced past the fetch.
+			setMessages((prev) => {
+				const owner = prev.find(
+					(m) => m.exploration?.explorationId === explorationId,
+				);
+				if (!owner) return prev;
+				return prev.map((m) => {
+					if (m.exploration?.explorationId !== explorationId) return m;
+					const nextCandidates = m.exploration.candidates.map((c) => {
+						if (c.candidateId !== candidateId) return c;
+						if (c.previewUrl) return c; // fast path won the race
+						return { ...c, previewUrl: body.url };
+					});
+					return {
+						...m,
+						exploration: { ...m.exploration, candidates: nextCandidates },
+					};
+				});
+			});
+		})
+		.catch(() => {})
+		.finally(() => {
+			inFlightFallbacks.delete(key);
+		});
 }
 
 export function useChat(projectId: string): UseChatReturn {
@@ -212,27 +275,18 @@ export function useChat(projectId: string): UseChatReturn {
 					// the mint failed the worker emits without `previewUrl`
 					// and we fall back to the /exploration route which mints
 					// on demand from the persisted storageKey (Stage E.3).
+					// MED-3 race guard: see fallbackFetchPreviewUrl.
 					const evt = data as unknown as CandidateReadySseEvent;
 					const { explorationId, candidateId, previewUrl } = evt.data;
 					if (previewUrl) {
 						applyPreviewUrl(setMessages, explorationId, candidateId, previewUrl);
 					} else {
-						// Best-effort fallback. Errors are swallowed — the card
-						// stays in its current "rendering" state and the user
-						// can refresh to retry.
-						fetch(
-							`${AGENT_URL}/exploration/${encodeURIComponent(
-								explorationId,
-							)}/preview/${encodeURIComponent(candidateId)}`,
-						)
-							.then(async (res) => {
-								if (!res.ok) return;
-								const body = (await res.json()) as { url?: string };
-								if (body.url) {
-									applyPreviewUrl(setMessages, explorationId, candidateId, body.url);
-								}
-							})
-							.catch(() => {});
+						fallbackFetchPreviewUrl(
+							setMessages,
+							AGENT_URL,
+							explorationId,
+							candidateId,
+						);
 					}
 				} else if (type === "changeset_update") {
 					const changesetId = data.changesetId as string;

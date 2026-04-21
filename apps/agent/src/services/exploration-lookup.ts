@@ -39,6 +39,9 @@ export interface ExplorationLookup {
   }): Promise<ExplorationPreviewState | null>;
 }
 
+// Reviewer Stage E NIT-2: see preview-writeback.ts — same alias shape,
+// same rationale. Not narrowed to the project schema by design.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DrizzlePg = PgDatabase<PgQueryResultHKT, Record<string, unknown>, any>;
 
 export class DrizzleExplorationLookup implements ExplorationLookup {

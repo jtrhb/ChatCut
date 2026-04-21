@@ -149,4 +149,88 @@ describe("DrizzlePreviewWriteback", () => {
       }),
     ).rejects.toThrow(/explorationId.*unsafe/);
   });
+
+  // ── Reviewer Stage E HIGH-1: row-lock concurrency contract ───────────
+
+  describe("concurrent fan-out semantics (HIGH-1)", () => {
+    it("recordSuccess UPDATE composes jsonb_set with row-lock-safe SQL", async () => {
+      // We can't spin up Postgres in unit tests, but we CAN verify the
+      // statement's structural shape: a single UPDATE that uses
+      // jsonb_set(coalesce(...,'{}'::jsonb), ARRAY[$candidateId]::text[],
+      // ...). That shape is what makes the per-row lock + atomic
+      // read-modify-write semantics hold under concurrent fan-out.
+      const { db, calls } = makeFakeDb();
+      const wb = new DrizzlePreviewWriteback(db);
+      await wb.recordSuccess({
+        explorationId: "exp-1",
+        candidateId: "cand-1",
+        storageKey: "previews/exp-1/cand-1.mp4",
+      });
+      const chunk = calls[0] as { queryChunks?: unknown[] };
+      const sql = JSON.stringify(chunk.queryChunks ?? []);
+      expect(sql).toContain("UPDATE exploration_sessions");
+      expect(sql).toContain("jsonb_set");
+      expect(sql).toContain("coalesce(preview_storage_keys");
+      expect(sql).toContain("'{}'::jsonb");
+      expect(sql).toContain("::text[]");
+      expect(sql).toContain("WHERE id =");
+      // Reviewer MED-1: the SAME statement must clear the failure entry
+      // for this candidate so a successful retry overrides a stale 422.
+      expect(sql).toContain("preview_render_failures");
+      expect(sql).toContain("- "); // jsonb minus operator
+    });
+
+    it("recordFailure UPDATE composes jsonb_set with row-lock-safe SQL", async () => {
+      const { db, calls } = makeFakeDb();
+      const wb = new DrizzlePreviewWriteback(db);
+      await wb.recordFailure({
+        explorationId: "exp-1",
+        candidateId: "cand-1",
+        message: "boom",
+      });
+      const chunk = calls[0] as { queryChunks?: unknown[] };
+      const sql = JSON.stringify(chunk.queryChunks ?? []);
+      expect(sql).toContain("UPDATE exploration_sessions");
+      expect(sql).toContain("jsonb_set");
+      expect(sql).toContain("coalesce(preview_render_failures");
+    });
+
+    it("4 sequential recordSuccess calls each issue exactly one UPDATE (no read-then-write split)", async () => {
+      // Defense against a future refactor that splits the operation
+      // into SELECT … then UPDATE. That pattern would lose-update under
+      // concurrent fan-out; the single-UPDATE shape does not.
+      const { db, calls } = makeFakeDb();
+      const wb = new DrizzlePreviewWriteback(db);
+      for (let i = 0; i < 4; i++) {
+        await wb.recordSuccess({
+          explorationId: "exp-1",
+          candidateId: `c${i}`,
+          storageKey: `previews/exp-1/c${i}.mp4`,
+        });
+      }
+      // 1 UPDATE per call, no SELECTs.
+      expect(calls.length).toBe(4);
+      for (const c of calls) {
+        const chunk = c as { queryChunks?: unknown[] };
+        const sql = JSON.stringify(chunk.queryChunks ?? []);
+        expect(sql).toContain("UPDATE");
+        expect(sql).not.toContain("SELECT");
+      }
+    });
+
+    it("MED-1: clear-failure-on-success — recordSuccess SQL strips the candidate from preview_render_failures", async () => {
+      const { db, calls } = makeFakeDb();
+      const wb = new DrizzlePreviewWriteback(db);
+      await wb.recordSuccess({
+        explorationId: "exp-1",
+        candidateId: "cand-stale",
+        storageKey: "previews/exp-1/cand-stale.mp4",
+      });
+      const chunk = calls[0] as { queryChunks?: unknown[] };
+      const sql = JSON.stringify(chunk.queryChunks ?? []);
+      // Postgres jsonb minus operator removes the named key from the map.
+      expect(sql).toMatch(/preview_render_failures\s*=/);
+      expect(sql).toContain("- ");
+    });
+  });
 });

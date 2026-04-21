@@ -44,6 +44,11 @@ function assertSafeId(value: string, field: string): void {
   }
 }
 
+// Reviewer Stage E NIT-2: Drizzle's PgDatabase third type parameter is
+// the table-schema map and varies per project. `any` here keeps the
+// alias usable without leaking a brand-specific schema import; flagged
+// for grep-ability if future tightening matters.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DrizzlePg = PgDatabase<PgQueryResultHKT, Record<string, unknown>, any>;
 
 export class DrizzlePreviewWriteback implements PreviewWriteback {
@@ -62,14 +67,23 @@ export class DrizzlePreviewWriteback implements PreviewWriteback {
     assertSafeId(candidateId, "candidateId");
     // jsonb_set(coalesce(...,'{}'), ARRAY[$candidateId], $value::jsonb, true)
     // — the path is parameterized as text[], so no SQL injection vector.
+    //
+    // Reviewer Stage E MED-1: also strip any previously-recorded failure
+    // entry for this candidate so a successful pg-boss retry overrides
+    // the stale 422 the route would otherwise serve forever. The single
+    // UPDATE statement runs both jsonb operations under one row lock —
+    // see the concurrency note in recordFailure below for the row-lock
+    // semantics that make this safe under fan-out.
     await this.db.execute(sql`
       UPDATE exploration_sessions
       SET preview_storage_keys = jsonb_set(
-        coalesce(preview_storage_keys, '{}'::jsonb),
-        ARRAY[${candidateId}]::text[],
-        ${JSON.stringify(storageKey)}::jsonb,
-        true
-      )
+            coalesce(preview_storage_keys, '{}'::jsonb),
+            ARRAY[${candidateId}]::text[],
+            ${JSON.stringify(storageKey)}::jsonb,
+            true
+          ),
+          preview_render_failures =
+            coalesce(preview_render_failures, '{}'::jsonb) - ${candidateId}::text
       WHERE id = ${explorationId}::uuid
     `);
   }
@@ -92,6 +106,18 @@ export class DrizzlePreviewWriteback implements PreviewWriteback {
       ts: new Date().toISOString(),
       ...(synthesized ? { synthesized: true } : {}),
     };
+    // Reviewer Stage E HIGH-1 (concurrency note for fan-out):
+    // Four candidates running in parallel each fire one UPDATE on the
+    // same exploration_sessions row. PostgreSQL takes a per-row lock
+    // for each UPDATE under READ COMMITTED, so the four `jsonb_set`
+    // calls serialize and each sees the prior committed value — no
+    // lost-update window. The path argument (`ARRAY[$candidateId]`)
+    // is parameterized as text[] so a hostile candidateId cannot
+    // break out into the SQL grammar; assertSafeId above is the
+    // defense-in-depth belt against that, with the lock semantics as
+    // braces. (Postgres docs §13.2 + §9.16 — "jsonb_set produces a new
+    // value of the original jsonb input"; the surrounding UPDATE is
+    // what makes the read-modify-write atomic.)
     await this.db.execute(sql`
       UPDATE exploration_sessions
       SET preview_render_failures = jsonb_set(

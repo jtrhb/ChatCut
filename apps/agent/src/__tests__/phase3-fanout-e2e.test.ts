@@ -27,58 +27,100 @@
 import { describe, it, expect, vi } from "vitest";
 import { EventBus } from "../events/event-bus.js";
 import type { RuntimeEvent } from "../events/types.js";
-import { ExplorationEngine } from "../exploration/exploration-engine.js";
+import {
+  ExplorationEngine,
+  type ExplorationDB,
+  type ExplorationEngineDeps,
+} from "../exploration/exploration-engine.js";
 import type {
   GpuServiceClient,
   JobStatusResult,
 } from "../services/gpu-service-client.js";
+import type { JobQueue } from "../services/job-queue.js";
+import type { ObjectStorage } from "../services/object-storage.js";
+import type { ServerEditorCore } from "../services/server-editor-core.js";
 import {
   handlePreviewRender,
   type PreviewRenderJobData,
 } from "../services/preview-render-worker.js";
 import type { PreviewWriteback } from "../services/preview-writeback.js";
 
-function fakeServerCore() {
-  const clone = vi.fn(() => fakeClone());
-  return {
-    clone,
-    serialize: vi.fn(() => ({ tracks: [] })),
-    executeAgentCommand: vi.fn(),
-  } as any;
-}
+// Reviewer Stage E LOW-2: fakes are typed against the same surfaces
+// production uses — `Pick<>` of the real types where possible — so a
+// future engine refactor that reshapes a method signature surfaces here
+// instead of silently passing under `as any`.
 
-function fakeClone() {
+type ServerCoreFake = Pick<
+  ServerEditorCore,
+  "clone" | "serialize" | "executeAgentCommand"
+>;
+
+function fakeServerCore(): ServerCoreFake {
   return {
+    clone: vi.fn(() => fakeClone() as unknown as ServerEditorCore),
+    serialize: vi.fn(() => ({ tracks: [] }) as never),
     executeAgentCommand: vi.fn(),
-    serialize: vi.fn(() => ({ tracks: [] })),
   };
 }
 
-function fakeObjectStorage() {
-  let i = 0;
-  const upload = vi.fn(async (_buf: Buffer, opts: { prefix: string }) => {
-    i++;
-    return `${opts.prefix}/snap-${i}.json`;
-  });
-  return { upload, delete: vi.fn() };
-}
-
-function fakeJobQueue(captured: PreviewRenderJobData[]) {
+function fakeClone(): ServerCoreFake {
   return {
-    enqueue: vi.fn(async (_name: string, data: PreviewRenderJobData) => {
-      captured.push(data);
-    }),
-  } as any;
+    clone: vi.fn(),
+    serialize: vi.fn(() => ({ tracks: [] }) as never),
+    executeAgentCommand: vi.fn(),
+  };
 }
 
-function fakeDbInsert(captured: Array<Record<string, unknown>>) {
+type ObjectStorageFake = Pick<ObjectStorage, "upload" | "delete">;
+
+function fakeObjectStorage(): ObjectStorageFake {
+  let i = 0;
+  return {
+    upload: vi.fn(async (_buf: Buffer, opts: { prefix: string }) => {
+      i++;
+      return `${opts.prefix}/snap-${i}.json`;
+    }),
+    delete: vi.fn(),
+  };
+}
+
+type JobQueueFake = Pick<JobQueue, "enqueue">;
+
+function fakeJobQueue(captured: PreviewRenderJobData[]): JobQueueFake {
+  return {
+    enqueue: vi.fn(async (_name: string, data: unknown) => {
+      captured.push(data as PreviewRenderJobData);
+    }),
+  };
+}
+
+function fakeDbInsert(
+  captured: Array<Record<string, unknown>>,
+): ExplorationDB {
   return {
     insert: vi.fn(() => ({
       values: vi.fn(async (data: Record<string, unknown>) => {
         captured.push(data);
       }),
     })),
-  } as any;
+  };
+}
+
+function buildEngine(
+  serverCore: ServerCoreFake,
+  jobQueue: JobQueueFake,
+  objectStorage: ObjectStorageFake,
+  db: ExplorationDB,
+): ExplorationEngine {
+  // The engine's constructor declares the full interfaces; our fakes
+  // satisfy the methods it actually calls, so a structural cast is safe
+  // and isolated to one place.
+  return new ExplorationEngine({
+    serverCore,
+    jobQueue,
+    objectStorage,
+    db,
+  } as unknown as ExplorationEngineDeps);
 }
 
 /**
@@ -148,12 +190,12 @@ describe("Phase 3 Stage E.7 — fan-out end-to-end", () => {
       ),
     };
 
-    const engine = new ExplorationEngine({
-      serverCore: fakeServerCore(),
-      jobQueue: fakeJobQueue(enqueued),
-      objectStorage: fakeObjectStorage() as any,
-      db: fakeDbInsert(dbInserts),
-    });
+    const engine = buildEngine(
+      fakeServerCore(),
+      fakeJobQueue(enqueued),
+      fakeObjectStorage(),
+      fakeDbInsert(dbInserts),
+    );
 
     // ── 2. Drive ExplorationEngine with 4 candidates ─────────────────────
     const candidates = [0, 1, 2, 3].map((i) => ({
@@ -277,12 +319,12 @@ describe("Phase 3 Stage E.7 — fan-out end-to-end", () => {
       getSignedUrl: vi.fn(async (k: string) => `https://r2.example/${k}`),
     };
 
-    const engine = new ExplorationEngine({
-      serverCore: fakeServerCore(),
-      jobQueue: fakeJobQueue(enqueued),
-      objectStorage: fakeObjectStorage() as any,
-      db: fakeDbInsert([]),
-    });
+    const engine = buildEngine(
+      fakeServerCore(),
+      fakeJobQueue(enqueued),
+      fakeObjectStorage(),
+      fakeDbInsert([]),
+    );
     await engine.explore({
       intent: "shorten",
       baseSnapshotVersion: 1,
@@ -302,12 +344,16 @@ describe("Phase 3 Stage E.7 — fan-out end-to-end", () => {
     // Custom client: jobs 1+2 succeed, job 3 fails for real, job 4 hits
     // a synthesized timeout via the poll loop.
     let n = 0;
-    const customClient: GpuServiceClient = {
-      async enqueueRender(args) {
+    const customClient = {
+      async enqueueRender(_args: {
+        explorationId: string;
+        candidateId: string;
+        snapshotStorageKey: string;
+      }) {
         n++;
         return { jobId: `j-${n}` };
       },
-      async getJobStatus(jobId: string) {
+      async getJobStatus(jobId: string): Promise<JobStatusResult> {
         if (jobId === "j-1" || jobId === "j-2") {
           return {
             job_id: jobId,
@@ -327,7 +373,7 @@ describe("Phase 3 Stage E.7 — fan-out end-to-end", () => {
         // j-4 → keep returning running so pollUntilTerminal synthesizes
         return { job_id: jobId, state: "running", progress: 25 };
       },
-    } as any;
+    } satisfies Pick<GpuServiceClient, "enqueueRender" | "getJobStatus"> as unknown as GpuServiceClient;
 
     let t = 0;
     const now = vi.fn(() => {
@@ -366,5 +412,72 @@ describe("Phase 3 Stage E.7 — fan-out end-to-end", () => {
     const realCount = failureCalls.filter((f) => !f.synthesized).length;
     expect(synthCount).toBe(1);
     expect(realCount).toBe(1);
+  });
+
+  // Reviewer Stage E MED-2: pin the contract that a writeback throw on
+  // ONE of N candidates does NOT abort the others' SSE delivery.
+  it("MED-2: 1 of 4 writeback throws → all 4 candidate_ready still emitted", async () => {
+    const enqueued: PreviewRenderJobData[] = [];
+    const eventBus = new EventBus({ historySize: 500 });
+    const events: RuntimeEvent[] = [];
+    eventBus.onAll((e) => events.push(e));
+
+    // Throw on the second recordSuccess call only.
+    let successCallIdx = 0;
+    const writeback: PreviewWriteback = {
+      recordSuccess: vi.fn(async () => {
+        successCallIdx++;
+        if (successCallIdx === 2) throw new Error("connection refused");
+      }),
+      recordFailure: vi.fn(async () => {}),
+    };
+    const signer = {
+      getSignedUrl: vi.fn(async (k: string) => `https://r2.example/${k}`),
+    };
+
+    const engine = buildEngine(
+      fakeServerCore(),
+      fakeJobQueue(enqueued),
+      fakeObjectStorage(),
+      fakeDbInsert([]),
+    );
+    await engine.explore({
+      intent: "shorten",
+      baseSnapshotVersion: 1,
+      timelineSnapshot: "snap",
+      projectId: "11111111-1111-1111-1111-111111111111",
+      candidates: [0, 1, 2, 3].map((i) => ({
+        label: `V${i}`,
+        summary: "",
+        candidateType: "variant",
+        commands: [],
+        expectedMetrics: { durationChange: "0s", affectedElements: 0 },
+      })),
+    });
+    expect(enqueued).toHaveLength(4);
+
+    const gpuClient = fakeGpuClient();
+    await Promise.all(
+      enqueued.map((data) =>
+        handlePreviewRender(
+          { data },
+          {
+            gpuClient,
+            eventBus,
+            writeback,
+            signer,
+            log: vi.fn(),
+            warn: vi.fn(),
+            pollOpts: NEVER_SLEEP,
+          },
+        ),
+      ),
+    );
+
+    // All 4 candidate_ready events fire — the writeback failure on
+    // candidate #2 surfaces as a warn line but does NOT block SSE.
+    const ready = events.filter((e) => e.type === "exploration.candidate_ready");
+    expect(ready).toHaveLength(4);
+    expect(writeback.recordSuccess).toHaveBeenCalledTimes(4);
   });
 });

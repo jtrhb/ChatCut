@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { ObjectStorage } from "../services/object-storage.js";
 import type { ExplorationLookup } from "../services/exploration-lookup.js";
+import { PREVIEW_SIGNED_URL_TTL_SEC } from "../services/previews-config.js";
 
 /**
  * Exploration routes (Phase 3 Stage E.3).
@@ -24,7 +25,9 @@ export interface ExplorationRouterDeps {
   signedUrlTtlSec?: number;
 }
 
-const DEFAULT_SIGNED_URL_TTL_SEC = 24 * 60 * 60;
+// Reviewer Stage E LOW-1: route fallback TTL must match the worker's
+// fast-path TTL. Shared constant in previews-config.ts.
+const DEFAULT_SIGNED_URL_TTL_SEC = PREVIEW_SIGNED_URL_TTL_SEC;
 
 export function createExplorationRouter(deps: ExplorationRouterDeps = {}): Hono {
   const { objectStorage, lookup } = deps;

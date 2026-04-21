@@ -23,6 +23,7 @@ import {
 } from "./gpu-service-client.js";
 import { pollUntilTerminal, type PollJobOpts } from "./poll-job.js";
 import type { PreviewWriteback } from "./preview-writeback.js";
+import { PREVIEW_SIGNED_URL_TTL_SEC } from "./previews-config.js";
 
 /**
  * Minimal interface ObjectStorage needs to satisfy for Stage E.5 signed
@@ -112,7 +113,9 @@ export interface PreviewRenderHandlerDeps {
   signedUrlTtlSec?: number;
 }
 
-const DEFAULT_SIGNED_URL_TTL_SEC = 24 * 60 * 60;
+// Reviewer Stage E LOW-1: TTL lives in previews-config.ts so the worker
+// (fast path) and the route (fallback) can never drift.
+const DEFAULT_SIGNED_URL_TTL_SEC = PREVIEW_SIGNED_URL_TTL_SEC;
 
 export async function handlePreviewRender(
   job: { data: PreviewRenderJobData },
@@ -277,12 +280,15 @@ export async function handlePreviewRender(
       // Stage E.2: persist the failure so the route can serve 422 with
       // a useful message instead of silent 404. Same best-effort
       // semantics — a writeback hiccup must not retry-thrash this job.
+      // Reviewer Stage E MED-4: guard against an upstream JobStatusFailed
+      // shape that omits `error` — the typed contract says it's required
+      // but a malformed GPU response shouldn't write `null` into JSONB.
       if (deps.writeback) {
         try {
           await deps.writeback.recordFailure({
             explorationId,
             candidateId,
-            message: final.error,
+            message: final.error ?? "render failed (no error message)",
             synthesized: final.synthesized,
           });
         } catch (wbErr) {
