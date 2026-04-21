@@ -20,7 +20,12 @@
     "preview:web": "turbo run preview --filter=@opencut/web",
     "publish:wasm": "bun run build:wasm && npm publish rust/wasm/pkg --access public",
     "start:tools": "turbo run start --filter=@opencut/tools",
-    "test": "bun test"
+    "test": "bun test",
+    "gpu:sync": "cd services/gpu && uv sync",
+    "gpu:test": "cd services/gpu && uv run pytest",
+    "gpu:lint": "cd services/gpu && uv run ruff check .",
+    "gpu:serve": "cd services/gpu && uv run modal serve modal_app.py",
+    "gpu:deploy": "cd services/gpu && uv run modal deploy modal_app.py"
   },
   "dependencies": {
     "@biomejs/biome": "^2.4.8",
