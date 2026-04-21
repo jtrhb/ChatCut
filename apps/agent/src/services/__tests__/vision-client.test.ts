@@ -1,11 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// Mock global fetch before importing VisionClient
-const mockFetch = vi.fn();
-vi.stubGlobal("fetch", mockFetch);
-
-import { VisionClient } from "../vision-client.js";
-import type { VideoAnalysis } from "../vision-client.js";
+import {
+  SCHEMA_VERSION,
+  VisionClient,
+  type VideoAnalysis,
+} from "../vision-client.js";
 
 const API_KEY = "test-gemini-api-key";
 
@@ -31,136 +30,294 @@ function makeGeminiResponse(analysis: VideoAnalysis) {
   };
 }
 
+function makeFilesUploadResponse() {
+  return {
+    file: {
+      uri: "https://generativelanguage.googleapis.com/v1beta/files/abc-123",
+      mimeType: "video/mp4",
+      name: "files/abc-123",
+    },
+  };
+}
+
 describe("VisionClient", () => {
+  let mockFetch: ReturnType<typeof vi.fn>;
   let client: VisionClient;
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    client = new VisionClient(API_KEY);
+    mockFetch = vi.fn();
+    client = new VisionClient(API_KEY, mockFetch as unknown as typeof fetch);
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
+  // ── SCHEMA_VERSION ────────────────────────────────────────────────────
+
+  describe("SCHEMA_VERSION", () => {
+    it("exports an integer that VisionCache can use as a key component", () => {
+      expect(typeof SCHEMA_VERSION).toBe("number");
+      expect(Number.isInteger(SCHEMA_VERSION)).toBe(true);
+      expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  // ── uploadVideo (Files API multipart) ─────────────────────────────────
+
+  describe("uploadVideo()", () => {
+    it("POSTs multipart to the Files API endpoint with x-goog-api-key header", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => makeFilesUploadResponse(),
+      });
+      const bytes = Buffer.from([0x00, 0x01, 0x02, 0x03]);
+      const result = await client.uploadVideo(bytes, "video/mp4", "test.mp4");
+
+      expect(result).toEqual({
+        fileUri: "https://generativelanguage.googleapis.com/v1beta/files/abc-123",
+        mimeType: "video/mp4",
+        name: "files/abc-123",
+      });
+      const [url, init] = mockFetch.mock.calls[0]!;
+      expect(url).toContain(
+        "/upload/v1beta/files?uploadType=multipart",
+      );
+      const headers = (init as RequestInit).headers as Record<string, string>;
+      expect(headers["x-goog-api-key"]).toBe(API_KEY);
+      expect(headers["Content-Type"]).toContain("multipart/related; boundary=");
+    });
+
+    it("encodes display name in the multipart metadata", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => makeFilesUploadResponse(),
+      });
+      await client.uploadVideo(Buffer.from([0]), "video/mp4", "my-clip.mp4");
+      const init = mockFetch.mock.calls[0]![1] as RequestInit;
+      const bodyString = (init.body as Buffer).toString("utf8");
+      expect(bodyString).toContain('"display_name":"my-clip.mp4"');
+    });
+
+    it("works without display name (omits the field)", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => makeFilesUploadResponse(),
+      });
+      await client.uploadVideo(Buffer.from([0]), "video/mp4");
+      const init = mockFetch.mock.calls[0]![1] as RequestInit;
+      const bodyString = (init.body as Buffer).toString("utf8");
+      expect(bodyString).not.toContain("display_name");
+    });
+
+    it("throws on non-OK response", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 413,
+        text: async () => "file too large",
+      });
+      await expect(
+        client.uploadVideo(Buffer.from([0]), "video/mp4"),
+      ).rejects.toThrow(/Gemini Files upload failed \(413\)/);
+    });
+
+    it("throws on malformed response (missing uri/mimeType/name)", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ file: { uri: "x" } }),
+      });
+      await expect(
+        client.uploadVideo(Buffer.from([0]), "video/mp4"),
+      ).rejects.toThrow(/malformed response/);
+    });
+
+    it("passes an AbortSignal so timeouts are wired", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => makeFilesUploadResponse(),
+      });
+      await client.uploadVideo(Buffer.from([0]), "video/mp4");
+      const init = mockFetch.mock.calls[0]![1] as RequestInit;
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    });
+  });
+
+  // ── analyzeVideo (uses file_data, not URL-in-prompt) ──────────────────
+
   describe("analyzeVideo()", () => {
+    const FILE_URI = "https://generativelanguage.googleapis.com/v1beta/files/x";
+
     it("returns structured VideoAnalysis from Gemini response", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => makeGeminiResponse(MOCK_ANALYSIS),
       });
-
-      const result = await client.analyzeVideo("https://example.com/video.mp4");
-
+      const result = await client.analyzeVideo(FILE_URI, "video/mp4");
       expect(result).toEqual(MOCK_ANALYSIS);
     });
 
-    it("calls the correct Gemini endpoint with the API key", async () => {
+    it("calls generateContent with x-goog-api-key header (NOT URL key)", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => makeGeminiResponse(MOCK_ANALYSIS),
       });
-
-      await client.analyzeVideo("https://example.com/video.mp4");
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${API_KEY}`,
-        expect.any(Object)
+      await client.analyzeVideo(FILE_URI, "video/mp4");
+      const [url, init] = mockFetch.mock.calls[0]!;
+      // URL must NOT carry ?key=...
+      expect(url).toBe(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
       );
+      expect(url).not.toContain("?key=");
+      const headers = (init as RequestInit).headers as Record<string, string>;
+      expect(headers["x-goog-api-key"]).toBe(API_KEY);
     });
 
-    it("includes the video URL in the prompt", async () => {
+    it("sends file_data part referencing the uploaded fileUri", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => makeGeminiResponse(MOCK_ANALYSIS),
       });
-
-      const videoUrl = "https://example.com/my-video.mp4";
-      await client.analyzeVideo(videoUrl);
-
-      const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      await client.analyzeVideo(FILE_URI, "video/mp4");
+      const init = mockFetch.mock.calls[0]![1] as RequestInit;
       const body = JSON.parse(init.body as string);
-      const promptText = body.contents[0].parts[0].text as string;
-      expect(promptText).toContain(videoUrl);
+      const parts = body.contents[0].parts;
+      const fileDataPart = parts.find((p: any) => p.file_data);
+      expect(fileDataPart).toBeDefined();
+      expect(fileDataPart.file_data).toEqual({
+        file_uri: FILE_URI,
+        mime_type: "video/mp4",
+      });
     });
 
-    it("includes focus in the prompt when provided", async () => {
+    it("does NOT put the file URI inside the prompt text", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => makeGeminiResponse(MOCK_ANALYSIS),
       });
-
-      await client.analyzeVideo("https://example.com/video.mp4", "action sequences");
-
-      const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      await client.analyzeVideo(FILE_URI, "video/mp4");
+      const init = mockFetch.mock.calls[0]![1] as RequestInit;
       const body = JSON.parse(init.body as string);
-      const promptText = body.contents[0].parts[0].text as string;
+      const textParts = body.contents[0].parts.filter(
+        (p: any) => typeof p.text === "string",
+      );
+      expect(textParts.length).toBeGreaterThan(0);
+      // The prompt should reference "the attached video", not a URL
+      for (const tp of textParts) {
+        expect(tp.text).not.toContain(FILE_URI);
+        expect(tp.text).not.toContain("https://");
+      }
+    });
+
+    it("includes focus in the prompt text when provided", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => makeGeminiResponse(MOCK_ANALYSIS),
+      });
+      await client.analyzeVideo(FILE_URI, "video/mp4", "action sequences");
+      const init = mockFetch.mock.calls[0]![1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+      const promptText = body.contents[0].parts.find(
+        (p: any) => typeof p.text === "string",
+      ).text;
       expect(promptText).toContain("action sequences");
     });
 
-    it("does NOT include focus text in the prompt when focus is not provided", async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => makeGeminiResponse(MOCK_ANALYSIS),
-      });
-
-      await client.analyzeVideo("https://example.com/video.mp4");
-
-      const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
-      const body = JSON.parse(init.body as string);
-      const promptText = body.contents[0].parts[0].text as string;
-      // Should not have a "Focus on:" section when no focus provided
-      expect(promptText).not.toContain("Focus on:");
-    });
-
-    // Audit Phase 4 / tool-evolution §6 acceptance test #3:
-    // analyze_video must emit at least 2 tool.progress events per call.
     it("emits at least 2 progress events for one call (Phase 4 acceptance)", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => makeGeminiResponse(MOCK_ANALYSIS),
       });
       const events: Array<{ step: number; totalSteps?: number; text?: string }> = [];
-
-      await client.analyzeVideo("https://example.com/video.mp4", undefined, (e) => events.push(e));
-
+      await client.analyzeVideo(FILE_URI, "video/mp4", undefined, (e) =>
+        events.push(e),
+      );
       expect(events.length).toBeGreaterThanOrEqual(2);
-      // Steps are monotonic
       for (let i = 1; i < events.length; i++) {
         expect(events[i].step).toBeGreaterThanOrEqual(events[i - 1].step);
       }
-      // Text descriptions are non-empty
       for (const e of events) expect(e.text).toBeTruthy();
     });
 
-    it("does not throw when no onProgress callback is provided (back-compat)", async () => {
+    it("does not throw when no onProgress callback is provided", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => makeGeminiResponse(MOCK_ANALYSIS),
       });
-      // No third arg — must not throw, must still return analysis.
-      const result = await client.analyzeVideo("https://example.com/video.mp4");
+      const result = await client.analyzeVideo(FILE_URI, "video/mp4");
       expect(result).toEqual(MOCK_ANALYSIS);
     });
 
-    it("parses the JSON from candidates[0].content.parts[0].text", async () => {
-      const customAnalysis: VideoAnalysis = {
-        scenes: [{ start: 1, end: 3, description: "forest path", objects: ["trees"] }],
-        characters: ["hiker"],
-        mood: "serene",
-        style: "nature",
-      };
-
+    it("swallows onProgress errors (best-effort emission)", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => makeGeminiResponse(customAnalysis),
+        json: async () => makeGeminiResponse(MOCK_ANALYSIS),
       });
+      const onProgress = vi.fn(() => {
+        throw new Error("sse disconnected");
+      });
+      const result = await client.analyzeVideo(FILE_URI, "video/mp4", undefined, onProgress);
+      expect(result).toEqual(MOCK_ANALYSIS);
+      expect(onProgress).toHaveBeenCalled();
+    });
 
-      const result = await client.analyzeVideo("https://example.com/forest.mp4");
-      expect(result.scenes[0].description).toBe("forest path");
-      expect(result.mood).toBe("serene");
+    it("throws on non-OK Gemini response with body snippet", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        text: async () => "model overloaded",
+      });
+      await expect(
+        client.analyzeVideo(FILE_URI, "video/mp4"),
+      ).rejects.toThrow(/500.*model overloaded/);
+    });
+
+    it("throws when Gemini returns no candidates (safety filter)", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ candidates: [] }),
+      });
+      await expect(
+        client.analyzeVideo(FILE_URI, "video/mp4"),
+      ).rejects.toThrow(/no candidates/);
+    });
+
+    it("throws when candidate has no text content", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [] } }],
+        }),
+      });
+      await expect(
+        client.analyzeVideo(FILE_URI, "video/mp4"),
+      ).rejects.toThrow(/no text content/);
+    });
+
+    it("throws when response text is not valid JSON", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: "not-json" }] } }],
+        }),
+      });
+      await expect(
+        client.analyzeVideo(FILE_URI, "video/mp4"),
+      ).rejects.toThrow(/Failed to parse/);
+    });
+
+    it("passes an AbortSignal so timeouts are wired", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => makeGeminiResponse(MOCK_ANALYSIS),
+      });
+      await client.analyzeVideo(FILE_URI, "video/mp4");
+      const init = mockFetch.mock.calls[0]![1] as RequestInit;
+      expect(init.signal).toBeInstanceOf(AbortSignal);
     });
   });
+
+  // ── locateScene (pure filter) ─────────────────────────────────────────
 
   describe("locateScene()", () => {
     it("filters scenes by query string (case-insensitive)", () => {
@@ -184,7 +341,6 @@ describe("VisionClient", () => {
           { start: 6, end: 9, description: "mountain trail", objects: ["mountain"] },
         ],
       };
-
       const result = client.locateScene("ocean", analysis);
       expect(result).toHaveLength(2);
     });
