@@ -34,12 +34,16 @@ class TestPreviewStorageKey:
 class _FakeS3Client:
     def __init__(self):
         self.calls: list[dict] = []
+        self.downloads: list[dict] = []
 
     def put_object(self, *, Bucket, Key, Body, ContentType):
         self.calls.append(
             {"Bucket": Bucket, "Key": Key, "Body": Body, "ContentType": ContentType}
         )
         return {"ETag": "fake"}
+
+    def download_file(self, Bucket, Key, Filename):
+        self.downloads.append({"Bucket": Bucket, "Key": Key, "Filename": Filename})
 
 
 def _cfg() -> R2Config:
@@ -87,6 +91,14 @@ class TestR2Uploader:
                 candidate_id="c",
                 body=b"x",
             )
+
+    def test_download_to_path_calls_s3_download_file(self):
+        client = _FakeS3Client()
+        uploader = R2Uploader(_cfg(), client=client)
+        uploader.download_to_path(key="media/clip1.mp4", dest_path="/tmp/clip1.mp4")
+        assert client.downloads == [
+            {"Bucket": "chatcut", "Key": "media/clip1.mp4", "Filename": "/tmp/clip1.mp4"}
+        ]
 
 
 class TestR2ConfigFromEnv:

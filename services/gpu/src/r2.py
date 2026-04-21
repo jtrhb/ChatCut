@@ -50,6 +50,8 @@ class _S3LikeClient(Protocol):
         self, *, Bucket: str, Key: str, Body: bytes, ContentType: str
     ) -> object: ...
 
+    def download_file(self, Bucket: str, Key: str, Filename: str) -> None: ...
+
 
 def _build_client(cfg: R2Config) -> _S3LikeClient:
     return boto3.client(
@@ -88,6 +90,13 @@ class R2Uploader:
             ContentType=content_type,
         )
         return key
+
+    def download_to_path(self, *, key: str, dest_path: str) -> None:
+        """Download an R2 object to a local file path.
+
+        Used by Stage B asset_fetcher to pull source clips before render.
+        """
+        self._client.download_file(self._cfg.bucket, key, dest_path)
 
 
 _SAFE_ID_CHARS = frozenset(
