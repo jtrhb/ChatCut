@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { createCommandsRouter } from "./routes/commands.js";
 import { createProjectRouter } from "./routes/project.js";
 import { createMediaRouter } from "./routes/media.js";
+import { createExplorationRouter } from "./routes/exploration.js";
 import { changeset } from "./routes/changeset.js";
 import { SessionStore } from "./session/session-store.js";
 import { SessionManager } from "./session/session-manager.js";
@@ -29,6 +30,7 @@ import type { MemoryStore } from "./memory/memory-store.js";
 import type { MemoryLoader } from "./memory/memory-loader.js";
 import type { ContextSynchronizer } from "./context/context-sync.js";
 import type { ExplorationEngine } from "./exploration/exploration-engine.js";
+import type { ExplorationLookup } from "./services/exploration-lookup.js";
 
 /** Optional infrastructure deps — wired when real backends are available. */
 export interface InfrastructureDeps {
@@ -39,6 +41,10 @@ export interface InfrastructureDeps {
 	 *  commitMutation for any request that names a projectId. */
 	coreRegistry?: CoreRegistry;
 	mutationDB?: MutationDB;
+	/** Phase 3 Stage E.3: when present, GET /exploration/.../preview/...
+	 *  resolves storage keys + failure metadata from exploration_sessions
+	 *  instead of returning 503. */
+	explorationLookup?: ExplorationLookup;
 }
 
 export interface AppServices {
@@ -260,6 +266,15 @@ export function createApp(opts?: {
 	app.route(
 		"/media",
 		createMediaRouter({ objectStorage: infra.objectStorage }),
+	);
+	// Phase 3 Stage E.4: per-candidate preview lookup. The route shows
+	// 503 when either dep is missing — see createExplorationRouter.
+	app.route(
+		"/exploration",
+		createExplorationRouter({
+			objectStorage: infra.objectStorage,
+			lookup: infra.explorationLookup,
+		}),
 	);
 	app.route("/changeset", opts?.changesetRouter ?? changeset);
 

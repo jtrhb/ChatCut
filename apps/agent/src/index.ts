@@ -555,6 +555,22 @@ async function main() {
 	const { createChangesetRouter } = await import("./routes/changeset.js");
 	const changesetRouter = createChangesetRouter({ changesetManager });
 
+	// Phase 3 Stage E.4: build the per-candidate preview lookup so the
+	// /exploration route can serve 200/422/404 instead of 503. Gated on
+	// DATABASE_URL — same gate as the worker writeback that populates
+	// the rows it reads.
+	let explorationLookup:
+		| import("./services/exploration-lookup.js").ExplorationLookup
+		| undefined;
+	if (process.env.DATABASE_URL) {
+		const [{ DrizzleExplorationLookup }, { db: drizzleDb }] =
+			await Promise.all([
+				import("./services/exploration-lookup.js"),
+				import("./db/index.js"),
+			]);
+		explorationLookup = new DrizzleExplorationLookup(drizzleDb);
+	}
+
 	// Create app ONCE with shared services, messageHandler, and available infrastructure
 	const app = createApp({
 		services,
@@ -562,8 +578,14 @@ async function main() {
 		infrastructure: {
 			serverEditorCore,
 			contextManager,
+			// Stage E.4: object storage now reaches /exploration too — was
+			// previously only constructed inside AssetToolExecutor (line ~136)
+			// and never made it onto the infra block, so /media + /exploration
+			// fell through to 503. Pass the shared `r2` here.
+			objectStorage: r2 ?? undefined,
 			coreRegistry: coreRegistry ?? undefined,
 			mutationDB: mutationDB ?? undefined,
+			explorationLookup,
 		},
 		skillsRouter,
 		changesetRouter,
