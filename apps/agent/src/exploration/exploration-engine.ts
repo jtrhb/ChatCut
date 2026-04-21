@@ -146,9 +146,13 @@ export class ExplorationEngine {
       // 3. Generate candidateId
       const candidateId = randomUUID();
 
-      // 4. Store result timeline snapshot (post-command application)
+      // 4. Store result timeline snapshot (post-command application).
+      // Capture the immutable storage key (Stage C.1, C-Q1) so the
+      // preview-render job payload can carry just the key — the GPU
+      // renderer fetches the snapshot from R2 instead of receiving a
+      // multi-MB inline copy.
       const serialized = clone.serialize();
-      await this.objectStorage.upload(
+      const snapshotStorageKey = await this.objectStorage.upload(
         Buffer.from(JSON.stringify(serialized)),
         {
           contentType: "application/json",
@@ -157,12 +161,15 @@ export class ExplorationEngine {
         }
       );
 
-      // 5. Enqueue preview-render job with commands in payload
+      // 5. Enqueue preview-render job. snapshotStorageKey is the new
+      // canonical reference; timelineSnapshot is kept for backwards-
+      // compat with the legacy worker path until Stage C.5 rewires it.
       await this.jobQueue.enqueue("preview-render", {
         explorationId,
         candidateId,
         label: skeleton.label,
         commands: skeleton.commands,
+        snapshotStorageKey,
         timelineSnapshot: params.timelineSnapshot,
       });
 

@@ -173,6 +173,43 @@ describe("ExplorationEngine", () => {
     }
   });
 
+  // Stage C.1 / C-Q1 — the GPU renderer will fetch the candidate
+  // snapshot from R2 via this storage key. Legacy timelineSnapshot is
+  // kept side-by-side until Stage C.5 rewires the worker.
+  it("includes snapshotStorageKey from objectStorage.upload return in payload", async () => {
+    await engine.explore(BASE_PARAMS);
+    expect(jobQueue.enqueue).toHaveBeenCalledTimes(BASE_PARAMS.candidates.length);
+    for (const call of jobQueue.enqueue.mock.calls) {
+      const payload = call[1]!;
+      expect(payload).toHaveProperty("snapshotStorageKey");
+      // Mock objectStorage.upload returns "explorations/snapshot-key" — the
+      // engine captures it from the upload() promise and threads through.
+      expect(payload.snapshotStorageKey).toBe("explorations/snapshot-key");
+    }
+    // upload() called once per candidate (each candidate produces a
+    // post-command snapshot and uploads it before enqueuing the job)
+    expect(objectStorage.upload).toHaveBeenCalledTimes(BASE_PARAMS.candidates.length);
+  });
+
+  it("each candidate gets its own captured snapshotStorageKey (no shared state leak)", async () => {
+    // Make objectStorage return distinct keys per call so we'd catch a
+    // bug where the engine shares one key across candidates
+    let n = 0;
+    objectStorage.upload.mockImplementation(async () => `explorations/key-${++n}`);
+    await engine.explore(BASE_PARAMS);
+    const keys = jobQueue.enqueue.mock.calls.map((c) => (c[1] as any).snapshotStorageKey);
+    expect(new Set(keys).size).toBe(BASE_PARAMS.candidates.length);
+  });
+
+  it("retains timelineSnapshot in payload for legacy worker (Stage C.5 will drop)", async () => {
+    await engine.explore(BASE_PARAMS);
+    for (const call of jobQueue.enqueue.mock.calls) {
+      const payload = call[1]!;
+      expect(payload).toHaveProperty("timelineSnapshot");
+      expect(payload.timelineSnapshot).toBe(BASE_PARAMS.timelineSnapshot);
+    }
+  });
+
   // --- State machine ---
 
   it("returns completed status after explore() finishes", async () => {
