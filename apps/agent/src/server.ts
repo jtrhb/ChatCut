@@ -7,6 +7,7 @@ import { createExplorationRouter } from "./routes/exploration.js";
 import { changeset } from "./routes/changeset.js";
 import { SessionStore } from "./session/session-store.js";
 import { SessionManager } from "./session/session-manager.js";
+import { SessionCompactor, createAnthropicSummarizer } from "./session/compactor.js";
 import { TaskRegistry } from "./tasks/task-registry.js";
 import { EventBus } from "./events/event-bus.js";
 import { createChatRouter } from "./routes/chat.js";
@@ -73,6 +74,13 @@ export function createMessageHandler(deps: {
 		projectId: string;
 		userId?: string;
 	}) => Promise<void> | void;
+	/**
+	 * Phase 5e: when wired, every turn checks whether session history exceeds
+	 * the compactor's token threshold and folds older messages into a rolling
+	 * summary. Optional so test paths and minimal boots can omit it; without it
+	 * the handler runs the legacy "slice last 50" behavior.
+	 */
+	sessionCompactor?: SessionCompactor;
 }): MessageHandler {
 	// Per-handler flag for the "afterTurn wired but no projectId" warn-once
 	// (reviewer MEDIUM #5). Per-handler — not module-level — so multiple
@@ -92,8 +100,52 @@ export function createMessageHandler(deps: {
 
 		// Retrieve conversation history for multi-turn context.
 		// Cap at 50 messages to avoid exceeding model context window.
+		// Phase 5e: when a compactor is wired, the cap becomes a runaway-safety
+		// ceiling rather than the primary mechanism — compaction tries to fire
+		// on token weight first.
 		const MAX_HISTORY_MESSAGES = 50;
-		const session = deps.sessionManager.getSession(sessionId);
+		let session = deps.sessionManager.getSession(sessionId);
+		let sessionSummary: string | undefined = session?.summary;
+
+		// Phase 5e: best-effort compaction. Errors here MUST NOT fail the user's
+		// turn — we fall through to the legacy slice path if the summarizer
+		// rejects (rate limit, transient, missing key in dev).
+		if (deps.sessionCompactor && session) {
+			const allMsgs = session.messages.filter(
+				(m) => m.role === "user" || m.role === "assistant",
+			);
+			if (deps.sessionCompactor.shouldCompact(allMsgs, sessionSummary)) {
+				try {
+					const result = await deps.sessionCompactor.compact(
+						allMsgs,
+						sessionSummary,
+					);
+					deps.sessionManager.applyCompaction(sessionId, {
+						summary: result.summary,
+						retainedTail: result.retainedTail,
+					});
+					sessionSummary = result.summary;
+					session = deps.sessionManager.getSession(sessionId);
+					deps.eventBus.emit({
+						type: "agent.session_compacted",
+						timestamp: Date.now(),
+						sessionId,
+						data: {
+							droppedCount: result.droppedCount,
+							retainedCount: result.retainedTail.length,
+							summaryChars: result.summary.length,
+						},
+					});
+				} catch (err) {
+					// Telemetry only — keep going with uncompacted history.
+					console.warn(
+						"[messageHandler] session compaction failed; continuing without compaction:",
+						err instanceof Error ? err.message : err,
+					);
+				}
+			}
+		}
+
 		const history =
 			session?.messages
 				?.filter((m) => m.role === "user" || m.role === "assistant")
@@ -111,6 +163,7 @@ export function createMessageHandler(deps: {
 							projectId: identity.projectId,
 						}
 					: undefined,
+				sessionSummary,
 			);
 
 		// Track turn on the per-request session (not a fixed default session)

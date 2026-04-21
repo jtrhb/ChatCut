@@ -213,4 +213,84 @@ describe("SessionManager", () => {
       expect(retrieved).toBeDefined();
     });
   });
+
+  describe("applyCompaction (Phase 5e)", () => {
+    it("persists summary, replaces messages with retainedTail, stamps lastCompactedAt", () => {
+      const session = manager.createSession({ projectId: TEST_PROJECT_ID });
+      // Seed 4 messages so compaction has something to drop
+      for (let i = 0; i < 4; i++) {
+        manager.appendMessage(session.sessionId, makeMessage("user"));
+      }
+
+      const tail: SessionMessage[] = [
+        { role: "user", content: "kept-1", timestamp: 1 },
+        { role: "assistant", content: "kept-2", timestamp: 2 },
+      ];
+      const before = Date.now();
+      manager.applyCompaction(session.sessionId, {
+        summary: "- bullet 1\n- bullet 2",
+        retainedTail: tail,
+      });
+      const after = Date.now();
+
+      const updated = manager.getSession(session.sessionId)!;
+      expect(updated.summary).toBe("- bullet 1\n- bullet 2");
+      expect(updated.messages).toEqual(tail);
+      expect(updated.messages).toHaveLength(2);
+      expect(updated.lastCompactedAt).toBeGreaterThanOrEqual(before);
+      expect(updated.lastCompactedAt).toBeLessThanOrEqual(after);
+    });
+
+    it("overwrites a prior summary on subsequent compaction", () => {
+      const session = manager.createSession({ projectId: TEST_PROJECT_ID });
+      manager.applyCompaction(session.sessionId, {
+        summary: "first round",
+        retainedTail: [],
+      });
+      manager.applyCompaction(session.sessionId, {
+        summary: "second round (merged)",
+        retainedTail: [{ role: "user", content: "ok", timestamp: 0 }],
+      });
+      const updated = manager.getSession(session.sessionId)!;
+      expect(updated.summary).toBe("second round (merged)");
+      expect(updated.messages).toHaveLength(1);
+    });
+
+    it("throws on unknown session", () => {
+      expect(() =>
+        manager.applyCompaction("no-such-id", {
+          summary: "x",
+          retainedTail: [],
+        })
+      ).toThrow("Session not found: no-such-id");
+    });
+
+    it("does not leak retainedTail array reference into the session (defensive copy)", () => {
+      const session = manager.createSession({ projectId: TEST_PROJECT_ID });
+      const tail: SessionMessage[] = [
+        { role: "user", content: "kept", timestamp: 0 },
+      ];
+      manager.applyCompaction(session.sessionId, {
+        summary: "s",
+        retainedTail: tail,
+      });
+      // Mutate the input array — the session's copy must be unaffected
+      tail.push({ role: "assistant", content: "leaked", timestamp: 0 });
+      const updated = manager.getSession(session.sessionId)!;
+      expect(updated.messages).toHaveLength(1);
+    });
+
+    it("forkSession carries summary forward but resets lastCompactedAt", () => {
+      const parent = manager.createSession({ projectId: TEST_PROJECT_ID });
+      manager.applyCompaction(parent.sessionId, {
+        summary: "parent summary",
+        retainedTail: [{ role: "user", content: "x", timestamp: 0 }],
+      });
+      const forked = manager.forkSession(parent.sessionId);
+      expect(forked.summary).toBe("parent summary");
+      // lastCompactedAt is intentionally NOT carried — fork starts fresh
+      expect(forked.lastCompactedAt).toBeUndefined();
+      expect(forked.parentSessionId).toBe(parent.sessionId);
+    });
+  });
 });

@@ -66,6 +66,28 @@ export class SessionManager {
     this.store.set(session);
   }
 
+  /**
+   * Phase 5e: apply a compaction result. Persists the new summary, replaces
+   * the message tail with the retained continuity buffer, and stamps
+   * lastCompactedAt. Throws if the session no longer exists.
+   *
+   * Single combined method instead of separate setSummary / replaceMessages
+   * so partial application is impossible — either both land or neither does.
+   */
+  applyCompaction(
+    sessionId: string,
+    result: { summary: string; retainedTail: SessionMessage[] }
+  ): void {
+    const session = this.store.get(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    session.summary = result.summary;
+    session.messages = [...result.retainedTail];
+    session.lastCompactedAt = Date.now();
+    this.store.set(session);
+  }
+
   forkSession(parentSessionId: string): AgentSession {
     const parent = this.store.get(parentSessionId);
     if (!parent) {
@@ -84,6 +106,10 @@ export class SessionManager {
       createdAt: now,
       updatedAt: now,
       parentSessionId,
+      // Phase 5e: forked sessions inherit the parent's compacted summary so
+      // continuity isn't lost on the fork. lastCompactedAt is intentionally
+      // NOT carried — the fork gets a fresh compaction clock.
+      summary: parent.summary,
     };
     this.store.set(forked);
     return { ...forked, messages: [...forked.messages] };

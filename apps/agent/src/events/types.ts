@@ -1,6 +1,7 @@
 export type RuntimeEventType =
   | "session.created" | "session.resumed" | "session.completed"
   | "agent.turn_start" | "agent.turn_end"
+  | "agent.session_compacted"
   | "tool.called" | "tool.result" | "tool.progress"
   | "task.created" | "task.progress" | "task.completed" | "task.failed"
   | "changeset.proposed" | "changeset.approved" | "changeset.rejected"

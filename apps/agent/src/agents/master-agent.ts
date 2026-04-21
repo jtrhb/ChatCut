@@ -234,6 +234,12 @@ export class MasterAgent {
 		message: string,
 		history?: Array<{ role: string; content: string }>,
 		identity?: { userId?: string; sessionId?: string; projectId?: string },
+		/**
+		 * Phase 5e: rolling summary from prior compactions, if any. When present,
+		 * runTurn injects it into the system prompt so the model has continuity
+		 * even though pre-summary messages were dropped from `history`.
+		 */
+		sessionSummary?: string,
 	): Promise<{ text: string; tokensUsed: { input: number; output: number } }> {
 		this.currentIdentity = identity;
 		// Reset per-turn memory injection lists; runTurn populates them if
@@ -241,7 +247,7 @@ export class MasterAgent {
 		this.currentInjectedMemoryIds = [];
 		this.currentInjectedSkillIds = [];
 		try {
-			return await this.runTurn(message, history);
+			return await this.runTurn(message, history, sessionSummary);
 		} finally {
 			this.currentIdentity = undefined;
 			this.currentInjectedMemoryIds = [];
@@ -350,6 +356,7 @@ export class MasterAgent {
 	private async runTurn(
 		message: string,
 		history?: Array<{ role: string; content: string }>,
+		sessionSummary?: string,
 	): Promise<{ text: string; tokensUsed: { input: number; output: number } }> {
 		const ctx = this.contextManager.get();
 
@@ -402,6 +409,15 @@ export class MasterAgent {
 		const masterMemory = await this.loadMemoriesFor("master");
 		if (masterMemory?.promptText) {
 			systemPrompt += `\n\n## Memory\n\n${masterMemory.promptText}`;
+		}
+
+		// Phase 5e Q3+Q4: when prior turns were compacted, the rolling summary
+		// rides in the system prompt so the model retains continuity even though
+		// the original messages were dropped from `history`. The "compacted"
+		// label is intentional — we want the model to know context was condensed
+		// (and therefore not assume it has the verbatim record).
+		if (sessionSummary && sessionSummary.trim().length > 0) {
+			systemPrompt += `\n\n## Conversation summary (compacted earlier turns)\n\n${sessionSummary.trim()}\n\nThe above is a condensed summary of earlier turns. Recent messages follow verbatim.`;
 		}
 
 		const deferredListing = deferredRegistry.getDeferredListing();

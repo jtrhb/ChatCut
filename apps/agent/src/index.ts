@@ -5,6 +5,10 @@ import {
 	createWiredMasterAgent,
 	createMessageHandler,
 } from "./server.js";
+import {
+	SessionCompactor,
+	createAnthropicSummarizer,
+} from "./session/compactor.js";
 import { SkillLoader } from "./skills/loader.js";
 import { ProjectContextManager } from "./context/project-context.js";
 import { ProjectWriteLock } from "./context/write-lock.js";
@@ -610,10 +614,20 @@ async function main() {
 		});
 	}
 
+	// Phase 5e: SessionCompactor is wired only when ANTHROPIC_API_KEY is
+	// present. In dev paths without the key, the handler still works — it just
+	// skips compaction and relies on the 50-message slice ceiling.
+	const sessionCompactor = apiKey
+		? new SessionCompactor({
+				summarize: createAnthropicSummarizer({ apiKey }),
+			})
+		: undefined;
+
 	const messageHandler = createMessageHandler({
 		masterAgent,
 		sessionManager,
 		eventBus,
+		sessionCompactor,
 		// Reviewer HIGH #2: capture patternObserver in a local const
 		// inside the truthy branch so the async closure holds a non-null
 		// reference instead of relying on `!` (which a future re-null of

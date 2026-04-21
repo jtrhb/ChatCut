@@ -39,7 +39,11 @@ export interface DispatchOutput {
 }
 
 export const TOKEN_BUDGETS = {
-  master: { input: 100_000, output: 8_000 },
+  // Phase 5e Q1a: bumped from 100K to 180K to use what the default 200K Opus
+  // window already provides (no 1M beta header — that's a pricing-tier flip
+  // we're not taking on yet). Compaction triggers at ~150K, leaving ~30K
+  // headroom for the next turn's tool calls + injected memory + output.
+  master: { input: 180_000, output: 8_000 },
   editor: { input: 30_000, output: 4_000 },
   creator: { input: 30_000, output: 4_000 },
   audio: { input: 30_000, output: 4_000 },

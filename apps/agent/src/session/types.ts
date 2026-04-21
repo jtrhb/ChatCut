@@ -13,6 +13,15 @@ export interface AgentSession {
   createdAt: number;
   updatedAt: number;
   parentSessionId?: string;
+  /**
+   * Phase 5e: rolling summary of pre-compaction conversation. When present, the
+   * MasterAgent system prompt carries this so the model has continuity even
+   * after the actual messages were dropped to free context window. SessionCompactor
+   * writes this; SessionManager.applyCompaction is the sanctioned mutation path.
+   */
+  summary?: string;
+  /** Phase 5e: timestamp of the most recent compaction. null/undefined if never compacted. */
+  lastCompactedAt?: number;
 }
 
 export interface SessionMessage {
