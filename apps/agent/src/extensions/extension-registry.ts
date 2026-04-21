@@ -11,10 +11,13 @@ import type { ExtensionManifest, ExtensionType } from "./types.js";
  * `listByType()` / `listAll()` to drive runtime behavior.
  *
  * WHY DEFERRED: Per `borrowing-review Round 10`
- * (docs/superpowers/research/advanced-agent-borrowing-review.md):
- *   先要有 extension contract，再谈 extension ecosystem
- *   ("first define the extension contract, then talk about the
- *    extension ecosystem.")
+ * (`docs/advanced-agent-borrowing-review.md`, summarized):
+ *   the extension CONTRACT must precede the extension ECOSYSTEM —
+ *   don't ship a marketplace before the per-ExtensionType
+ *   load/dispatch shape is concrete. Round 10 frames this as P2
+ *   ("方向正确，但不该抢在 runtime/session/permission 之前做重")
+ *   — direction-correct but not to be heavied up ahead of the runtime
+ *   / session / permission layers.
  *
  * The registry is the *runtime* half of the extension story — it stores
  * manifests and lets callers enumerate them. The missing half is the

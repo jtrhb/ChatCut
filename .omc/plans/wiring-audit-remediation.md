@@ -270,7 +270,7 @@ Each task in this phase is independent and can be picked up by separate develope
 
 **Status: deferred — see `apps/agent/src/extensions/extension-registry.ts` header.**
 
-The class API is complete and unit-tested but has zero production call sites. Per `borrowing-review Round 10` ("先要有 extension contract，再谈 extension ecosystem"), wiring the runtime registry without first defining the per-`ExtensionType` dispatch contract would create a dormant extension point that callers register against but nothing dispatches — worse than no extension point.
+The class API is complete and unit-tested but has zero production call sites. Per `borrowing-review Round 10` (`docs/advanced-agent-borrowing-review.md`, summarized): the extension CONTRACT must precede the extension ECOSYSTEM — wiring the runtime registry without first defining the per-`ExtensionType` dispatch contract would create a dormant extension point that callers register against but nothing dispatches, worse than no extension point.
 
 The deferral docstring at the top of `extension-registry.ts` documents:
 - Why deferred (contract-before-ecosystem, borrowing-review Round 10)
