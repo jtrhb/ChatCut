@@ -182,7 +182,15 @@ export const explorationSessions = pgTable("exploration_sessions", {
   baseSnapshotVersion: integer("base_snapshot_version"),
   userIntent: text("user_intent"),
   candidates: jsonb("candidates"),
+  // Phase 3 Stage E: maps candidateId → R2 storage key for the rendered
+  // preview MP4. Worker writes per-candidate via jsonb_set on terminal
+  // `done`. Route reads to mint signed URLs on demand (page reload).
   previewStorageKeys: jsonb("preview_storage_keys"),
+  // Phase 3 Stage E: maps candidateId → {message, ts} when the GPU
+  // service reported a real `failed` (or the agent synthesized a poll
+  // timeout). Route serves this as 422 to distinguish "render failed"
+  // from "still rendering" (404) and "infra down" (503).
+  previewRenderFailures: jsonb("preview_render_failures"),
   selectedCandidateId: text("selected_candidate_id"),
   parentExplorationId: uuid("parent_exploration_id"),
   exposureOrder: jsonb("exposure_order"),

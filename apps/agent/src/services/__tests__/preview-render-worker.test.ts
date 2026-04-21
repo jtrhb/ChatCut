@@ -7,6 +7,24 @@ import {
   type JobStatusResult,
 } from "../gpu-service-client.js";
 import { handlePreviewRender } from "../preview-render-worker.js";
+import type { PreviewWriteback } from "../preview-writeback.js";
+
+function fakeWriteback(opts?: {
+  successThrows?: Error;
+  failureThrows?: Error;
+}): PreviewWriteback & {
+  recordSuccess: ReturnType<typeof vi.fn>;
+  recordFailure: ReturnType<typeof vi.fn>;
+} {
+  return {
+    recordSuccess: vi.fn(async () => {
+      if (opts?.successThrows) throw opts.successThrows;
+    }),
+    recordFailure: vi.fn(async () => {
+      if (opts?.failureThrows) throw opts.failureThrows;
+    }),
+  };
+}
 
 const PAYLOAD = {
   explorationId: "exp-1",
@@ -679,6 +697,209 @@ describe("handlePreviewRender", () => {
         candidateId: "cand-1",
         storageKey: "previews/exp-1/cand-1.mp4",
       });
+    });
+  });
+
+  // ── Stage E.2: writeback to exploration_sessions ──────────────────────
+
+  describe("writeback (E.2)", () => {
+    it("calls writeback.recordSuccess on terminal done with the storage key", async () => {
+      const wb = fakeWriteback();
+      const client = fakeClient({
+        enqueueResult: { jobId: "j" },
+        statuses: [
+          {
+            job_id: "j",
+            state: "done",
+            progress: 100,
+            result: { storage_key: "previews/exp-1/cand-1.mp4" },
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: PAYLOAD },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          writeback: wb,
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      expect(wb.recordSuccess).toHaveBeenCalledTimes(1);
+      expect(wb.recordSuccess).toHaveBeenCalledWith({
+        explorationId: "exp-1",
+        candidateId: "cand-1",
+        storageKey: "previews/exp-1/cand-1.mp4",
+      });
+      expect(wb.recordFailure).not.toHaveBeenCalled();
+    });
+
+    it("calls writeback.recordFailure on real GPU failure with error message", async () => {
+      const wb = fakeWriteback();
+      const client = fakeClient({
+        enqueueResult: { jobId: "j" },
+        statuses: [
+          {
+            job_id: "j",
+            state: "failed",
+            progress: 30,
+            error: "melt subprocess crashed",
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: PAYLOAD },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          writeback: wb,
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      expect(wb.recordFailure).toHaveBeenCalledTimes(1);
+      expect(wb.recordFailure).toHaveBeenCalledWith({
+        explorationId: "exp-1",
+        candidateId: "cand-1",
+        message: "melt subprocess crashed",
+        synthesized: undefined,
+      });
+      expect(wb.recordSuccess).not.toHaveBeenCalled();
+    });
+
+    it("calls writeback.recordFailure with synthesized=true on poll timeout", async () => {
+      const wb = fakeWriteback();
+      let t = 0;
+      const now = vi.fn(() => {
+        const v = t;
+        t += 600;
+        return v;
+      });
+      const client = fakeClient({
+        enqueueResult: { jobId: "j-slow" },
+        statuses: [
+          { job_id: "j-slow", state: "running", progress: 25 },
+          { job_id: "j-slow", state: "running", progress: 25 },
+        ],
+      });
+      await handlePreviewRender(
+        { data: PAYLOAD },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          writeback: wb,
+          pollOpts: {
+            sleep: vi.fn().mockResolvedValue(undefined),
+            now,
+            intervalMs: 50,
+            timeoutMs: 1000,
+          },
+        },
+      );
+      expect(wb.recordFailure).toHaveBeenCalledTimes(1);
+      const args = wb.recordFailure.mock.calls[0]![0];
+      expect(args.synthesized).toBe(true);
+      expect(args.message).toContain("polling timeout");
+    });
+
+    it("warns but does NOT abort the SSE path when writeback.recordSuccess throws", async () => {
+      const warn = vi.fn();
+      const bus = new EventBus();
+      const events: RuntimeEvent[] = [];
+      bus.onAll((e) => events.push(e));
+      const wb = fakeWriteback({
+        successThrows: new Error("connection refused"),
+      });
+      const client = fakeClient({
+        enqueueResult: { jobId: "j" },
+        statuses: [
+          {
+            job_id: "j",
+            state: "done",
+            progress: 100,
+            result: { storage_key: "previews/x/y.mp4" },
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: PAYLOAD },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn,
+          writeback: wb,
+          eventBus: bus,
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("writeback recordSuccess failed"),
+      );
+      // candidate_ready STILL emitted — in-flight viewers see the preview.
+      const ready = events.filter(
+        (e) => e.type === "exploration.candidate_ready",
+      );
+      expect(ready.length).toBe(1);
+    });
+
+    it("warns when writeback.recordFailure throws (does not re-throw)", async () => {
+      const warn = vi.fn();
+      const wb = fakeWriteback({
+        failureThrows: new Error("connection refused"),
+      });
+      const client = fakeClient({
+        enqueueResult: { jobId: "j" },
+        statuses: [
+          {
+            job_id: "j",
+            state: "failed",
+            progress: 30,
+            error: "boom",
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: PAYLOAD },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn,
+          writeback: wb,
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("writeback recordFailure failed"),
+      );
+    });
+
+    it("no-op when writeback is null (boot without DATABASE_URL)", async () => {
+      const client = fakeClient({
+        enqueueResult: { jobId: "j" },
+        statuses: [
+          {
+            job_id: "j",
+            state: "done",
+            progress: 100,
+            result: { storage_key: "previews/x/y.mp4" },
+          },
+        ],
+      });
+      // Must not throw.
+      await expect(
+        handlePreviewRender(
+          { data: PAYLOAD },
+          {
+            gpuClient: client,
+            log: vi.fn(),
+            warn: vi.fn(),
+            writeback: null,
+            pollOpts: NEVER_SLEEP,
+          },
+        ),
+      ).resolves.toBeUndefined();
     });
   });
 

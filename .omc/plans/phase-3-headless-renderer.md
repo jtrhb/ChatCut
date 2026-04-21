@@ -10,8 +10,12 @@ Date: 2026-04-21
 - Stage A — CLOSED + APPROVED. 4 commits.
 - Stage B — CLOSED + APPROVED. 7 commits (incl. 2nd pivot to MLT, see §0.b). 113 tests passing. Manual B.7 staging smoke (`modal serve` + ffprobe) is the user's.
 - Stage C — CLOSED + APPROVED. 11 commits. 1156 agent + 120 gpu = 1276 tests passing.
-- Stage D — IN PROGRESS. Progress polling backoff + EventBus emission for `tool.progress` + `exploration.candidate_ready`.
-- Stages E–F — pending.
+- Stage D — CLOSED + APPROVED WITH NITS. 2 commits. 1170 agent tests passing (+14). Reviewer carried-over notes folded into Stage E:
+   - MEDIUM #1: extend web `ToolProgressSseEvent` to declare `explorationId/candidateId` (lands in E.6)
+   - MEDIUM #2: candidate_ready has no web handler (lands in E.6)
+   - LOW #3: `safeForLog` not applied to synthetic toolCallId (defense-in-depth, defer to user-supplied-ID future path)
+- Stage E — IN PROGRESS. DB writeback + signed-URL `candidate_ready` + route DB lookup + web SSE wiring + e2e test.
+- Stage F — pending.
 
 ---
 

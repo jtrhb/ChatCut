@@ -306,15 +306,33 @@ async function main() {
 					}`,
 				);
 			}
+			// Stage E.2: writeback persists per-candidate render outcomes
+			// to exploration_sessions so a page reload mid-render still
+			// finds the preview (or its failure metadata) via the
+			// /exploration route. We're already inside the
+			// `if (process.env.DATABASE_URL)` branch, but the `db` handle
+			// from the CoreRegistry block above is destructured-locally
+			// (line 212) and out of scope here, so re-import — same
+			// pattern the ExplorationEngine block below uses.
+			const { DrizzlePreviewWriteback } = await import(
+				"./services/preview-writeback.js"
+			);
+			const { db: drizzleDb } = await import("./db/index.js");
+			const previewWriteback = new DrizzlePreviewWriteback(drizzleDb);
+
 			if (handlePreviewRender) {
 				const handler = handlePreviewRender;
-				// Stage D.3: thread the EventBus into the worker so
-				// `tool.progress` + `exploration.candidate_ready` reach the
-				// SSE consumer on apps/web. Falls back to log-only when
-				// gpuClient is null (handler short-circuits before emitting).
+				// Stage D.3 + E.2: thread EventBus + writeback into worker
+				// deps so the lifecycle (poll → SSE → DB row) is complete.
 				jobQueue.registerWorker<
 					import("./services/preview-render-worker.js").PreviewRenderJobData
-				>("preview-render", (job) => handler(job, { gpuClient, eventBus }));
+				>("preview-render", (job) =>
+					handler(job, {
+						gpuClient,
+						eventBus,
+						writeback: previewWriteback,
+					}),
+				);
 			}
 
 			if (r2) {

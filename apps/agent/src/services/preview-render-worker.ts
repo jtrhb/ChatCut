@@ -22,6 +22,7 @@ import {
   type JobStatusResult,
 } from "./gpu-service-client.js";
 import { pollUntilTerminal, type PollJobOpts } from "./poll-job.js";
+import type { PreviewWriteback } from "./preview-writeback.js";
 
 // Reviewer Stage C MED #9 (defense-in-depth log-injection guard): all
 // IDs that flow into log lines pass through this. Server-generated
@@ -75,6 +76,14 @@ export interface PreviewRenderHandlerDeps {
    * handler still completes and logs but produces no SSE traffic.
    */
   eventBus?: EventBus;
+  /**
+   * Optional persistence sink (Stage E.2). When supplied, the worker
+   * writes terminal `done` to `exploration_sessions.preview_storage_keys`
+   * and terminal `failed` to `exploration_sessions.preview_render_failures`
+   * so the route layer can serve a stable URL after page reload. Boots
+   * without DATABASE_URL pass `null` and the handler simply logs.
+   */
+  writeback?: PreviewWriteback | null;
 }
 
 export async function handlePreviewRender(
@@ -165,9 +174,33 @@ export async function handlePreviewRender(
     // Discriminated union narrows .result vs .error access.
     if (final.state === "done") {
       log(`[preview-render] ${tag} → ${final.result.storage_key}`);
-      // Stage D.2: emit candidate_ready so apps/web swaps the card to
-      // the playable preview. Stage E enriches the payload with a signed
-      // previewUrl and writes the storage_key to exploration_sessions.
+      // Stage E.2: persist the storage key BEFORE emitting candidate_ready.
+      // If a slow web client subscribes after the SSE fires (page reload
+      // mid-render), the GET /exploration/.../preview/... route falls
+      // back to this row to mint a signed URL — so the row needs to win
+      // the race against any reload-and-fetch. Writeback failure is
+      // logged but does NOT abort the SSE path: the in-flight viewer
+      // still sees the preview, only the reload-survival breaks.
+      if (deps.writeback) {
+        try {
+          await deps.writeback.recordSuccess({
+            explorationId,
+            candidateId,
+            storageKey: final.result.storage_key,
+          });
+        } catch (wbErr) {
+          warn(
+            `[preview-render] writeback recordSuccess failed (preview still served via SSE): ${tag} — ${
+              wbErr instanceof Error ? wbErr.message : String(wbErr)
+            }`,
+          );
+        }
+      }
+      // Stage D.2 / Stage E.5: emit candidate_ready so apps/web swaps
+      // the card to the playable preview. Note: the final tool.progress
+      // (100%) was already emitted synchronously inside pollUntilTerminal
+      // before we reached this branch — strict ordering tested in
+      // preview-render-worker.test.ts §"SSE event sequence (D.4)".
       if (eventBus) {
         try {
           eventBus.emit({
@@ -190,6 +223,25 @@ export async function handlePreviewRender(
       // be running (retrying would burn another container).
       const synthMarker = final.synthesized ? " [synthesized]" : "";
       warn(`[preview-render] failed${synthMarker}: ${tag} — ${final.error}`);
+      // Stage E.2: persist the failure so the route can serve 422 with
+      // a useful message instead of silent 404. Same best-effort
+      // semantics — a writeback hiccup must not retry-thrash this job.
+      if (deps.writeback) {
+        try {
+          await deps.writeback.recordFailure({
+            explorationId,
+            candidateId,
+            message: final.error,
+            synthesized: final.synthesized,
+          });
+        } catch (wbErr) {
+          warn(
+            `[preview-render] writeback recordFailure failed: ${tag} — ${
+              wbErr instanceof Error ? wbErr.message : String(wbErr)
+            }`,
+          );
+        }
+      }
     }
   } catch (err) {
     // Reviewer Stage C HIGH #3: split transient (network / 5xx) from
