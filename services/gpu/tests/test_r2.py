@@ -32,9 +32,11 @@ class TestPreviewStorageKey:
 
 
 class _FakeS3Client:
-    def __init__(self):
+    def __init__(self, get_object_body: bytes = b""):
         self.calls: list[dict] = []
         self.downloads: list[dict] = []
+        self.get_object_calls: list[dict] = []
+        self._get_object_body = get_object_body
 
     def put_object(self, *, Bucket, Key, Body, ContentType):
         self.calls.append(
@@ -44,6 +46,18 @@ class _FakeS3Client:
 
     def download_file(self, Bucket, Key, Filename):
         self.downloads.append({"Bucket": Bucket, "Key": Key, "Filename": Filename})
+
+    def get_object(self, *, Bucket, Key):
+        self.get_object_calls.append({"Bucket": Bucket, "Key": Key})
+
+        class _Body:
+            def __init__(self, b: bytes):
+                self._b = b
+
+            def read(self) -> bytes:
+                return self._b
+
+        return {"Body": _Body(self._get_object_body)}
 
 
 def _cfg() -> R2Config:
@@ -98,6 +112,15 @@ class TestR2Uploader:
         uploader.download_to_path(key="media/clip1.mp4", dest_path="/tmp/clip1.mp4")
         assert client.downloads == [
             {"Bucket": "chatcut", "Key": "media/clip1.mp4", "Filename": "/tmp/clip1.mp4"}
+        ]
+
+    def test_download_bytes_returns_get_object_body(self):
+        client = _FakeS3Client(get_object_body=b'{"hello":"world"}')
+        uploader = R2Uploader(_cfg(), client=client)
+        result = uploader.download_bytes(key="explorations/exp1/snap.json")
+        assert result == b'{"hello":"world"}'
+        assert client.get_object_calls == [
+            {"Bucket": "chatcut", "Key": "explorations/exp1/snap.json"}
         ]
 
 

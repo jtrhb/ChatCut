@@ -12,13 +12,14 @@ from src.handlers import (
 from src.jobs import initial_state
 
 KEYS: list[str | None] = ["secret"]
+SNAP_KEY = "explorations/e/abc.json"
 
 
 class TestHandleRenderPreview:
     def test_creates_job_and_returns_id(self):
         store: dict = {}
         result = handle_render_preview(
-            {"explorationId": "e", "candidateId": "c", "timeline": {"v": 1}},
+            {"explorationId": "e", "candidateId": "c", "snapshotStorageKey": SNAP_KEY},
             "secret",
             KEYS,
             store,
@@ -31,25 +32,55 @@ class TestHandleRenderPreview:
     def test_rejects_bad_auth(self):
         with pytest.raises(AuthError):
             handle_render_preview(
-                {"explorationId": "e", "candidateId": "c", "timeline": {}},
+                {"explorationId": "e", "candidateId": "c", "snapshotStorageKey": SNAP_KEY},
                 "wrong",
                 KEYS,
                 {},
             )
 
     def test_rejects_missing_field(self):
-        for missing in ("explorationId", "candidateId", "timeline"):
-            payload: dict = {"explorationId": "e", "candidateId": "c", "timeline": {}}
+        for missing in ("explorationId", "candidateId", "snapshotStorageKey"):
+            payload: dict = {
+                "explorationId": "e",
+                "candidateId": "c",
+                "snapshotStorageKey": SNAP_KEY,
+            }
             del payload[missing]
             with pytest.raises(ValueError, match=missing):
                 handle_render_preview(payload, "secret", KEYS, {})
+
+    def test_rejects_empty_snapshot_key(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            handle_render_preview(
+                {
+                    "explorationId": "e",
+                    "candidateId": "c",
+                    "snapshotStorageKey": "",
+                },
+                "secret",
+                KEYS,
+                {},
+            )
+
+    def test_rejects_null_byte_in_snapshot_key(self):
+        with pytest.raises(ValueError, match="null byte"):
+            handle_render_preview(
+                {
+                    "explorationId": "e",
+                    "candidateId": "c",
+                    "snapshotStorageKey": "explorations/e/snap\x00.json",
+                },
+                "secret",
+                KEYS,
+                {},
+            )
 
     def test_unique_job_ids_across_calls(self):
         store: dict = {}
         ids = set()
         for _ in range(20):
             r = handle_render_preview(
-                {"explorationId": "e", "candidateId": "c", "timeline": {}},
+                {"explorationId": "e", "candidateId": "c", "snapshotStorageKey": SNAP_KEY},
                 "secret",
                 KEYS,
                 store,
@@ -60,7 +91,7 @@ class TestHandleRenderPreview:
     def test_rejects_path_traversal_in_exploration_id(self):
         with pytest.raises(ValueError, match="unsafe"):
             handle_render_preview(
-                {"explorationId": "../etc", "candidateId": "c", "timeline": {}},
+                {"explorationId": "../etc", "candidateId": "c", "snapshotStorageKey": SNAP_KEY},
                 "secret",
                 KEYS,
                 {},
@@ -69,7 +100,7 @@ class TestHandleRenderPreview:
     def test_rejects_path_traversal_in_candidate_id(self):
         with pytest.raises(ValueError, match="unsafe"):
             handle_render_preview(
-                {"explorationId": "e", "candidateId": "../bad", "timeline": {}},
+                {"explorationId": "e", "candidateId": "../bad", "snapshotStorageKey": SNAP_KEY},
                 "secret",
                 KEYS,
                 {},
@@ -79,7 +110,7 @@ class TestHandleRenderPreview:
         store: dict = {}
         with pytest.raises(ValueError):
             handle_render_preview(
-                {"explorationId": "../etc", "candidateId": "c", "timeline": {}},
+                {"explorationId": "../etc", "candidateId": "c", "snapshotStorageKey": SNAP_KEY},
                 "secret",
                 KEYS,
                 store,

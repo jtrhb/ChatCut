@@ -52,6 +52,8 @@ class _S3LikeClient(Protocol):
 
     def download_file(self, Bucket: str, Key: str, Filename: str) -> None: ...
 
+    def get_object(self, *, Bucket: str, Key: str) -> dict: ...
+
 
 def _build_client(cfg: R2Config) -> _S3LikeClient:
     return boto3.client(
@@ -97,6 +99,16 @@ class R2Uploader:
         Used by Stage B asset_fetcher to pull source clips before render.
         """
         self._client.download_file(self._cfg.bucket, key, dest_path)
+
+    def download_bytes(self, *, key: str) -> bytes:
+        """Download an R2 object's contents as in-memory bytes.
+
+        Used by Stage C.2 to fetch the candidate's serialized snapshot
+        without writing a temp file. For larger blobs (source clips)
+        prefer download_to_path which streams to disk.
+        """
+        response = self._client.get_object(Bucket=self._cfg.bucket, Key=key)
+        return response["Body"].read()
 
 
 _SAFE_ID_CHARS = frozenset(

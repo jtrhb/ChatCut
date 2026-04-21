@@ -57,19 +57,39 @@ def handle_render_preview(
 ) -> dict[str, str]:
     """Validate + create initial job state. Returns {jobId}.
 
-    Validates id segments at the handler boundary (not deferred to R2
-    upload) so a malicious caller can't allocate Dict slots / spawn
-    budget on bad input. preview_storage_key raises ValueError on
-    path-traversal; modal_app translates to HTTP 400.
+    Validates id segments + snapshotStorageKey at the handler boundary
+    (not deferred to R2 upload/fetch) so a malicious caller can't
+    allocate Dict slots / spawn budget on bad input. preview_storage_key
+    raises ValueError on path-traversal; modal_app translates to HTTP 400.
+
+    Stage C.2 contract: payload carries snapshotStorageKey (R2 object key
+    where ExplorationEngine pre-uploaded the candidate's serialized
+    timeline). The renderer fetches the JSON from R2; we don't accept
+    inline timeline dicts anymore.
     """
     verify_api_key(api_key, expected_keys)
     _require(payload, "explorationId")
     _require(payload, "candidateId")
-    _require(payload, "timeline")
+    _require(payload, "snapshotStorageKey")
     preview_storage_key(payload["explorationId"], payload["candidateId"])
+    _validate_snapshot_key(payload["snapshotStorageKey"])
     job_id = new_job_id()
     job_dict[job_id] = initial_state(job_id).model_dump()
     return {"jobId": job_id}
+
+
+def _validate_snapshot_key(key: str) -> None:
+    """Reject empty / null-byte keys.
+
+    R2 keys are flat strings (no filesystem traversal semantics), so we
+    don't need to reject `..` for security reasons — but null bytes will
+    trip the underlying boto3 client and we want a clean 400 instead.
+    Auth covers caller authorization; this is just basic shape checking.
+    """
+    if not isinstance(key, str) or not key:
+        raise ValueError("snapshotStorageKey must be a non-empty string")
+    if "\x00" in key:
+        raise ValueError("snapshotStorageKey contains null byte")
 
 
 def handle_status(

@@ -113,11 +113,13 @@ def render_preview(payload: dict[str, Any], request: Request) -> dict[str, str]:
         )
     except Exception as e:
         raise _to_http(e) from e
+    # Stage C.2 contract: snapshotStorageKey replaces inline timeline.
+    # _do_render fetches the JSON from R2 itself.
     _do_render.spawn(
         job_id=result["jobId"],
         exploration_id=payload["explorationId"],
         candidate_id=payload["candidateId"],
-        timeline=payload["timeline"],
+        snapshot_storage_key=payload["snapshotStorageKey"],
     )
     return result
 
@@ -127,9 +129,14 @@ def _do_render(
     job_id: str,
     exploration_id: str,
     candidate_id: str,
-    timeline: dict[str, Any],
+    snapshot_storage_key: str,
 ) -> None:
     """Background render. Body in handlers.do_render_body for testability.
+
+    Stage C.2 contract: snapshot_storage_key replaces the inline timeline
+    dict. We fetch the candidate's serialized snapshot from R2 here
+    (single-source-of-truth — same R2Uploader is used for the output
+    upload), then parse + pass to render_fn.
 
     GPU is currently not declared (no `gpu=` arg) because the Stage B
     Modal image ships stock Debian ffmpeg, which lacks NVENC support.
@@ -143,12 +150,17 @@ def _do_render(
     Leaves ~3 minutes for asset fetch + R2 upload + Dict writes around
     the encode, so a slow R2 fetch can't kill the container mid-render.
     """
+    import json
+
     from src.handlers import do_render_body
     from src.r2 import R2Config, R2Uploader
     from src.render import RenderOpts
     from src.render import render_timeline as _render_timeline
 
     r2 = R2Uploader(R2Config.from_env())
+
+    snapshot_bytes = r2.download_bytes(key=snapshot_storage_key)
+    timeline = json.loads(snapshot_bytes)
 
     def render_fn(state: dict[str, Any]) -> bytes:
         return _render_timeline(
