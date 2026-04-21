@@ -110,7 +110,18 @@ export function createMessageHandler(deps: {
 		});
 		// `tail` is the promise the next caller will wait on. Capture it once
 		// so the cleanup-when-still-tail check below compares the same object.
-		const tail = prev.then(() => released);
+		// NEW-1: pass a rejection handler too so a rejected `prev` doesn't poison
+		// the chain. Without this, if any future code added inside fn() throws
+		// outside the existing inner try/catch, `release()` never fires and the
+		// session's mutex entry leaks forever — every subsequent turn on the
+		// same sessionId would also reject. Treating prev-rejection as
+		// equivalent to prev-resolution is the correct mutex semantics: the
+		// next caller's critical section runs regardless of how the prior one
+		// terminated.
+		const tail = prev.then(
+			() => released,
+			() => released,
+		);
 		sessionLocks.set(sid, tail);
 		await prev;
 		try {
@@ -189,10 +200,21 @@ export function createMessageHandler(deps: {
 						unfilteredTail = [];
 					} else {
 						const firstIdx = fresh.messages.indexOf(firstRetained);
-						unfilteredTail =
-							firstIdx >= 0
-								? fresh.messages.slice(firstIdx)
-								: [...result.retainedTail];
+						if (firstIdx >= 0) {
+							unfilteredTail = fresh.messages.slice(firstIdx);
+						} else {
+							// NEW-3: this branch is unreachable today (compactor
+							// preserves element references through filter+slice), but
+							// if a future compactor change ever clones items, the
+							// silent fallback would re-introduce the MED-1 bug it
+							// was fixed to prevent — interleaved non-user/assistant
+							// rows would be dropped. Surface the fallback so the
+							// regression is visible in logs instead of silent.
+							console.warn(
+								`[messageHandler] retainedTail reference identity broken (sessionId=${sessionId}); falling back to filtered tail. This may drop interleaved non-user/assistant rows if persisted.`,
+							);
+							unfilteredTail = [...result.retainedTail];
+						}
 					}
 					const previousCompactionAt = fresh.lastCompactedAt;
 					deps.sessionManager.applyCompaction(sessionId, {
