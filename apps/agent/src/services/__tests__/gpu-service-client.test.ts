@@ -126,7 +126,11 @@ describe("GpuServiceClient", () => {
       );
       const result = await client.getJobStatus("j1");
       expect(result.state).toBe("done");
-      expect(result.result?.storage_key).toBe("previews/exp/cand.mp4");
+      // Narrow on state so .result access is type-safe under the
+      // discriminated union (Stage C reviewer follow-up).
+      if (result.state === "done") {
+        expect(result.result.storage_key).toBe("previews/exp/cand.mp4");
+      }
     });
 
     it("returns failed state with error message", async () => {
@@ -140,7 +144,9 @@ describe("GpuServiceClient", () => {
       );
       const result = await client.getJobStatus("j1");
       expect(result.state).toBe("failed");
-      expect(result.error).toBe("melt subprocess crashed");
+      if (result.state === "failed") {
+        expect(result.error).toBe("melt subprocess crashed");
+      }
     });
 
     it("throws GpuServiceError(404) when jobId unknown", async () => {
