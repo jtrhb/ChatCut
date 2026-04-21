@@ -266,9 +266,18 @@ Each task in this phase is independent and can be picked up by separate develope
 | 5e.1 | Wire `SessionMemory` into `runtime.ts` compaction path | `apps/agent/src/agents/runtime.ts` |
 | 5e.2 | Store summary alongside `AgentSession.messages` for resume | `apps/agent/src/session/session-store.ts` |
 
-### 5f. ExtensionRegistry — defer
+### 5f. ExtensionRegistry — DEFERRED (closed 2026-04-21)
 
-Extension registry exists with no callers. Per `borrowing-review Round 10` ("先要有 extension contract，再谈 extension ecosystem"), defer until at least one concrete extension exists. Document the deferral.
+**Status: deferred — see `apps/agent/src/extensions/extension-registry.ts` header.**
+
+The class API is complete and unit-tested but has zero production call sites. Per `borrowing-review Round 10` ("先要有 extension contract，再谈 extension ecosystem"), wiring the runtime registry without first defining the per-`ExtensionType` dispatch contract would create a dormant extension point that callers register against but nothing dispatches — worse than no extension point.
+
+The deferral docstring at the top of `extension-registry.ts` documents:
+- Why deferred (contract-before-ecosystem, borrowing-review Round 10)
+- When to wire (as soon as the first concrete extension lands — third-party tool / prompt fragment / sub-agent)
+- What NOT to do (pre-emptively inject through `createServices` "just in case")
+
+Do not promote this entry to "wired" in the audit plan until at least one production call site reads the registry.
 
 ---
 
