@@ -224,4 +224,49 @@ describe("GpuServiceClient", () => {
     fetchMock.mockRejectedValueOnce(new TypeError("fetch failed"));
     await expect(client.getJobStatus("j1")).rejects.toThrow("fetch failed");
   });
+
+  // Reviewer Stage C MED #7: response.text() / response.json() throwing
+  // (e.g. mid-body connection drop, malformed JSON on success path)
+  // must surface as GpuServiceError with status preserved, not as raw
+  // TypeError or SyntaxError.
+
+  describe("body-read error guards (MED #7)", () => {
+    it("surfaces malformed JSON on 200 success as GpuServiceError(200)", async () => {
+      // Response with bad JSON body — .json() throws SyntaxError
+      fetchMock.mockResolvedValueOnce(
+        new Response("not-json-at-all", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      try {
+        await client.getJobStatus("j1");
+        expect.unreachable();
+      } catch (err) {
+        expect(err).toBeInstanceOf(GpuServiceError);
+        expect((err as GpuServiceError).status).toBe(200);
+        expect((err as GpuServiceError).message).toContain("not valid JSON");
+      }
+    });
+
+    it("surfaces text() throwing on error path as GpuServiceError", async () => {
+      // Construct a Response whose .text() throws (mid-body drop).
+      const broken = {
+        ok: false,
+        status: 502,
+        async text(): Promise<string> {
+          throw new TypeError("body stream dropped");
+        },
+      } as unknown as Response;
+      fetchMock.mockResolvedValueOnce(broken);
+      try {
+        await client.getJobStatus("j1");
+        expect.unreachable();
+      } catch (err) {
+        expect(err).toBeInstanceOf(GpuServiceError);
+        expect((err as GpuServiceError).status).toBe(502);
+        expect((err as GpuServiceError).message).toContain("body unreadable");
+      }
+    });
+  });
 });

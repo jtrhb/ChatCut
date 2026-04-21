@@ -75,10 +75,9 @@ describe("pollUntilTerminal", () => {
     expect(sleep).toHaveBeenCalledWith(100);
   });
 
-  it("synthesizes failed status when timeout exceeded before terminal state", async () => {
+  it("synthesizes failed status with synthesized=true when timeout exceeded", async () => {
     const sleep = vi.fn().mockResolvedValue(undefined);
     let t = 0;
-    // Each call advances time past the 1000ms timeout
     const now = vi.fn(() => {
       const v = t;
       t += 600;
@@ -92,9 +91,26 @@ describe("pollUntilTerminal", () => {
       timeoutMs: 1000,
     });
     expect(result.state).toBe("failed");
-    expect(result.error).toContain("polling timeout after 1000ms");
-    // Polled at least twice before timing out
+    if (result.state === "failed") {
+      expect(result.error).toContain("polling timeout after 1000ms");
+      // Reviewer Stage C HIGH #2: callers can distinguish real failure
+      // ("GPU said failed") from synthesized timeout ("agent gave up;
+      // GPU may still be running").
+      expect(result.synthesized).toBe(true);
+    }
     expect(calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("real-failure (GPU-reported) sets synthesized=undefined (not a flag)", async () => {
+    const { client } = makeClient([FAILED]);
+    const result = await pollUntilTerminal(client, "j1", {
+      sleep: vi.fn(),
+      now: () => 0,
+    });
+    expect(result.state).toBe("failed");
+    if (result.state === "failed") {
+      expect(result.synthesized).toBeUndefined();
+    }
   });
 
   it("propagates errors from getJobStatus", async () => {
@@ -137,5 +153,8 @@ describe("pollUntilTerminal", () => {
     expect(result.job_id).toBe("j-special");
     expect(result.progress).toBe(73);
     expect(result.state).toBe("failed");
+    if (result.state === "failed") {
+      expect(result.synthesized).toBe(true);
+    }
   });
 });

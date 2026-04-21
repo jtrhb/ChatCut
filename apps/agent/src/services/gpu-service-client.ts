@@ -27,13 +27,37 @@ export interface EnqueueRenderResult {
 
 export type JobState = "queued" | "running" | "done" | "failed";
 
-export interface JobStatusResult {
+/**
+ * Discriminated union: the `state` field narrows the rest of the shape.
+ * `done` always carries `result.storage_key`; `failed` always carries
+ * `error`; in-progress variants carry neither. Reviewer Stage C MED #5.
+ */
+export interface JobStatusInProgress {
   job_id: string;
-  state: JobState;
+  state: "queued" | "running";
   progress: number;
-  result?: { storage_key: string };
-  error?: string;
 }
+
+export interface JobStatusDone {
+  job_id: string;
+  state: "done";
+  progress: number;
+  result: { storage_key: string };
+}
+
+export interface JobStatusFailed {
+  job_id: string;
+  state: "failed";
+  progress: number;
+  error: string;
+  /** True for client-synthesized failures (e.g. polling timeout, GPU may still be running). */
+  synthesized?: boolean;
+}
+
+export type JobStatusResult = JobStatusInProgress | JobStatusDone | JobStatusFailed;
+
+/** The two terminal states pollUntilTerminal can return. */
+export type TerminalJobStatus = JobStatusDone | JobStatusFailed;
 
 /**
  * Thrown for any non-2xx response. Carries the HTTP status, a unwrapped
@@ -98,14 +122,37 @@ export class GpuServiceClient {
 
   private async _unwrap<T>(response: Response, op: string): Promise<T> {
     if (response.ok) {
-      return (await response.json()) as T;
+      // Reviewer Stage C MED #7: a 200 with malformed JSON should
+      // throw a clean GpuServiceError, not a raw SyntaxError.
+      try {
+        return (await response.json()) as T;
+      } catch (parseErr) {
+        throw new GpuServiceError(
+          response.status,
+          `${op} succeeded (HTTP ${response.status}) but body was not valid JSON: ${
+            parseErr instanceof Error ? parseErr.message : String(parseErr)
+          }`,
+        );
+      }
     }
     // FastAPI's HTTPException wraps the body under {"detail": ...}.
     // detail can be a string OR an object (e.g. our 501 stub returns
     // {error, phase}); unwrap both shapes into a clean GpuServiceError.
     // Read body once as text — failed JSON parse can't replay a fetch
-    // body (it's a one-shot stream).
-    const text = await response.text();
+    // body (it's a one-shot stream). Wrap the text() call too: a
+    // mid-body connection drop should surface as GpuServiceError, not
+    // a bare TypeError (reviewer Stage C MED #7).
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (readErr) {
+      throw new GpuServiceError(
+        response.status,
+        `${op} failed (HTTP ${response.status}); body unreadable: ${
+          readErr instanceof Error ? readErr.message : String(readErr)
+        }`,
+      );
+    }
     let body: { detail?: unknown } = { detail: text };
     if (text) {
       try {

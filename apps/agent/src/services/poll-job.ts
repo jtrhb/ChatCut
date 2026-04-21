@@ -9,7 +9,7 @@
 
 import type {
   GpuServiceClient,
-  JobStatusResult,
+  TerminalJobStatus,
 } from "./gpu-service-client.js";
 
 export interface PollJobOpts {
@@ -23,6 +23,9 @@ export interface PollJobOpts {
   now?: () => number;
 }
 
+// Reviewer Stage C LOW #1: these match the plan §D.1/§D.3 contract.
+// Stage D will replace with backoff (1.5s → 5s after 30s no-change);
+// keeping in sync with the plan doc is a manual responsibility until then.
 const DEFAULT_INTERVAL_MS = 1500;
 const DEFAULT_TIMEOUT_MS = 90_000;
 
@@ -32,31 +35,37 @@ const defaultSleep = (ms: number) =>
 /**
  * Poll `client.getJobStatus(jobId)` until the job is `done` or `failed`,
  * or until `timeoutMs` elapses. On timeout, returns a synthesized
- * `failed` status whose error names the timeout — caller treats it the
- * same as any other terminal failure.
+ * `failed` status with `synthesized: true` set so callers can
+ * distinguish "GPU said failed" (real failure, no recovery) from
+ * "agent timed out, GPU may still be running" (a later poll could
+ * reveal a successful render). Reviewer Stage C HIGH #2.
+ *
+ * Return type is narrowed to TerminalJobStatus so consumers don't
+ * need to handle queued/running cases.
  */
 export async function pollUntilTerminal(
   client: GpuServiceClient,
   jobId: string,
   opts: PollJobOpts = {},
-): Promise<JobStatusResult> {
+): Promise<TerminalJobStatus> {
   const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
 
   const start = now();
-  let last: JobStatusResult | null = null;
   while (true) {
-    last = await client.getJobStatus(jobId);
+    const last = await client.getJobStatus(jobId);
     if (last.state === "done" || last.state === "failed") {
       return last;
     }
     if (now() - start > timeoutMs) {
       return {
-        ...last,
+        job_id: last.job_id,
         state: "failed",
-        error: `polling timeout after ${timeoutMs}ms`,
+        progress: last.progress,
+        error: `polling timeout after ${timeoutMs}ms (synthesized; GPU may still be running)`,
+        synthesized: true,
       };
     }
     await sleep(intervalMs);

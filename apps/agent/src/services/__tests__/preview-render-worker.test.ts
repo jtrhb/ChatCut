@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import type {
-  GpuServiceClient,
-  JobStatusResult,
+import {
+  GpuServiceError,
+  type GpuServiceClient,
+  type JobStatusResult,
 } from "../gpu-service-client.js";
 import { handlePreviewRender } from "../preview-render-worker.js";
 
@@ -221,7 +222,14 @@ describe("handlePreviewRender", () => {
     const warn = vi.fn();
     const client = fakeClient({
       enqueueResult: { jobId: "j" },
-      statuses: [{ job_id: "j", state: "done", progress: 100 }],
+      statuses: [
+        {
+          job_id: "j",
+          state: "done",
+          progress: 100,
+          result: { storage_key: "previews/x/y.mp4" },
+        },
+      ],
     });
     const enqueueSpy = vi.spyOn(client, "enqueueRender");
     await handlePreviewRender(
@@ -233,5 +241,135 @@ describe("handlePreviewRender", () => {
       candidateId: "cand-1",
       snapshotStorageKey: "explorations/exp-1/abc.json",
     });
+  });
+
+  // Reviewer Stage C HIGH #3: transient errors (5xx + network) must
+  // re-throw so pg-boss retries them; permanent errors (4xx + GPU
+  // state="failed") must be swallowed.
+
+  it("re-throws GpuServiceError with status >= 500 (pg-boss retries)", async () => {
+    const log = vi.fn();
+    const warn = vi.fn();
+    const client = fakeClient({
+      enqueueThrows: new GpuServiceError(502, "bad gateway"),
+    });
+    await expect(
+      handlePreviewRender(
+        { data: PAYLOAD },
+        { gpuClient: client, log, warn },
+      ),
+    ).rejects.toMatchObject({ status: 502 });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("transient failure (will retry)"),
+    );
+  });
+
+  it("re-throws TypeError (network failure) for pg-boss retry", async () => {
+    const log = vi.fn();
+    const warn = vi.fn();
+    const client = fakeClient({
+      enqueueThrows: new TypeError("fetch failed"),
+    });
+    await expect(
+      handlePreviewRender(
+        { data: PAYLOAD },
+        { gpuClient: client, log, warn },
+      ),
+    ).rejects.toThrow("fetch failed");
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("transient failure (will retry)"),
+    );
+  });
+
+  it("swallows GpuServiceError with status 4xx (no retry)", async () => {
+    const log = vi.fn();
+    const warn = vi.fn();
+    const client = fakeClient({
+      enqueueThrows: new GpuServiceError(401, "invalid X-API-Key"),
+    });
+    await handlePreviewRender(
+      { data: PAYLOAD },
+      { gpuClient: client, log, warn },
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("invalid X-API-Key"),
+    );
+    expect(warn).not.toHaveBeenCalledWith(
+      expect.stringContaining("transient"),
+    );
+  });
+
+  it("does NOT re-throw on real GPU failure (state=failed); pg-boss moves on", async () => {
+    const log = vi.fn();
+    const warn = vi.fn();
+    const client = fakeClient({
+      enqueueResult: { jobId: "j" },
+      statuses: [
+        {
+          job_id: "j",
+          state: "failed",
+          progress: 50,
+          error: "melt subprocess crashed",
+        },
+      ],
+    });
+    // Should NOT throw — real GPU failures aren't transient
+    await handlePreviewRender(
+      { data: PAYLOAD },
+      { gpuClient: client, log, warn, pollOpts: NEVER_SLEEP },
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("melt subprocess crashed"),
+    );
+  });
+
+  it("flags synthesized timeout failures with [synthesized] in log line", async () => {
+    const log = vi.fn();
+    const warn = vi.fn();
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    let t = 0;
+    const now = vi.fn(() => {
+      const v = t;
+      t += 600;
+      return v;
+    });
+    const client = fakeClient({
+      enqueueResult: { jobId: "j-slow" },
+      statuses: [
+        { job_id: "j-slow", state: "running", progress: 25 },
+        { job_id: "j-slow", state: "running", progress: 25 },
+      ],
+    });
+    await handlePreviewRender(
+      { data: PAYLOAD },
+      {
+        gpuClient: client,
+        log,
+        warn,
+        pollOpts: { sleep, now, intervalMs: 50, timeoutMs: 1000 },
+      },
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("[synthesized]"),
+    );
+  });
+
+  // Reviewer Stage C MED #9: log-injection defense.
+  it("scrubs unsafe characters in IDs from log lines", async () => {
+    const log = vi.fn();
+    const warn = vi.fn();
+    await handlePreviewRender(
+      {
+        data: {
+          explorationId: "exp\nINJECTED",
+          candidateId: "cand\r\nINJECTED",
+          snapshotStorageKey: "explorations/x/y.json",
+        },
+      },
+      { gpuClient: null, log, warn },
+    );
+    const logged = log.mock.calls[0]![0] as string;
+    expect(logged).not.toContain("\n");
+    expect(logged).toContain("<invalid-id>");
   });
 });
