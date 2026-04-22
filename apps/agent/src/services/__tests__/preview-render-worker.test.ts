@@ -1093,6 +1093,211 @@ describe("handlePreviewRender", () => {
     });
   });
 
+  // ── NEW-1: sessionId threading for per-session SSE delivery ──────────
+  //
+  // The events route filter (apps/agent/src/routes/events.ts:37) drops
+  // events whose top-level `sessionId` doesn't match the connected
+  // subscriber. Worker emits without a sessionId silently never reach
+  // any subscriber. These tests pin the threading so a future regression
+  // (drop the field at the type, forget to spread, accidentally bury it
+  // inside `data`) breaks the build instead of breaking SSE silently.
+  describe("sessionId threading (NEW-1)", () => {
+    it("stamps top-level sessionId on tool.progress when supplied", async () => {
+      const bus = new EventBus();
+      const events: RuntimeEvent[] = [];
+      bus.onAll((e) => events.push(e));
+      const client = fakeClient({
+        enqueueResult: { jobId: "j-sess" },
+        statuses: [
+          { job_id: "j-sess", state: "running", progress: 50 },
+          {
+            job_id: "j-sess",
+            state: "done",
+            progress: 100,
+            result: { storage_key: "previews/exp-1/cand-1.mp4" },
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: { ...PAYLOAD, sessionId: "sess-abc" } },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          eventBus: bus,
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      const progress = events.filter((e) => e.type === "tool.progress");
+      expect(progress.length).toBeGreaterThan(0);
+      // Top-level (NOT inside `data`) — events.ts reads event.sessionId.
+      expect(progress.every((e) => e.sessionId === "sess-abc")).toBe(true);
+    });
+
+    it("stamps top-level sessionId on exploration.candidate_ready when supplied", async () => {
+      const bus = new EventBus();
+      const events: RuntimeEvent[] = [];
+      bus.onAll((e) => events.push(e));
+      const client = fakeClient({
+        enqueueResult: { jobId: "j-sess2" },
+        statuses: [
+          {
+            job_id: "j-sess2",
+            state: "done",
+            progress: 100,
+            result: { storage_key: "previews/exp-1/cand-1.mp4" },
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: { ...PAYLOAD, sessionId: "sess-xyz" } },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          eventBus: bus,
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      const ready = events.filter(
+        (e) => e.type === "exploration.candidate_ready",
+      );
+      expect(ready.length).toBe(1);
+      expect(ready[0]!.sessionId).toBe("sess-xyz");
+    });
+
+    it("stamps top-level sessionId on terminal-failed tool.progress emit", async () => {
+      // Reviewer MED-1: pollUntilTerminal fires onProgress on the
+      // terminal status before returning (poll-job.ts:94 for real
+      // failures, :106 for synthesized timeouts). That emit IS the
+      // user's only signal that the candidate failed — without
+      // sessionId, the per-session SSE filter drops it and the card
+      // hangs in "rendering" forever.
+      const bus = new EventBus();
+      const events: RuntimeEvent[] = [];
+      bus.onAll((e) => events.push(e));
+      const client = fakeClient({
+        enqueueResult: { jobId: "j-fail" },
+        statuses: [
+          {
+            job_id: "j-fail",
+            state: "failed",
+            progress: 30,
+            error: "melt subprocess crashed",
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: { ...PAYLOAD, sessionId: "sess-fail" } },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          eventBus: bus,
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      const progress = events.filter((e) => e.type === "tool.progress");
+      expect(progress.length).toBeGreaterThan(0);
+      // The terminal-failed emit must carry sessionId so the SSE filter
+      // routes it to the originating tab (the only place that can
+      // surface "render failed: ..." to the user).
+      expect(progress.every((e) => e.sessionId === "sess-fail")).toBe(true);
+      // No candidate_ready on failure — sanity check that the failure
+      // path didn't accidentally fire the success event.
+      expect(
+        events.some((e) => e.type === "exploration.candidate_ready"),
+      ).toBe(false);
+    });
+
+    it("stamps top-level sessionId on synthesized-timeout tool.progress emit", async () => {
+      // Re-review MED follow-up: the real-failure path is pinned above,
+      // but pollUntilTerminal also fires onProgress on the synthetic
+      // terminal it builds when timeoutMs elapses without a state
+      // change (poll-job.ts:99-107). A future refactor that
+      // special-cases that branch in emitProgress would silently break
+      // the timeout-after-no-response case for the per-session
+      // subscriber. Pin it.
+      const bus = new EventBus();
+      const events: RuntimeEvent[] = [];
+      bus.onAll((e) => events.push(e));
+      let t = 0;
+      const now = vi.fn(() => {
+        const v = t;
+        t += 600;
+        return v;
+      });
+      const client = fakeClient({
+        enqueueResult: { jobId: "j-slow" },
+        statuses: [
+          { job_id: "j-slow", state: "running", progress: 25 },
+          { job_id: "j-slow", state: "running", progress: 25 },
+        ],
+      });
+      await handlePreviewRender(
+        { data: { ...PAYLOAD, sessionId: "sess-timeout" } },
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          eventBus: bus,
+          pollOpts: {
+            sleep: vi.fn().mockResolvedValue(undefined),
+            now,
+            intervalMs: 50,
+            timeoutMs: 1000,
+          },
+        },
+      );
+      const progress = events.filter((e) => e.type === "tool.progress");
+      expect(progress.length).toBeGreaterThan(0);
+      expect(progress.every((e) => e.sessionId === "sess-timeout")).toBe(true);
+      // Confirm we're actually exercising the synthesized-timeout
+      // branch (not just hitting some other terminal that happened to
+      // fire onProgress).
+      const lastProgress = progress[progress.length - 1]!;
+      expect(lastProgress.data.text).toContain("polling timeout");
+    });
+
+    it("omits sessionId entirely when payload has none", async () => {
+      const bus = new EventBus();
+      const events: RuntimeEvent[] = [];
+      bus.onAll((e) => events.push(e));
+      const client = fakeClient({
+        enqueueResult: { jobId: "j-legacy" },
+        statuses: [
+          {
+            job_id: "j-legacy",
+            state: "done",
+            progress: 100,
+            result: { storage_key: "previews/exp-1/cand-1.mp4" },
+          },
+        ],
+      });
+      await handlePreviewRender(
+        { data: PAYLOAD }, // no sessionId
+        {
+          gpuClient: client,
+          log: vi.fn(),
+          warn: vi.fn(),
+          eventBus: bus,
+          pollOpts: NEVER_SLEEP,
+        },
+      );
+      // No `sessionId: undefined` either — the field is absent so the
+      // events.ts strict-equality filter (`event.sessionId !== sessionId`)
+      // can be reasoned about (undefined !== "sess-x" → drop) without
+      // an explicit-undefined surprise.
+      const all = events.filter(
+        (e) =>
+          e.type === "tool.progress" ||
+          e.type === "exploration.candidate_ready",
+      );
+      expect(all.length).toBeGreaterThan(0);
+      expect(all.every((e) => !("sessionId" in e))).toBe(true);
+    });
+  });
+
   // Reviewer Stage C MED #9: log-injection defense.
   it("scrubs unsafe characters in IDs from log lines", async () => {
     const log = vi.fn();

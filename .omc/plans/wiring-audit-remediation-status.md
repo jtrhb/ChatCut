@@ -208,7 +208,7 @@ the same UI-verification rule.
 These were observed while implementing Phases 1–5 but predate the
 work and were not regressed by it. Each warrants a separate ticket.
 
-### NEW-1 — `preview-render-worker` SSE events drop at session filter
+### NEW-1 — `preview-render-worker` SSE events drop at session filter — **FIXED (2026-04-22)**
 
 **Severity:** MEDIUM
 **Location:** `apps/agent/src/services/preview-render-worker.ts:158-170` and `:259-268`
@@ -227,9 +227,61 @@ DO carry `sessionId` via the Phase 5a HIGH-1 `wrappedProgress`
 plumbing and benefit from the Phase 5b CRIT-1 read fix immediately.
 Only the preview-render worker is affected.
 
-**Fix:** thread `sessionId` into `PreviewRenderJobData` at enqueue
-time; include it in both worker emit objects so the route filter
-matches.
+**Fix landed (2026-04-22):** `sessionId` is now optional on
+`ExploreParams` and `PreviewRenderJobData`; threaded from
+`master-agent.ts` (`explore_options` case) → `ExplorationEngine.explore`
+→ `jobQueue.enqueue("preview-render", ...)` → worker emits at top level
+of both `RuntimeEvent` envelopes. Reviewer-cycle additions: a soft warn
+fires at the master-agent call site if `currentIdentity?.sessionId` is
+missing (smoke signal that turn identity wasn't propagated upstream),
+and the failed-terminal `tool.progress` emit is also pinned by test —
+poll-job.ts fires `onProgress` on terminal failure (real or
+synthesized) so the user-facing "render failed: …" surface inherits
+the same per-session routing.
+
+#### NEW-1 follow-up — `exploration_sessions` row should persist `sessionId`
+
+**Severity:** LOW (deferred; not blocking NEW-1 closure)
+**Location:** `apps/agent/src/db/schema.ts` (`exploration_sessions` table)
++ `apps/agent/src/exploration/exploration-engine.ts` (insert at end of `explore()`)
+
+NEW-1 closes the in-flight SSE delivery path. It does NOT survive page
+reload mid-render: if the user reloads while a candidate is still
+rendering, the worker's `candidate_ready` emit fires with the original
+sessionId but the new tab subscribes with a new sessionId — the SSE
+filter drops it. The `/exploration` route already mints fresh signed
+URLs for completed renders via Stage E.2 writeback, so terminal
+state is recoverable, but real-time progress for a still-rendering
+candidate after reload is not.
+
+**Fix shape:** add a `sessionId text` column to the
+`exploration_sessions` schema; persist it from `ExploreParams.sessionId`
+at insert time; on reconnect the route can join sessions by
+`(projectId, sessionId)` to replay terminal state. Leave this as a
+follow-up because (a) reload-mid-render is rare and (b) it's a schema
+migration, not a runtime fix — out of scope for the closing audit
+fix.
+
+**Migration mechanic (re-review LOW follow-up):**
+- Column must be **nullable** — `ExploreParams.sessionId` is optional
+  per `apps/agent/src/exploration/exploration-engine.ts:60-65`, so
+  cron-sweep and other server-initiated callers will write NULL.
+- Use `bunx drizzle-kit push` (the project's only configured
+  drizzle-kit script — see `apps/agent/package.json:12` `db:push`) to
+  apply the schema after editing `apps/agent/src/db/schema.ts`. If a
+  generate-then-apply flow is preferred, add a `db:generate` script
+  first; do not hand-write the migration SQL.
+- Wire the route-side replay at `apps/agent/src/routes/events.ts`
+  (the per-session SSE subscribe site — `streamSSE` at line 30, the
+  same place the per-session filter at line 37 drops mismatched
+  events). On subscribe, look up `exploration_sessions WHERE
+  projectId=? AND sessionId=?` for any rows whose terminal state
+  (`preview_storage_keys` / `preview_render_failures`) is populated
+  and re-fire a one-shot `candidate_ready` (or `candidate_failed`)
+  for each before joining the live event stream. Without this
+  read-and-replay step the schema column is dead weight.
+  (`apps/agent/src/routes/exploration.ts` is the HTTP polling
+  fallback for completed renders — not the SSE channel.)
 
 ---
 
@@ -323,10 +375,11 @@ annotations.
 1. **5b Stage 2 — Web ghost preview UI.** Largest user-facing payoff;
    agent contract is already shipping ghost data the web is currently
    discarding.
-2. **NEW-1 fix — sessionId threading at preview-render-worker.**
-   Unblocks the existing `tool.progress` + `candidate_ready` SSE
-   handlers that have been silently dead since Phase 3 Stage E for
-   the preview-render path (other `tool.progress` paths work fine).
+2. ~~**NEW-1 fix — sessionId threading at preview-render-worker.**~~
+   **Closed 2026-04-22** — see "NEW-1 — `preview-render-worker` SSE
+   events drop at session filter — FIXED" above. Reload-recovery
+   follow-up (persist `sessionId` on `exploration_sessions` row) is
+   tracked there as LOW.
 3. **5d Stage 2 — Web canvas overlay UI.** Smaller scope than 5b
    Stage 2 but blocked on UX decisions about the annotation tool
    affordances.

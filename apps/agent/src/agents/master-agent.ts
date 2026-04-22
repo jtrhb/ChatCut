@@ -896,9 +896,26 @@ export class MasterAgent {
 						error: `explore_options input failed schema validation: ${parsed.error.message}`,
 					};
 				}
+				// NEW-1 + reviewer LOW-2: thread sessionId so the
+				// preview-render worker can stamp it on tool.progress and
+				// exploration.candidate_ready emits. The field is optional
+				// on ExploreParams to support future server-initiated
+				// callers (cron sweeps, etc.) that have no session — but
+				// every CURRENT caller is the explore_options tool, which
+				// is always invoked inside an authenticated turn. A
+				// missing sessionId here is a smoke signal that the turn
+				// identity wasn't propagated correctly upstream; warn so
+				// the silent SSE drop is visible in logs.
+				const turnSessionId = this.currentIdentity?.sessionId;
+				if (!turnSessionId) {
+					console.warn(
+						"[master-agent] explore_options invoked without a sessionId on currentIdentity — preview-render SSE events will not reach any per-session subscriber",
+					);
+				}
 				return this.explorationEngine.explore({
 					...parsed.data,
 					projectId,
+					sessionId: turnSessionId,
 				});
 			}
 

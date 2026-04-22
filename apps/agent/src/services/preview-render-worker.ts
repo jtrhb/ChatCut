@@ -74,6 +74,17 @@ export interface PreviewRenderJobData {
   // drains). Stage C.5 reads snapshotStorageKey only.
   timelineSnapshot?: unknown;
   durationSec?: number;
+  /**
+   * Originating turn's sessionId, threaded by ExplorationEngine
+   * (NEW-1 fix). Stamped at the top level of every emitted RuntimeEvent
+   * so the per-session SSE filter (`apps/agent/src/routes/events.ts:37`)
+   * delivers the event to the matching subscriber. Optional because
+   * legacy in-flight jobs (enqueued before this fix) lack the field;
+   * those emits stay system-wide and never reach a subscriber, which
+   * matches the previous broken behavior — no regression for a job
+   * that was already silent.
+   */
+  sessionId?: string;
 }
 
 export interface PreviewRenderHandlerDeps {
@@ -123,7 +134,8 @@ export async function handlePreviewRender(
 ): Promise<void> {
   const log = deps.log ?? ((msg) => console.log(msg));
   const warn = deps.warn ?? ((msg) => console.warn(msg));
-  const { explorationId, candidateId, snapshotStorageKey } = job.data;
+  const { explorationId, candidateId, snapshotStorageKey, sessionId } =
+    job.data;
   const tag = `explorationId=${safeForLog(explorationId)} candidateId=${safeForLog(candidateId)}`;
 
   if (!deps.gpuClient) {
@@ -158,6 +170,7 @@ export async function handlePreviewRender(
       eventBus.emit({
         type: "tool.progress",
         timestamp: Date.now(),
+        ...(sessionId ? { sessionId } : {}),
         data: {
           toolName: "render_preview",
           toolCallId,
@@ -259,6 +272,7 @@ export async function handlePreviewRender(
           eventBus.emit({
             type: "exploration.candidate_ready",
             timestamp: Date.now(),
+            ...(sessionId ? { sessionId } : {}),
             data: {
               explorationId,
               candidateId,

@@ -50,6 +50,19 @@ export interface ExploreParams {
    * multi-project deployments.
    */
   projectId: string;
+  /**
+   * Originating turn's sessionId. Threaded into each preview-render job
+   * payload so the worker can stamp `tool.progress` and
+   * `exploration.candidate_ready` events with the same sessionId; the
+   * SSE route (`apps/agent/src/routes/events.ts`) drops events whose
+   * top-level sessionId doesn't match the subscribed connection.
+   *
+   * Optional because callers outside an authenticated turn (cron sweeps,
+   * future server-initiated explorations) have no session — those emits
+   * stay system-wide and won't reach per-session SSE subscribers, which
+   * is the correct degradation.
+   */
+  sessionId?: string;
 }
 
 export interface CandidateResult {
@@ -173,6 +186,8 @@ export class ExplorationEngine {
         // 5. Enqueue preview-render job. snapshotStorageKey is the new
         // canonical reference; timelineSnapshot is kept for backwards-
         // compat with the legacy worker path until Stage C.5 rewires it.
+        // sessionId rides along so the worker's SSE emits land on the
+        // right per-session SSE subscriber (NEW-1 fix).
         await this.jobQueue.enqueue("preview-render", {
           explorationId,
           candidateId,
@@ -180,6 +195,7 @@ export class ExplorationEngine {
           commands: skeleton.commands,
           snapshotStorageKey,
           timelineSnapshot: params.timelineSnapshot,
+          ...(params.sessionId ? { sessionId: params.sessionId } : {}),
         });
       } catch (err) {
         if (snapshotStorageKey) {

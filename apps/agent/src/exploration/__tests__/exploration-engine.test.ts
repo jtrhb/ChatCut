@@ -113,6 +113,24 @@ describe("ExplorationEngine", () => {
     }
   });
 
+  // NEW-1: sessionId rides through enqueue payload so the worker can
+  // stamp it on emitted SSE events. Pin both branches — present and
+  // absent — so a future refactor that drops the spread or always sets
+  // `sessionId: undefined` breaks here.
+  it("threads sessionId into every preview-render payload when supplied", async () => {
+    await engine.explore({ ...BASE_PARAMS, sessionId: "sess-NEW1" });
+    for (const call of jobQueue.enqueue.mock.calls) {
+      expect(call[1]).toMatchObject({ sessionId: "sess-NEW1" });
+    }
+  });
+
+  it("omits sessionId from payload entirely when caller has none", async () => {
+    await engine.explore(BASE_PARAMS); // no sessionId
+    for (const call of jobQueue.enqueue.mock.calls) {
+      expect("sessionId" in (call[1] as object)).toBe(false);
+    }
+  });
+
   it("stores exploration session in DB", async () => {
     await engine.explore(BASE_PARAMS);
     expect(db.insert).toHaveBeenCalledTimes(1);
